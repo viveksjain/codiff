@@ -5,12 +5,9 @@
 // reviewer chose to include. Only those paths are committed — any other staged
 // changes are left untouched — so a reviewer can land part of a working tree.
 
-const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
-const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 
 const { git, validateRepositoryPath } = require('./git-state/common.cjs');
-const { spawnPty } = require('./pty.cjs');
 
 /**
  * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
@@ -54,10 +51,9 @@ const gitStreaming = (host, repoPath, args, onOutput) =>
     /** @type {import('node-pty').IPty} */
     let child;
     try {
-      child = spawnPty('git', ['-C', repoPath, ...args], {
+      child = host.spawnPty('git', ['-C', repoPath, ...args], {
         cols: TERMINAL_COLS,
         cwd: repoPath,
-        env: process.env,
         name: 'xterm-256color',
         rows: TERMINAL_ROWS,
       });
@@ -115,13 +111,13 @@ const createWalkthroughCommit = async (host, repoPath, request, onOutput) => {
     // Stage exactly the chosen paths (covers untracked files too), then commit
     // only those paths so previously-staged work on other files stays staged.
     await git(host, repoPath, ['add', '--', ...paths]);
-    const tempDirectory = mkdtempSync(join(tmpdir(), 'codiff-commit-message-'));
+    const tempDirectory = await host.mkdtemp('codiff-commit-message-');
     const messagePath = join(tempDirectory, 'message.txt');
     try {
-      writeFileSync(messagePath, message);
+      await host.writeFile(messagePath, message);
       await gitStreaming(host, repoPath, ['commit', '-F', messagePath, '--', ...paths], onOutput);
     } finally {
-      rmSync(tempDirectory, { force: true, recursive: true });
+      await host.rm(tempDirectory, { force: true, recursive: true });
     }
     const hash = (await git(host, repoPath, ['rev-parse', 'HEAD'])).trim();
     return { hash, status: 'committed' };

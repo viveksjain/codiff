@@ -8,6 +8,7 @@ import {
   getGitTestEnvironmentForSubprocess,
   withGitTestEnvironment,
 } from '../../core/__tests__/helpers/git.ts';
+import { createRecordingHost } from '../../core/__tests__/helpers/recording-host.ts';
 import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
@@ -133,5 +134,29 @@ test('streams hook output and returns stripped failure text', async () => {
       status: 'failed',
     });
     expect(await readFile(join(repoPath, 'example.txt'), 'utf8')).toBe('after\n');
+  });
+});
+
+test('commits through the host and preserves the exact message', async () => {
+  await withRepo(async (repoPath) => {
+    await writeFile(join(repoPath, 'a.txt'), 'a\n');
+    const { calls, host: recordingHost } = createRecordingHost(host);
+    const subject = `Fix "quoted" $HOME \`thing\` — naïve café`;
+    const body = "# not a comment line\nIt's 'single' and \"double\".\n\nSecond paragraph.";
+    const result = await createWalkthroughCommit(recordingHost, repoPath, {
+      body,
+      paths: ['a.txt'],
+      subject,
+    });
+
+    expect(result.status).toBe('committed');
+    // `git commit -F <file>` uses the `whitespace` cleanup mode, which keeps `#`
+    // lines and only trims surrounding blank lines.
+    expect((await git(repoPath, ['log', '-1', '--format=%B'])).trimEnd()).toBe(
+      `${subject}\n\n${body}`,
+    );
+    expect(calls.some(({ method }) => method === 'spawnPty')).toBe(true);
+    expect(calls.some(({ method }) => method === 'mkdtemp')).toBe(true);
+    expect(calls.some(({ method }) => method === 'rm')).toBe(true);
   });
 });
