@@ -1991,3 +1991,38 @@ test('readWorkingTreeState reads working-tree files only through the host', asyn
     expect(readPaths).toContain(join(repo, 'tracked.txt'));
   });
 });
+
+test('readWorkingTreeState batches untracked file reads and skips oversized files and symlinks', async () => {
+  await withGitTestEnvironment(async () => {
+    await using directory = await createTemporaryDirectory('codiff-host-batch-');
+    const repo = await realpath(directory.path);
+    await git(repo, ['init']);
+    await writeRepoFile(repo, 'committed.txt', 'base\n');
+    await commitAll(repo, 'Initial commit.');
+    await writeRepoFile(repo, 'a.txt', 'alpha\n');
+    await writeRepoFile(repo, 'b.txt', 'beta\n');
+    await writeRepoFile(repo, 'large.bin', Buffer.alloc(3 * 1024 * 1024, 1));
+    await symlink('/etc/hosts', join(repo, 'outside-link'));
+
+    const { calls, host: recordingHost } = createRecordingHost(host);
+    const state = await readWorkingTreeState(recordingHost, repo);
+
+    expect(calls.filter(({ method }) => method === 'lstatMany')).toHaveLength(1);
+    const readFilesCalls = calls.filter(({ method }) => method === 'readFiles');
+    expect(readFilesCalls).toHaveLength(1);
+    expect(readFilesCalls[0].args[0]).toEqual([join(repo, 'a.txt'), join(repo, 'b.txt')]);
+    expect(calls.filter(({ method }) => method === 'lstat' || method === 'readFile')).toHaveLength(
+      0,
+    );
+    expect(
+      calls.some(
+        ({ args, method }) => method === 'readlink' && args[0] === join(repo, 'outside-link'),
+      ),
+    ).toBe(true);
+
+    const byPath = new Map(state.files.map((file) => [file.path, file]));
+    expect(byPath.get('a.txt')?.sections[0].newFile?.contents).toBe('alpha\n');
+    expect(byPath.get('outside-link')?.sections[0].newFile?.contents).toBe('/etc/hosts');
+    expect(byPath.get('large.bin')?.sections[0].newFile).toBeUndefined();
+  });
+});

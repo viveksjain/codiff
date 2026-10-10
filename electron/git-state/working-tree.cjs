@@ -13,6 +13,7 @@ const {
   git,
   MAX_UNTRACKED_INITIAL_ITEMS,
   parseStatus,
+  prefetchWorkingTreeFiles,
   readFileStat,
   readGitImageFile,
   readIndexImageFile,
@@ -227,6 +228,13 @@ const readWorkingTreeState = async (host, launchPath, options = {}) => {
     listUntrackedItems(host, repoRoot),
   ]);
   const status = [...parseStatus(trackedStatus), ...untrackedItems].sort(fileSort);
+  const prefetchedFiles = await prefetchWorkingTreeFiles(
+    host,
+    repoRoot,
+    status
+      .filter((item) => item.untracked && !item.directory && !item.summary)
+      .map((item) => item.path),
+  );
   const shouldUsePatchOnly = options.eagerContents === false;
   const [stagedPatches, unstagedPatches] = shouldUsePatchOnly
     ? await Promise.all([
@@ -257,6 +265,7 @@ const readWorkingTreeState = async (host, launchPath, options = {}) => {
         await createSection(host, repoRoot, item, 'unstaged', {
           patch: item.status === 'conflicted' ? undefined : unstagedPatches.get(item.path),
           patchOnly,
+          prefetched: item.untracked ? prefetchedFiles.get(item.path) : undefined,
           showWhitespace: options.showWhitespace,
         }),
       );

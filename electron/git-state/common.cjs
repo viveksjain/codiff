@@ -31,7 +31,8 @@ const { isAbsolute, join, normalize, sep } = require('node:path');
  *   unstaged: boolean;
  *   untracked: boolean;
  * }} StatusItem
- * @typedef {{force?: boolean; patch?: {binary: boolean; patch: string}; patchOnly?: boolean; showWhitespace?: boolean}} ReadFileOptions
+ * @typedef {{contents?: Buffer; stat: HostStat | undefined}} PrefetchedWorkingTreeFile
+ * @typedef {{force?: boolean; patch?: {binary: boolean; patch: string}; patchOnly?: boolean; prefetched?: PrefetchedWorkingTreeFile; showWhitespace?: boolean}} ReadFileOptions
  * @typedef {{number: number; owner: string; repo: string; url: string}} PullRequestReference
  * @typedef {{owner: string; repo: string}} GitHubRemote
  * @typedef {{filename: string; patch?: string; previous_filename?: string; status: string}} GitHubPullRequestFile
@@ -285,6 +286,44 @@ const readFileStat = async (host, repoRoot, path) => {
   }
 };
 
+/**
+ * Stat many working-tree paths in one host round trip, then read every regular
+ * file that fits the eager text limit in a second one. Symlinks and oversized
+ * files keep their stat but are not read, matching `readWorkingTreeFile`.
+ *
+ * @param {RepositoryHost} host
+ * @param {string} repoRoot
+ * @param {ReadonlyArray<string>} paths
+ * @returns {Promise<Map<string, PrefetchedWorkingTreeFile>>}
+ */
+const prefetchWorkingTreeFiles = async (host, repoRoot, paths) => {
+  /** @type {Map<string, PrefetchedWorkingTreeFile>} */
+  const prefetched = new Map();
+  if (paths.length === 0) {
+    return prefetched;
+  }
+  const stats = await host.lstatMany(paths.map((path) => join(repoRoot, path)));
+  /** @type {Array<string>} */
+  const readablePaths = [];
+  paths.forEach((path, index) => {
+    const stat = stats[index] ?? undefined;
+    prefetched.set(path, { stat });
+    if (stat?.type === 'file' && stat.size <= EAGER_TEXT_FILE_LIMIT) {
+      readablePaths.push(path);
+    }
+  });
+  if (readablePaths.length > 0) {
+    const contents = await host.readFiles(readablePaths.map((path) => join(repoRoot, path)));
+    readablePaths.forEach((path, index) => {
+      const value = contents[index];
+      if (Buffer.isBuffer(value)) {
+        prefetched.set(path, { contents: value, stat: prefetched.get(path)?.stat });
+      }
+    });
+  }
+  return prefetched;
+};
+
 /** @param {RepositoryHost} host @param {string} repoRoot @param {string} spec */
 const getBlobSize = async (host, repoRoot, spec) => {
   try {
@@ -478,7 +517,9 @@ const readWorkingTreeFile = async (host, repoRoot, path, options = {}) => {
   const limit = options.force ? MANUAL_TEXT_FILE_LIMIT : EAGER_TEXT_FILE_LIMIT;
 
   try {
-    const stat = await readFileStat(host, repoRoot, path);
+    const stat = options.prefetched
+      ? options.prefetched.stat
+      : await readFileStat(host, repoRoot, path);
     if (!stat) {
       throw new Error('File is missing.');
     }
@@ -552,7 +593,7 @@ const readWorkingTreeFile = async (host, repoRoot, path, options = {}) => {
       };
     }
 
-    const buffer = await host.readFile(join(repoRoot, path));
+    const buffer = options.prefetched?.contents ?? (await host.readFile(join(repoRoot, path)));
     return bufferToTextFile(path, buffer, `worktree:${path}:${buffer.length}`);
   } catch {
     return {
@@ -847,6 +888,7 @@ module.exports = {
   gitOrEmpty,
   normalizeStatus,
   parseStatus,
+  prefetchWorkingTreeFiles,
   readFileStat,
   readGitFile,
   readGitImageFile,

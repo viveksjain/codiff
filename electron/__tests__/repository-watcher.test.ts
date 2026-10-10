@@ -511,3 +511,15 @@ test('readRepositoryWatcherSnapshot stats dirty paths through the host', async (
     .flatMap(({ args }) => (Array.isArray(args[0]) ? args[0] : [args[0]]));
   expect(statted).toContain(join(repo, 'a.txt'));
 });
+
+test('readRepositoryWatcherSnapshot uses one batched stat for all dirty paths', async () => {
+  await using directory = await createTemporaryDirectory('codiff-watcher-batch-');
+  const repo = await createDirtyRepository(directory, ['a.txt', 'b.txt', 'c.txt']);
+  const { calls, host: recordingHost } = createRecordingHost(host);
+  const batched = await readRepositoryWatcherSnapshot(recordingHost, repo, ['a.txt']);
+  expect(calls.filter(({ method }) => method === 'lstatMany')).toHaveLength(1);
+  expect(calls.filter(({ method }) => method === 'lstat')).toHaveLength(0);
+  expect(Object.keys(batched.pathSignatures)).toEqual(['a.txt', 'b.txt', 'c.txt']);
+  expect(batched.pathVersions?.['a.txt']).toBeDefined();
+  expect(batched).toEqual(await readRepositoryWatcherSnapshot(host, repo, ['a.txt']));
+});

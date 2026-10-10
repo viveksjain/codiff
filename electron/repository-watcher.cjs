@@ -3,7 +3,10 @@
 const { join, sep } = require('node:path');
 const { getFingerprint, git } = require('./git-state/common.cjs');
 
-/** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
+/**
+ * @typedef {import('./host/repository-host.cjs').HostStat} HostStat
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
+ */
 
 const FOCUSED_POLL_INTERVAL = 2500;
 const HIDDEN_POLL_INTERVAL = 30_000;
@@ -76,22 +79,28 @@ const parseRepositoryWatcherStatus = (raw) => {
  * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} path
- * @param {boolean} exact
+ * @param {HostStat | null} stat
+ * @param {{contents?: Buffer | Error; exact: boolean}} options
  */
-const readRepositoryWatcherPathState = async (host, repoRoot, path, exact) => {
+const describeRepositoryWatcherPath = async (host, repoRoot, path, stat, options) => {
+  if (!stat) {
+    return { metadata: `${path}\0missing` };
+  }
+  const metadata = `${path}\0${stat.type}\0${stat.mode}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.ino}`;
+  if (!options.exact) {
+    return { metadata };
+  }
+  // The previous per-path implementation reported a path as missing when its
+  // exact read failed after a successful lstat; keep that signature.
+  if (stat.type === 'file' && !Buffer.isBuffer(options.contents)) {
+    return { metadata: `${path}\0missing` };
+  }
   try {
-    const absolutePath = join(repoRoot, path);
-    const stat = await host.lstat(absolutePath);
-    const metadata = `${path}\0${stat.type}\0${stat.mode}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.ino}`;
-    if (!exact) {
-      return { metadata };
-    }
-
     const version =
       stat.type === 'symlink'
-        ? getFingerprint(await host.readlink(absolutePath))
-        : stat.type === 'file'
-          ? getFingerprint(await host.readFile(absolutePath))
+        ? getFingerprint(await host.readlink(join(repoRoot, path)))
+        : stat.type === 'file' && Buffer.isBuffer(options.contents)
+          ? getFingerprint(options.contents)
           : undefined;
     return { metadata, version };
   } catch {
@@ -131,10 +140,23 @@ const readRepositoryWatcherSnapshot = async (
   );
   const statusPaths = new Set([...status.paths, ...knownDirtyPathSet]);
   const paths = new Set([...statusPaths, ...normalizedExactPaths]);
+  const pathList = [...paths];
+  const stats = await host.lstatMany(pathList.map((path) => join(repoRoot, path)));
+  const exactFilePaths = pathList.filter(
+    (path, index) => normalizedExactPaths.has(path) && stats[index]?.type === 'file',
+  );
+  const exactFileContents = await host.readFiles(
+    exactFilePaths.map((path) => join(repoRoot, path)),
+  );
+  /** @type {Map<string, Buffer | Error>} */
+  const exactFiles = new Map(exactFilePaths.map((path, index) => [path, exactFileContents[index]]));
   const states = await Promise.all(
-    [...paths].map(async (path) => [
+    pathList.map(async (path, index) => [
       path,
-      await readRepositoryWatcherPathState(host, repoRoot, path, normalizedExactPaths.has(path)),
+      await describeRepositoryWatcherPath(host, repoRoot, path, stats[index], {
+        contents: exactFiles.get(path),
+        exact: normalizedExactPaths.has(path),
+      }),
     ]),
   );
   /** @type {Record<string, string>} */
