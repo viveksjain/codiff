@@ -1,15 +1,20 @@
 // @ts-check
 
 const { execFile, spawn } = require('node:child_process');
-const { promises: fs } = require('node:fs');
+const { promises: fs, realpath: realpathCallback } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
+const { promisify } = require('node:util');
 const { spawnPty } = require('../pty.cjs');
 
 /**
  * @typedef {import('./repository-host.cjs').HostStat} HostStat
  * @typedef {import('./repository-host.cjs').RepositoryHost} RepositoryHost
  */
+
+// Node's JS realpath (not the native realpath(3) behind fs.promises.realpath),
+// matching the pre-host window identity code on Windows and macOS.
+const realpath = promisify(realpathCallback);
 
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 64;
 
@@ -140,7 +145,7 @@ const createLocalHost = () =>
     readFile: (path) => fs.readFile(path),
     readFiles: (paths) => Promise.all(paths.map((path) => fs.readFile(path).catch(toError))),
     readlink: (path) => fs.readlink(path),
-    realpath: (path) => fs.realpath(path),
+    realpath: (path) => realpath(path),
     rename: (from, to) => fs.rename(from, to),
     rm: (path, options = {}) => fs.rm(path, options),
     spawn: (command, args, options = {}) =>

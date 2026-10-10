@@ -1,4 +1,7 @@
+import { realpathSync } from 'node:fs';
+import { mkdir, symlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { expect, test } from 'vite-plus/test';
 import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
 import type { RepositoryHost } from '../host/repository-host.cjs';
@@ -41,4 +44,13 @@ test('LocalHost reads the process environment at call time', async () => {
   } finally {
     delete process.env.CODIFF_LOCAL_HOST_LATE;
   }
+});
+
+test('LocalHost.realpath matches the synchronous JS realpath through a symlink', async () => {
+  await using directory = await createTemporaryDirectory('codiff-local-host-realpath-');
+  const target = join(directory.path, 'target');
+  const link = join(directory.path, 'link');
+  await mkdir(target);
+  await symlink(target, link);
+  expect(await createLocalHost().realpath(link)).toBe(realpathSync(link));
 });
