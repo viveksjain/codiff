@@ -1,6 +1,5 @@
 // @ts-check
 
-const { spawn } = require('node:child_process');
 const { dirname, extname } = require('node:path');
 const { gitOrEmpty, validateRepositoryPath } = require('./git-state/common.cjs');
 
@@ -177,7 +176,7 @@ const createAbortError = () => {
  * @param {RepositoryHost} host
  * @param {string} repoPath
  * @param {ReadonlyArray<string>} args
- * @param {{maxMatches?: number; maxOutputBytes?: number; signal?: AbortSignal; spawnProcess?: typeof spawn; timeoutMs?: number}} [options]
+ * @param {{maxMatches?: number; maxOutputBytes?: number; signal?: AbortSignal; timeoutMs?: number}} [options]
  * @returns {Promise<string>}
  */
 const runBoundedGitGrep = (
@@ -188,7 +187,6 @@ const runBoundedGitGrep = (
     maxMatches = MAX_SEARCH_MATCHES,
     maxOutputBytes = MAX_SEARCH_OUTPUT_BYTES,
     signal,
-    spawnProcess = spawn,
     timeoutMs = SEARCH_TIMEOUT_MS,
   } = {},
 ) =>
@@ -198,9 +196,8 @@ const runBoundedGitGrep = (
       return;
     }
 
-    const child = spawnProcess('git', ['-C', repoPath, ...args], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = host.spawn('git', ['-C', repoPath, ...args]);
+    child.stdin.end();
     /** @type {Array<Buffer>} */
     const stdout = [];
     /** @type {Array<Buffer>} */

@@ -1,7 +1,5 @@
 // @ts-check
 
-const { mkdtemp, rm } = require('node:fs/promises');
-const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { gitBufferWithInput } = require('./git-state/common.cjs');
 const { isGeneratedWalkthroughPath } = require('../core/lib/narrative-walkthrough-diff.cjs');
@@ -53,7 +51,7 @@ const parseGeneratedAttributeStates = (output) => {
  * @param {string} repoRoot
  * @param {ReadonlyArray<string>} paths
  * @param {ReadonlyArray<string>} options
- * @param {Readonly<Record<string, string>>} [env]
+ * @param {Readonly<Record<string, string>> | undefined} [env]
  */
 const checkGeneratedAttributeStates = async (host, repoRoot, paths, options, env) =>
   parseGeneratedAttributeStates(
@@ -77,14 +75,14 @@ const checkGeneratedAttributeStates = async (host, repoRoot, paths, options, env
  * @param {string} source
  */
 const readGeneratedAttributeStatesFromTree = async (host, repoRoot, paths, source) => {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'codiff-generated-files-'));
+  const temporaryDirectory = await host.mkdtemp('codiff-generated-files-');
   const env = { GIT_INDEX_FILE: join(temporaryDirectory, 'index') };
 
   try {
     await gitBufferWithInput(host, repoRoot, ['read-tree', source], Buffer.alloc(0), { env });
     return await checkGeneratedAttributeStates(host, repoRoot, paths, ['--cached'], env);
   } finally {
-    await rm(temporaryDirectory, { force: true, recursive: true });
+    await host.rm(temporaryDirectory, { force: true, recursive: true });
   }
 };
 

@@ -50,7 +50,6 @@ const {
       maxMatches?: number;
       maxOutputBytes?: number;
       signal?: AbortSignal;
-      spawnProcess?: typeof import('node:child_process').spawn;
       timeoutMs?: number;
     },
   ) => Promise<string>;
@@ -156,18 +155,32 @@ const createFakeGitProcess = () => {
       return true;
     },
     stderr: new PassThrough(),
+    stdin: new PassThrough(),
     stdout: new PassThrough(),
   });
   return child;
 };
 
+const createFakeHost = (child: ReturnType<typeof createFakeGitProcess>) => {
+  const spawned: Array<{ args: ReadonlyArray<string>; command: string }> = [];
+  const fakeHost = {
+    id: 'fake',
+    label: 'fake',
+    spawn: (command: string, args: ReadonlyArray<string>) => {
+      spawned.push({ args, command });
+      return child;
+    },
+  } as unknown as RepositoryHost;
+  return { fakeHost, spawned };
+};
+
 test('stops git grep after the global result limit', async () => {
   const child = createFakeGitProcess();
   const kill = vi.spyOn(child, 'kill');
-  const output = runBoundedGitGrep(host, '/repo', ['grep'], {
+  const { fakeHost, spawned } = createFakeHost(child);
+  const output = runBoundedGitGrep(fakeHost, '/repo', ['grep'], {
     maxMatches: 2,
     maxOutputBytes: 1024,
-    spawnProcess: (() => child) as unknown as typeof import('node:child_process').spawn,
     timeoutMs: 1000,
   });
   child.stdout.write(
@@ -177,16 +190,17 @@ test('stops git grep after the global result limit', async () => {
   );
 
   expect(parseGrepOutput(await output, null)).toHaveLength(2);
+  expect(spawned).toEqual([{ args: ['-C', '/repo', 'grep'], command: 'git' }]);
   expect(kill).toHaveBeenCalledOnce();
 });
 
 test('stops git grep at the global output byte limit', async () => {
   const child = createFakeGitProcess();
   const kill = vi.spyOn(child, 'kill');
-  const output = runBoundedGitGrep(host, '/repo', ['grep'], {
+  const { fakeHost } = createFakeHost(child);
+  const output = runBoundedGitGrep(fakeHost, '/repo', ['grep'], {
     maxMatches: 100,
     maxOutputBytes: 32,
-    spawnProcess: (() => child) as unknown as typeof import('node:child_process').spawn,
     timeoutMs: 1000,
   });
   child.stdout.write('src/large.ts\u00001\u0000' + 'x'.repeat(100) + '\n');
@@ -198,8 +212,8 @@ test('stops git grep at the global output byte limit', async () => {
 test('kills git grep when the search times out', async () => {
   const child = createFakeGitProcess();
   const kill = vi.spyOn(child, 'kill');
-  const output = runBoundedGitGrep(host, '/repo', ['grep'], {
-    spawnProcess: (() => child) as unknown as typeof import('node:child_process').spawn,
+  const { fakeHost } = createFakeHost(child);
+  const output = runBoundedGitGrep(fakeHost, '/repo', ['grep'], {
     timeoutMs: 1,
   });
 

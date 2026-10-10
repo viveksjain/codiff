@@ -337,6 +337,37 @@ test('commit reviews evaluate generated attributes from the reviewed commit', as
   });
 });
 
+test('the historical-tree attribute fallback uses and removes a host temporary directory', async () => {
+  await withGitTestEnvironment(async () => {
+    await using directory = await createTemporaryDirectory('codiff-host-attributes-');
+    const repo = await realpath(directory.path);
+    await git(repo, ['init']);
+    await writeRepoFile(repo, '.gitattributes', 'generated.ts linguist-generated\n');
+    await writeRepoFile(repo, 'generated.ts', 'export {};\n');
+    await commitAll(repo, 'Initial commit.');
+
+    const { calls, host: recordingHost } = createRecordingHost({
+      ...host,
+      // Simulate Git < 2.40, which rejects `check-attr --source`.
+      exec: (command, args, options) =>
+        args.includes('--source')
+          ? Promise.reject(new Error('unknown option `source`'))
+          : host.exec(command, args, options),
+    });
+    const states = await readGeneratedAttributeStates(
+      recordingHost,
+      repo,
+      ['generated.ts'],
+      'HEAD',
+    );
+
+    expect(states.get('generated.ts')).toBe(true);
+    const temporary = calls.find(({ method }) => method === 'mkdtemp');
+    expect(temporary).toBeDefined();
+    expect(calls.some(({ method }) => method === 'rm')).toBe(true);
+  });
+});
+
 test('historical generated attributes fall back to a temporary index without --source', async () => {
   await withRepo(async (repo) => {
     await writeRepoFile(
