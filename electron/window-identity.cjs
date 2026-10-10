@@ -1,11 +1,12 @@
 // @ts-check
 
-const { execFileSync } = require('node:child_process');
 const { realpathSync } = require('node:fs');
 const { dirname, resolve } = require('node:path');
+const { git } = require('./git-state/common.cjs');
 const { parseReviewUrl } = require('./review-source.cjs');
 
 /**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../core/types.ts').ReviewSource} ReviewSource
  * @typedef {import('../core/types.ts').CodiffLaunchOptions} CodiffLaunchOptions
  * @typedef {{key: string; repositoryRoot: string; sourceKey: string}} WindowIdentity
@@ -21,27 +22,32 @@ const getRealPath = (path) => {
   }
 };
 
-/** @param {string} repositoryPath */
-const resolveRepositoryRoot = (repositoryPath) => {
-  const resolvedPath = resolve(repositoryPath);
-
+/** @param {RepositoryHost} host @param {string} path */
+const getHostRealPath = async (host, path) => {
   try {
-    return getRealPath(
-      execFileSync('git', ['-C', resolvedPath, 'rev-parse', '--show-toplevel'], {
-        encoding: 'utf8',
-      }).trim(),
-    );
+    return await host.realpath(path);
   } catch {
-    return getRealPath(resolvedPath);
+    return path;
   }
 };
 
-/** @param {string} repositoryRoot @param {string} ref */
-const resolveCommitRef = (repositoryRoot, ref) => {
+/** @param {RepositoryHost} host @param {string} repositoryPath */
+const resolveRepositoryRoot = async (host, repositoryPath) => {
+  const resolvedPath = resolve(repositoryPath);
   try {
-    return execFileSync('git', ['-C', repositoryRoot, 'rev-parse', '--verify', `${ref}^{commit}`], {
-      encoding: 'utf8',
-    })
+    return await getHostRealPath(
+      host,
+      (await git(host, resolvedPath, ['rev-parse', '--show-toplevel'])).trim(),
+    );
+  } catch {
+    return getHostRealPath(host, resolvedPath);
+  }
+};
+
+/** @param {RepositoryHost} host @param {string} repositoryRoot @param {string} ref */
+const resolveCommitRef = async (host, repositoryRoot, ref) => {
+  try {
+    return (await git(host, repositoryRoot, ['rev-parse', '--verify', `${ref}^{commit}`]))
       .trim()
       .toLowerCase();
   } catch {
@@ -49,29 +55,26 @@ const resolveCommitRef = (repositoryRoot, ref) => {
   }
 };
 
-/** @param {string} repositoryRoot */
-const hasWorkingTreeChanges = (repositoryRoot) => {
+/** @param {RepositoryHost} host @param {string} repositoryRoot */
+const hasWorkingTreeChanges = async (host, repositoryRoot) => {
   try {
     return Boolean(
-      execFileSync(
-        'git',
-        ['-C', repositoryRoot, 'status', '--porcelain=v1', '-z', '--untracked-files=normal'],
-        { encoding: 'utf8' },
-      ),
+      await git(host, repositoryRoot, [
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--untracked-files=normal',
+      ]),
     );
   } catch {
     return false;
   }
 };
 
-/** @param {string} repositoryRoot @param {string} baseRef @param {string} headRef */
-const resolveMergeBase = (repositoryRoot, baseRef, headRef) => {
+/** @param {RepositoryHost} host @param {string} repositoryRoot @param {string} baseRef @param {string} headRef */
+const resolveMergeBase = async (host, repositoryRoot, baseRef, headRef) => {
   try {
-    return execFileSync('git', ['-C', repositoryRoot, 'merge-base', baseRef, headRef], {
-      encoding: 'utf8',
-    })
-      .trim()
-      .toLowerCase();
+    return (await git(host, repositoryRoot, ['merge-base', baseRef, headRef])).trim().toLowerCase();
   } catch {
     return null;
   }
@@ -107,27 +110,28 @@ const getPullRequestSourceKey = (source) => {
     : null;
 };
 
-/** @param {string} repositoryRoot @param {ReviewSource} [source] */
-const getSourceKey = (repositoryRoot, source = { type: 'working-tree' }) => {
+/** @param {RepositoryHost} host @param {string} repositoryRoot @param {ReviewSource} [source] */
+const getSourceKey = async (host, repositoryRoot, source = { type: 'working-tree' }) => {
   if (source.type === 'working-tree') {
     return 'working-tree';
   }
 
   if (source.type === 'commit') {
-    const commit = resolveCommitRef(repositoryRoot, source.ref);
+    const commit = await resolveCommitRef(host, repositoryRoot, source.ref);
     return commit ? `commit:${commit}` : null;
   }
 
   if (source.type === 'branch') {
-    const head = resolveCommitRef(repositoryRoot, 'HEAD');
-    const target = resolveCommitRef(repositoryRoot, source.ref);
-    const nextBase = target && head ? resolveMergeBase(repositoryRoot, target, head) : null;
+    const head = await resolveCommitRef(host, repositoryRoot, 'HEAD');
+    const target = await resolveCommitRef(host, repositoryRoot, source.ref);
+    const nextBase =
+      target && head ? await resolveMergeBase(host, repositoryRoot, target, head) : null;
     return nextBase && head ? `branch-diff:${source.ref}:${nextBase}:${head}` : null;
   }
 
   if (source.type === 'branch-diff') {
-    const base = resolveCommitRef(repositoryRoot, source.baseRef);
-    const head = resolveCommitRef(repositoryRoot, source.headRef);
+    const base = await resolveCommitRef(host, repositoryRoot, source.baseRef);
+    const head = await resolveCommitRef(host, repositoryRoot, source.headRef);
     return base && head ? `branch-diff:${source.ref}:${base}:${head}` : null;
   }
 
@@ -138,14 +142,15 @@ const getSourceKey = (repositoryRoot, source = { type: 'working-tree' }) => {
       source.baseRef &&
       source.headRef
     ) {
-      const base = resolveCommitRef(repositoryRoot, source.baseRef);
-      const head = resolveCommitRef(repositoryRoot, source.headRef);
+      const base = await resolveCommitRef(host, repositoryRoot, source.baseRef);
+      const head = await resolveCommitRef(host, repositoryRoot, source.headRef);
       return base && head ? `branch-working-tree:${source.ref}:${base}:${head}` : null;
     }
 
-    const head = resolveCommitRef(repositoryRoot, 'HEAD');
-    const target = resolveCommitRef(repositoryRoot, source.ref);
-    const nextBase = target && head ? resolveMergeBase(repositoryRoot, target, head) : null;
+    const head = await resolveCommitRef(host, repositoryRoot, 'HEAD');
+    const target = await resolveCommitRef(host, repositoryRoot, source.ref);
+    const nextBase =
+      target && head ? await resolveMergeBase(host, repositoryRoot, target, head) : null;
     return nextBase && head ? `branch-working-tree:${source.ref}:${nextBase}:${head}` : null;
   }
 
@@ -176,9 +181,15 @@ const getResolvedSourceKey = (source) => {
   return null;
 };
 
-/** @param {string} repositoryPath @param {Partial<CodiffLaunchOptions>} [launchOptions] */
-const getWindowIdentity = (repositoryPath, launchOptions = {}) => {
+/**
+ * @param {RepositoryHost} host
+ * @param {string} repositoryPath
+ * @param {Partial<CodiffLaunchOptions>} [launchOptions]
+ * @returns {Promise<WindowIdentity | null>}
+ */
+const getWindowIdentity = async (host, repositoryPath, launchOptions = {}) => {
   if (launchOptions.planFile) {
+    // Plan files always live on this machine, whichever host the repository is on.
     const planPath = getRealPath(launchOptions.planFile);
     const resultPath = launchOptions.planResultFile
       ? getRealPath(launchOptions.planResultFile)
@@ -189,17 +200,17 @@ const getWindowIdentity = (repositoryPath, launchOptions = {}) => {
       sourceKey: `plan:${planPath}`,
     };
   }
-  const repositoryRoot = resolveRepositoryRoot(repositoryPath);
+  const repositoryRoot = await resolveRepositoryRoot(host, repositoryPath);
   const implicitWalkthroughHead =
     launchOptions.walkthrough &&
     !launchOptions.walkthroughFile &&
     !launchOptions.source &&
-    !hasWorkingTreeChanges(repositoryRoot)
-      ? resolveCommitRef(repositoryRoot, 'HEAD')
+    !(await hasWorkingTreeChanges(host, repositoryRoot))
+      ? await resolveCommitRef(host, repositoryRoot, 'HEAD')
       : null;
   const sourceKey = implicitWalkthroughHead
     ? `commit:${implicitWalkthroughHead}`
-    : getSourceKey(repositoryRoot, launchOptions.source);
+    : await getSourceKey(host, repositoryRoot, launchOptions.source);
   return sourceKey
     ? {
         key: `${repositoryRoot}\0${sourceKey}`,
@@ -209,13 +220,17 @@ const getWindowIdentity = (repositoryPath, launchOptions = {}) => {
     : null;
 };
 
-/** @param {string} repositoryPath @param {ReviewSource} source */
-const getWindowIdentityForSource = (repositoryPath, source) =>
-  getWindowIdentity(repositoryPath, { source });
+/** @param {RepositoryHost} host @param {string} repositoryPath @param {ReviewSource} source */
+const getWindowIdentityForSource = (host, repositoryPath, source) =>
+  getWindowIdentity(host, repositoryPath, { source });
 
-/** @param {{root: string; source: ReviewSource}} state */
-const getWindowIdentityForRepositoryState = (state) => {
-  const repositoryRoot = getRealPath(state.root);
+/**
+ * @param {RepositoryHost} host
+ * @param {{root: string; source: ReviewSource}} state
+ * @returns {Promise<WindowIdentity | null>}
+ */
+const getWindowIdentityForRepositoryState = async (host, state) => {
+  const repositoryRoot = await getHostRealPath(host, state.root);
   const sourceKey = getResolvedSourceKey(state.source);
   return sourceKey
     ? {

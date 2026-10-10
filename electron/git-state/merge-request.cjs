@@ -203,9 +203,9 @@ const mergeRequestEndpoint = (mergeRequest, suffix = '') =>
 const getGitLabDiscussionReplyEndpoint = (mergeRequest, threadId) =>
   mergeRequestEndpoint(mergeRequest, `/discussions/${encodeURIComponent(threadId)}/notes`);
 
-/** @param {string} repoRoot @param {ReturnType<typeof parseGitLabMergeRequestUrl>} mergeRequest */
-const selectMergeRequestRemote = (repoRoot, mergeRequest) => {
-  const remote = readReviewRemotes(repoRoot)
+/** @param {RepositoryHost} host @param {string} repoRoot @param {ReturnType<typeof parseGitLabMergeRequestUrl>} mergeRequest */
+const selectMergeRequestRemote = async (host, repoRoot, mergeRequest) => {
+  const remote = (await readReviewRemotes(host, repoRoot))
     .filter(
       (candidate) =>
         candidate.host === mergeRequest.host &&
@@ -390,7 +390,7 @@ const resolveMergeRequestContentRefs = async (host, repoRoot, mergeRequest, meta
     await fetchMergeRequestRefs(
       host,
       repoRoot,
-      selectMergeRequestRemote(repoRoot, mergeRequest),
+      await selectMergeRequestRemote(host, repoRoot, mergeRequest),
       mergeRequest,
       metadata,
     );
@@ -415,7 +415,7 @@ const resolveMergeRequestContentRefs = async (host, repoRoot, mergeRequest, meta
 const readMergeRequestState = async (host, launchPath, source) => {
   const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const mergeRequest = parseGitLabMergeRequestUrl(source.url);
-  selectMergeRequestRemote(repoRoot, mergeRequest);
+  await selectMergeRequestRemote(host, repoRoot, mergeRequest);
   const [metadata, diffs, reviewComments] = await Promise.all([
     readMergeRequestMetadata(repoRoot, mergeRequest),
     readMergeRequestDiffs(repoRoot, mergeRequest),
@@ -652,7 +652,7 @@ const getGitLabReviewQuickAction = (event) => {
 const submitMergeRequestComment = async (host, launchPath, request) => {
   const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const mergeRequest = parseGitLabMergeRequestUrl(request.source.url);
-  selectMergeRequestRemote(repoRoot, mergeRequest);
+  await selectMergeRequestRemote(host, repoRoot, mergeRequest);
   if (request.comment.threadId) {
     const note = JSON.parse(
       await glabApi(
@@ -704,7 +704,7 @@ const submitMergeRequestReview = async (host, launchPath, request) => {
   const quickAction = getGitLabReviewQuickAction(request.event);
   const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const mergeRequest = parseGitLabMergeRequestUrl(request.source.url);
-  selectMergeRequestRemote(repoRoot, mergeRequest);
+  await selectMergeRequestRemote(host, repoRoot, mergeRequest);
   const metadata = await readMergeRequestMetadata(repoRoot, mergeRequest);
   const diffs = await readMergeRequestDiffs(repoRoot, mergeRequest);
   for (const comment of request.comments) {

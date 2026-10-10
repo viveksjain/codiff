@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import reviewSource from '../electron/review-source.cjs';
 
-const { parseReviewUrl, resolveReviewUrl } = reviewSource;
+const { parseReviewUrl, resolveLocalReviewUrlSync } = reviewSource;
 
 export const flagDefinitions = [
   {
@@ -277,7 +277,7 @@ const getReviewProviderMarker = (arg) =>
 const parsePullRequestUrlArgument = (arg) => parseReviewUrl(arg)?.url ?? null;
 
 export const resolvePullRequestUrl = (repositoryPath, number, provider) =>
-  resolveReviewUrl(repositoryPath, number, provider);
+  resolveLocalReviewUrlSync(repositoryPath, number, provider);
 
 export const resolvePullRequestTargetUrl = ({ branch, number, provider, repositoryPath, url }) => {
   if (url) {

@@ -5,7 +5,7 @@ const { existsSync } = require('node:fs');
 const { resolve } = require('node:path');
 const { parseArgs } = require('node:util');
 const { readWalkthroughContext } = require('../walkthrough-context.cjs');
-const { parseReviewUrl, resolveReviewUrl } = require('../review-source.cjs');
+const { parseReviewUrl, resolveLocalReviewUrlSync } = require('../review-source.cjs');
 
 /**
  * @typedef {import('../../core/types.ts').CodiffLaunchOptions} CodiffLaunchOptions
@@ -101,7 +101,7 @@ const parsePullRequestUrlArgument = (arg) => parseReviewUrl(arg)?.url ?? null;
 
 /** @param {string} repositoryPath @param {number} number */
 const resolvePullRequestUrl = (repositoryPath, number, provider) =>
-  resolveReviewUrl(repositoryPath, number, provider);
+  resolveLocalReviewUrlSync(repositoryPath, number, provider);
 
 /** @param {ReadonlyArray<string>} [commandLine] @returns {ParsedCommandLineArguments} */
 const parseCommandLineArguments = (commandLine = process.argv) => {

@@ -1,8 +1,12 @@
 // @ts-check
 
 const { execFileSync } = require('node:child_process');
+const { git } = require('./git-state/common.cjs');
 
-/** @typedef {'github' | 'gitlab'} ReviewProvider */
+/**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
+ * @typedef {'github' | 'gitlab'} ReviewProvider
+ */
 
 // Reviews are usually pasted straight from a browser, so anything after the review number is a tab
 // (`/files`, `/changes`, `/diffs`), a query, or an anchor, and none of it identifies the review.
@@ -121,12 +125,13 @@ const parseRemoteUrl = (value) => {
   }
 };
 
-/** @param {string} repositoryPath */
-const readReviewRemotes = (repositoryPath) => {
-  const root = execFileSync('git', ['-C', repositoryPath, 'rev-parse', '--show-toplevel'], {
-    encoding: 'utf8',
-  }).trim();
-  const raw = execFileSync('git', ['-C', root, 'remote', '-v'], { encoding: 'utf8' });
+/**
+ * @typedef {{direction: string; name: string} & NonNullable<ReturnType<typeof parseRemoteUrl>>} ReviewRemote
+ */
+
+/** @param {string} raw @returns {Array<ReviewRemote>} */
+const parseReviewRemotes = (raw) => {
+  /** @type {Array<ReviewRemote>} */
   const remotes = [];
   for (const line of raw.split('\n')) {
     const match = line.match(/^(\S+)\s+(\S+)\s+\((fetch|push)\)$/);
@@ -149,20 +154,11 @@ const remotePriority = (remote) =>
       : 3;
 
 /**
- * @param {string} repositoryPath
+ * @param {ReadonlyArray<ReviewRemote>} remotes
  * @param {number} number
- * @param {ReviewProvider | undefined} provider
+ * @param {ReviewProvider | undefined} [provider]
  */
-const resolveReviewUrl = (repositoryPath, number, provider) => {
-  let remotes;
-  try {
-    remotes = readReviewRemotes(repositoryPath);
-  } catch {
-    throw new Error(
-      `Could not resolve review #${number}. Run codiff inside a Git repository or pass a full pull/merge request URL.`,
-    );
-  }
-
+const selectReviewUrl = (remotes, number, provider) => {
   const remote = remotes
     .filter((candidate) => !provider || candidate.provider === provider)
     .sort((left, right) => remotePriority(left) - remotePriority(right))[0];
@@ -171,15 +167,76 @@ const resolveReviewUrl = (repositoryPath, number, provider) => {
       `Could not resolve ${provider === 'gitlab' ? 'MR' : provider === 'github' ? 'PR' : 'review'} #${number} from this repository's remotes.`,
     );
   }
-
   return remote.provider === 'github'
     ? `https://github.com/${remote.projectPath}/pull/${number}`
     : `https://${remote.host}/${remote.projectPath}/-/merge_requests/${number}`;
 };
 
+/** @param {number} number */
+const createUnresolvedReviewError = (number) =>
+  new Error(
+    `Could not resolve review #${number}. Run codiff inside a Git repository or pass a full pull/merge request URL.`,
+  );
+
+/** @param {RepositoryHost} host @param {string} repositoryPath */
+const readReviewRemotes = async (host, repositoryPath) => {
+  const root = (await git(host, repositoryPath, ['rev-parse', '--show-toplevel'])).trim();
+  return parseReviewRemotes(await git(host, root, ['remote', '-v']));
+};
+
+/**
+ * @param {RepositoryHost} host
+ * @param {string} repositoryPath
+ * @param {number} number
+ * @param {ReviewProvider | undefined} [provider]
+ */
+const resolveReviewUrl = async (host, repositoryPath, number, provider) => {
+  let remotes;
+  try {
+    remotes = await readReviewRemotes(host, repositoryPath);
+  } catch {
+    throw createUnresolvedReviewError(number);
+  }
+  return selectReviewUrl(remotes, number, provider);
+};
+
+/**
+ * Synchronous local variant for CLI argument parsing, which runs on this
+ * machine before any repository host exists.
+ *
+ * @param {string} repositoryPath
+ */
+const readLocalReviewRemotesSync = (repositoryPath) => {
+  const root = execFileSync('git', ['-C', repositoryPath, 'rev-parse', '--show-toplevel'], {
+    encoding: 'utf8',
+  }).trim();
+  return parseReviewRemotes(
+    execFileSync('git', ['-C', root, 'remote', '-v'], { encoding: 'utf8' }),
+  );
+};
+
+/**
+ * @param {string} repositoryPath
+ * @param {number} number
+ * @param {ReviewProvider | undefined} [provider]
+ */
+const resolveLocalReviewUrlSync = (repositoryPath, number, provider) => {
+  let remotes;
+  try {
+    remotes = readLocalReviewRemotesSync(repositoryPath);
+  } catch {
+    throw createUnresolvedReviewError(number);
+  }
+  return selectReviewUrl(remotes, number, provider);
+};
+
 module.exports = {
   parseRemoteUrl,
+  parseReviewRemotes,
   parseReviewUrl,
+  readLocalReviewRemotesSync,
   readReviewRemotes,
+  resolveLocalReviewUrlSync,
   resolveReviewUrl,
+  selectReviewUrl,
 };

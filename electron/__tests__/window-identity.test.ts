@@ -9,43 +9,61 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
-const { findMatchingWindowIdentity, getWindowIdentity, getWindowIdentityForRepositoryState } =
-  require('../window-identity.cjs') as {
-    findMatchingWindowIdentity: (
-      identity: { key: string } | null,
-      existingIdentities: ReadonlyMap<number, { key: string } | null>,
-    ) => number | null;
-    getWindowIdentity: (
-      repositoryPath: string,
-      launchOptions?: {
-        source?:
-          | { type: 'working-tree' }
-          | { ref: string; type: 'branch' }
-          | { baseRef: string; headRef: string; ref: string; type: 'branch-diff' }
-          | { ref: string; type: 'commit' }
-          | {
-              number?: number;
-              owner?: string;
-              repo?: string;
-              type: 'pull-request';
-              url: string;
-            };
-        walkthrough?: boolean;
-        walkthroughFile?: string;
-        planFile?: string;
-        planResultFile?: string;
-      },
-    ) => { key: string; repositoryRoot: string; sourceKey: string } | null;
-    getWindowIdentityForRepositoryState: (state: {
+const {
+  findMatchingWindowIdentity,
+  getWindowIdentity,
+  getWindowIdentityForRepositoryState,
+  getWindowIdentityForSource,
+} = require('../window-identity.cjs') as {
+  findMatchingWindowIdentity: (
+    identity: { key: string } | null,
+    existingIdentities: ReadonlyMap<number, { key: string } | null>,
+  ) => number | null;
+  getWindowIdentity: (
+    host: RepositoryHost,
+    repositoryPath: string,
+    launchOptions?: {
+      source?:
+        | { type: 'working-tree' }
+        | { ref: string; type: 'branch' }
+        | { baseRef: string; headRef: string; ref: string; type: 'branch-diff' }
+        | { ref: string; type: 'commit' }
+        | {
+            number?: number;
+            owner?: string;
+            repo?: string;
+            type: 'pull-request';
+            url: string;
+          };
+      walkthrough?: boolean;
+      walkthroughFile?: string;
+      planFile?: string;
+      planResultFile?: string;
+    },
+  ) => Promise<{ key: string; repositoryRoot: string; sourceKey: string } | null>;
+  getWindowIdentityForRepositoryState: (
+    host: RepositoryHost,
+    state: {
       root: string;
       source:
         | { type: 'working-tree' }
         | { ref: string; type: 'commit' }
         | { baseRef: string; headRef: string; ref: string; type: 'branch-diff' };
-    }) => { key: string; repositoryRoot: string; sourceKey: string } | null;
-  };
+    },
+  ) => Promise<{ key: string; repositoryRoot: string; sourceKey: string } | null>;
+  getWindowIdentityForSource: (
+    host: RepositoryHost,
+    repositoryPath: string,
+    source: { ref: string; type: 'commit' },
+  ) => Promise<{ key: string; repositoryRoot: string; sourceKey: string } | null>;
+};
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 
 const execFileAsync = promisify(execFile);
 
@@ -82,7 +100,7 @@ test(
     const realPlanFile = await realpath(planFile);
 
     expect(
-      getWindowIdentity(directory.path, {
+      await getWindowIdentity(host, directory.path, {
         planFile,
         planResultFile: join(directory.path, 'result.json'),
       }),
@@ -101,7 +119,9 @@ test('window identities match working-tree launches inside the same repository',
   const nestedPath = join(directory.path, 'src');
   await mkdir(nestedPath);
 
-  expect(getWindowIdentity(nestedPath)?.key).toBe(getWindowIdentity(directory.path)?.key);
+  expect((await getWindowIdentity(host, nestedPath))?.key).toBe(
+    (await getWindowIdentity(host, directory.path))?.key,
+  );
 });
 
 test('window identities resolve commit refs to the same commit sha', async () => {
@@ -111,18 +131,34 @@ test('window identities resolve commit refs to the same commit sha', async () =>
   const head = await git(directory.path, ['rev-parse', 'HEAD']);
 
   expect(
-    getWindowIdentity(directory.path, {
-      source: { ref: 'HEAD', type: 'commit' },
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: { ref: 'HEAD', type: 'commit' },
+      })
+    )?.sourceKey,
   ).toBe(`commit:${head}`);
   expect(
-    getWindowIdentity(directory.path, {
-      source: { ref: head.slice(0, 8), type: 'commit' },
-    })?.key,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: { ref: head.slice(0, 8), type: 'commit' },
+      })
+    )?.key,
   ).toBe(
-    getWindowIdentity(directory.path, {
-      source: { ref: 'HEAD', type: 'commit' },
-    })?.key,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: { ref: 'HEAD', type: 'commit' },
+      })
+    )?.key,
+  );
+});
+
+test('source window identities match launch identities for the same source', async () => {
+  await using directory = await createTemporaryDirectory('codiff-window-identity-');
+  await initRepository(directory.path);
+
+  const source = { ref: 'HEAD', type: 'commit' } as const;
+  expect((await getWindowIdentityForSource(host, directory.path, source))?.key).toBe(
+    (await getWindowIdentity(host, directory.path, { source }))?.key,
   );
 });
 
@@ -146,7 +182,7 @@ test(
     await chmod(join(fakeBin.path, 'git'), 0o755);
 
     expect(
-      getWindowIdentityForRepositoryState({
+      await getWindowIdentityForRepositoryState(host, {
         root: repository.path,
         source: { ref: head, type: 'commit' },
       }),
@@ -162,20 +198,26 @@ test('implicit walkthrough identities use HEAD only when the working tree is cle
   await using directory = await createTemporaryDirectory('codiff-window-identity-');
   await initRepository(directory.path);
 
-  const headIdentity = getWindowIdentity(directory.path, {
+  const headIdentity = await getWindowIdentity(host, directory.path, {
     source: { ref: 'HEAD', type: 'commit' },
   });
-  expect(getWindowIdentity(directory.path, { walkthrough: true })?.key).toBe(headIdentity?.key);
+  expect((await getWindowIdentity(host, directory.path, { walkthrough: true }))?.key).toBe(
+    headIdentity?.key,
+  );
 
   await writeFile(join(directory.path, 'local.txt'), 'change\n');
-  expect(getWindowIdentity(directory.path, { walkthrough: true })?.sourceKey).toBe('working-tree');
+  expect((await getWindowIdentity(host, directory.path, { walkthrough: true }))?.sourceKey).toBe(
+    'working-tree',
+  );
 
   await rm(join(directory.path, 'local.txt'));
   expect(
-    getWindowIdentity(directory.path, {
-      walkthrough: true,
-      walkthroughFile: '/tmp/walkthrough.json',
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        walkthrough: true,
+        walkthroughFile: '/tmp/walkthrough.json',
+      })
+    )?.sourceKey,
   ).toBe('working-tree');
 });
 
@@ -187,18 +229,22 @@ test('window identities distinguish branch history launches', async () => {
   const head = (await git(directory.path, ['rev-parse', 'HEAD'])).trim().toLowerCase();
 
   expect(
-    getWindowIdentity(directory.path, {
-      source: { ref: 'feature', type: 'branch' },
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: { ref: 'feature', type: 'branch' },
+      })
+    )?.sourceKey,
   ).toBe(`branch-diff:feature:${head}:${head}`);
 
   await git(directory.path, ['commit', '--allow-empty', '-m', 'feature update']);
   const nextHead = (await git(directory.path, ['rev-parse', 'HEAD'])).trim().toLowerCase();
 
   expect(
-    getWindowIdentity(directory.path, {
-      source: { baseRef: head, headRef: nextHead, ref: 'feature', type: 'branch-diff' },
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: { baseRef: head, headRef: nextHead, ref: 'feature', type: 'branch-diff' },
+      })
+    )?.sourceKey,
   ).toBe(`branch-diff:feature:${head}:${nextHead}`);
 });
 
@@ -207,30 +253,36 @@ test('window identities normalize GitHub pull request sources', async () => {
   await initRepository(directory.path);
 
   expect(
-    getWindowIdentity(directory.path, {
-      source: {
-        type: 'pull-request',
-        url: 'https://github.com/NKZW-Tech/Codiff/pull/8',
-      },
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: {
+          type: 'pull-request',
+          url: 'https://github.com/NKZW-Tech/Codiff/pull/8',
+        },
+      })
+    )?.sourceKey,
   ).toBe('pull-request:nkzw-tech/codiff#8');
   expect(
-    getWindowIdentity(directory.path, {
-      source: {
-        number: 8,
-        owner: 'nkzw-tech',
-        repo: 'codiff',
-        type: 'pull-request',
-        url: 'https://github.com/nkzw-tech/codiff/pull/8',
-      },
-    })?.key,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: {
+          number: 8,
+          owner: 'nkzw-tech',
+          repo: 'codiff',
+          type: 'pull-request',
+          url: 'https://github.com/nkzw-tech/codiff/pull/8',
+        },
+      })
+    )?.key,
   ).toBe(
-    getWindowIdentity(directory.path, {
-      source: {
-        type: 'pull-request',
-        url: 'https://github.com/NKZW-Tech/Codiff/pull/8',
-      },
-    })?.key,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: {
+          type: 'pull-request',
+          url: 'https://github.com/NKZW-Tech/Codiff/pull/8',
+        },
+      })
+    )?.key,
   );
 });
 
@@ -239,20 +291,24 @@ test('window identities normalize pull request URLs copied from a review tab', a
   await initRepository(directory.path);
 
   expect(
-    getWindowIdentity(directory.path, {
-      source: {
-        type: 'pull-request',
-        url: 'https://github.com/NKZW-Tech/Codiff/pull/8/changes#r4821',
-      },
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: {
+          type: 'pull-request',
+          url: 'https://github.com/NKZW-Tech/Codiff/pull/8/changes#r4821',
+        },
+      })
+    )?.sourceKey,
   ).toBe('pull-request:nkzw-tech/codiff#8');
   expect(
-    getWindowIdentity(directory.path, {
-      source: {
-        type: 'pull-request',
-        url: 'https://gitlab.example.com/group/subgroup/project/-/merge_requests/8/diffs',
-      },
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: {
+          type: 'pull-request',
+          url: 'https://gitlab.example.com/group/subgroup/project/-/merge_requests/8/diffs',
+        },
+      })
+    )?.sourceKey,
   ).toBe('pull-request:gitlab:gitlab.example.com/group/subgroup/project#8');
 });
 
@@ -261,12 +317,14 @@ test('window identities normalize GitLab merge request sources', async () => {
   await initRepository(directory.path);
 
   expect(
-    getWindowIdentity(directory.path, {
-      source: {
-        type: 'pull-request',
-        url: 'https://gitlab.example.com/group/subgroup/project/-/merge_requests/8',
-      },
-    })?.sourceKey,
+    (
+      await getWindowIdentity(host, directory.path, {
+        source: {
+          type: 'pull-request',
+          url: 'https://gitlab.example.com/group/subgroup/project/-/merge_requests/8',
+        },
+      })
+    )?.sourceKey,
   ).toBe('pull-request:gitlab:gitlab.example.com/group/subgroup/project#8');
 });
 

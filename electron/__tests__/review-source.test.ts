@@ -1,9 +1,33 @@
+import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
 import { expect, test } from 'vite-plus/test';
+import { getGitTestEnvironment } from '../../core/__tests__/helpers/git.ts';
+import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 
-const { parseRemoteUrl, parseReviewUrl } = require('../review-source.cjs') as {
+type ReviewRemote = {
+  direction: string;
+  host: string;
+  name: string;
+  projectPath: string;
+  provider: 'github' | 'gitlab';
+};
+
+const {
+  parseRemoteUrl,
+  parseReviewRemotes,
+  parseReviewUrl,
+  readReviewRemotes,
+  resolveReviewUrl,
+  selectReviewUrl,
+} = require('../review-source.cjs') as {
   parseRemoteUrl: (value: string) => {
     host: string;
     projectPath: string;
@@ -18,7 +42,30 @@ const { parseRemoteUrl, parseReviewUrl } = require('../review-source.cjs') as {
     repo?: string;
     url: string;
   } | null;
+  parseReviewRemotes: (raw: string) => Array<ReviewRemote>;
+  readReviewRemotes: (host: RepositoryHost, repositoryPath: string) => Promise<Array<ReviewRemote>>;
+  resolveReviewUrl: (
+    host: RepositoryHost,
+    repositoryPath: string,
+    number: number,
+    provider?: 'github' | 'gitlab',
+  ) => Promise<string>;
+  selectReviewUrl: (
+    remotes: ReadonlyArray<ReviewRemote>,
+    number: number,
+    provider?: 'github' | 'gitlab',
+  ) => string;
 };
+
+const execFileAsync = promisify(execFile);
+
+const git = async (repo: string, args: ReadonlyArray<string>) =>
+  (
+    await execFileAsync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      env: getGitTestEnvironment(),
+    })
+  ).stdout.trim();
 
 test('parseReviewUrl reads canonical GitHub pull request URLs', () => {
   expect(parseReviewUrl('https://github.com/nkzw-tech/codiff/pull/1728')).toEqual({
@@ -162,4 +209,50 @@ test('parseRemoteUrl reads scp-style and GitHub remotes', () => {
     projectPath: 'nkzw-tech/codiff',
     provider: 'github',
   });
+});
+
+test('parseReviewRemotes and selectReviewUrl resolve a review without Git', () => {
+  const remotes = parseReviewRemotes(
+    'origin\tgit@github.com:nkzw-tech/codiff.git (fetch)\norigin\tgit@github.com:nkzw-tech/codiff.git (push)\n',
+  );
+  expect(selectReviewUrl(remotes, 12)).toBe('https://github.com/nkzw-tech/codiff/pull/12');
+  expect(() => selectReviewUrl([], 12)).toThrow('Could not resolve review #12');
+});
+
+test('readReviewRemotes and resolveReviewUrl read remotes through the repository host', async () => {
+  await using directory = await createTemporaryDirectory('codiff-review-remotes-');
+  await git(directory.path, ['init']);
+  await git(directory.path, [
+    'remote',
+    'add',
+    'upstream',
+    'https://github.com/upstream/codiff.git',
+  ]);
+  await git(directory.path, [
+    'remote',
+    'add',
+    'origin',
+    'git@gitlab.example.com:group/project.git',
+  ]);
+
+  expect(await readReviewRemotes(host, directory.path)).toContainEqual({
+    direction: 'fetch',
+    host: 'gitlab.example.com',
+    name: 'origin',
+    projectPath: 'group/project',
+    provider: 'gitlab',
+  });
+  expect(await resolveReviewUrl(host, directory.path, 7)).toBe(
+    'https://gitlab.example.com/group/project/-/merge_requests/7',
+  );
+  expect(await resolveReviewUrl(host, directory.path, 7, 'github')).toBe(
+    'https://github.com/upstream/codiff/pull/7',
+  );
+});
+
+test('resolveReviewUrl explains how to recover outside a Git repository', async () => {
+  await using directory = await createTemporaryDirectory('codiff-review-remotes-');
+  await expect(resolveReviewUrl(host, directory.path, 7)).rejects.toThrow(
+    'Could not resolve review #7. Run codiff inside a Git repository',
+  );
 });

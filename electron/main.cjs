@@ -138,6 +138,8 @@ const { createWalkthroughProgressReporter } = require('./walkthrough-progress.cj
 const root = dirname(__dirname);
 /** @type {Map<number, WindowIdentity | null>} */
 const windowIdentities = new Map();
+/** @type {Map<number, number>} */
+const windowIdentityGenerations = new Map();
 const localHost = createLocalHost();
 const windowRepositories = createWindowRepositories({ getLaunchPath, localHost });
 /** @type {Map<number, CodiffLaunchOptions>} */
@@ -252,11 +254,9 @@ const getMarkdownDocumentContext = (webContentsId) => ({
 });
 
 /** @param {number} webContentsId @param {RepositoryState} state */
-const storeResolvedRepositoryState = (webContentsId, state) => {
-  windowRepositories.set(webContentsId, {
-    host: windowRepositories.get(webContentsId).host,
-    repositoryPath: state.root,
-  });
+const storeResolvedRepositoryState = async (webContentsId, state) => {
+  const { host } = windowRepositories.get(webContentsId);
+  windowRepositories.set(webContentsId, { host, repositoryPath: state.root });
   const browserWindow = BrowserWindow.getAllWindows().find(
     (window) => window.webContents.id === webContentsId,
   );
@@ -270,8 +270,11 @@ const storeResolvedRepositoryState = (webContentsId, state) => {
       source: state.source,
     });
   }
-  const identity = getWindowIdentityForRepositoryState(state);
-  if (identity) {
+  const generation = (windowIdentityGenerations.get(webContentsId) ?? 0) + 1;
+  windowIdentityGenerations.set(webContentsId, generation);
+  const identity = await getWindowIdentityForRepositoryState(host, state);
+  // Skip the identity if the window closed or stored a newer state while it resolved.
+  if (identity && windowIdentityGenerations.get(webContentsId) === generation) {
     windowIdentities.set(webContentsId, identity);
   }
 };
@@ -570,7 +573,10 @@ const openRepositoryFolder = async (browserWindow) => {
     : await dialog.showOpenDialog(options);
 
   if (!result.canceled && result.filePaths[0]) {
-    focusOrCreateWindow(result.filePaths[0], { repositoryPathProvided: true, walkthrough: false });
+    void focusOrCreateWindow(localHost, result.filePaths[0], {
+      repositoryPathProvided: true,
+      walkthrough: false,
+    });
   }
 };
 
@@ -949,15 +955,10 @@ ipcMain.on(
 /**
  * @param {RepositoryHost} host
  * @param {string} repositoryPath
- * @param {CodiffLaunchOptions} [launchOptions]
- * @param {WindowIdentity | null} [identity]
+ * @param {CodiffLaunchOptions} launchOptions
+ * @param {WindowIdentity | null} identity
  */
-const createWindow = (
-  host,
-  repositoryPath,
-  launchOptions = { repositoryPathProvided: true, walkthrough: false },
-  identity = getWindowIdentity(repositoryPath, launchOptions),
-) => {
+const createWindow = (host, repositoryPath, launchOptions, identity) => {
   const savedState = readWindowState();
   const validatedState = savedState
     ? validateWindowStateOnScreen(savedState, screen.getAllDisplays())
@@ -1017,9 +1018,9 @@ const createWindow = (
   const initialRepositoryStatePromise = launchOptions.planFile
     ? null
     : readInitialRepositoryStateWithConfig(host, repositoryPath, launchOptions);
-  const initialRepositoryState = initialRepositoryStatePromise?.then((state) => {
+  const initialRepositoryState = initialRepositoryStatePromise?.then(async (state) => {
     if (!window.isDestroyed()) {
-      storeResolvedRepositoryState(webContentsId, state);
+      await storeResolvedRepositoryState(webContentsId, state);
     }
     return state;
   });
@@ -1127,6 +1128,7 @@ const createWindow = (
     planInitialVersions.delete(webContentsId);
     readyPlanWindows.delete(webContentsId);
     windowIdentities.delete(webContentsId);
+    windowIdentityGenerations.delete(webContentsId);
     windowInitialRepositoryStates.delete(webContentsId);
     walkthroughProgressGenerations.delete(webContentsId);
     windowRepositories.delete(webContentsId);
@@ -1265,15 +1267,31 @@ const shareSnapshot = async (context, snapshot) => {
   }
 };
 
+/** @type {Promise<unknown>} */
+let windowLaunchQueue = Promise.resolve();
+
 /**
- * @param {string} repositoryPath
- * @param {CodiffLaunchOptions} [launchOptions]
+ * Window identities resolve asynchronously, so launches run one at a time: a
+ * launch that arrives while another is resolving then still finds, and
+ * focuses, the window the earlier launch creates.
+ *
+ * @template T
+ * @param {() => Promise<T>} launch
+ * @returns {Promise<T>}
  */
-const focusOrCreateWindow = (
-  repositoryPath,
-  launchOptions = { repositoryPathProvided: true, walkthrough: false },
-) => {
-  const identity = getWindowIdentity(repositoryPath, launchOptions);
+const enqueueWindowLaunch = (launch) => {
+  const result = windowLaunchQueue.then(launch);
+  windowLaunchQueue = result.catch(() => {});
+  return result;
+};
+
+/**
+ * @param {RepositoryHost} host
+ * @param {string} repositoryPath
+ * @param {CodiffLaunchOptions} launchOptions
+ */
+const focusOrCreateWindowNow = async (host, repositoryPath, launchOptions) => {
+  const identity = await getWindowIdentity(host, repositoryPath, launchOptions);
   const matchingWebContentsId = findMatchingWindowIdentity(identity, windowIdentities);
   const matchingWindow =
     matchingWebContentsId == null
@@ -1285,7 +1303,7 @@ const focusOrCreateWindow = (
   if (matchingWindow) {
     if (launchOptions.planFile || launchOptions.walkthrough || launchOptions.walkthroughFile) {
       windowRepositories.set(matchingWebContentsId, {
-        host: localHost,
+        host,
         repositoryPath: identity?.repositoryRoot || repositoryPath,
       });
       windowLaunchOptions.set(matchingWebContentsId, launchOptions);
@@ -1296,7 +1314,7 @@ const focusOrCreateWindow = (
       } else {
         windowInitialRepositoryStates.set(
           matchingWebContentsId,
-          readInitialRepositoryStateWithConfig(localHost, repositoryPath, launchOptions),
+          readInitialRepositoryStateWithConfig(host, repositoryPath, launchOptions),
         );
       }
       if (identity) {
@@ -1308,8 +1326,19 @@ const focusOrCreateWindow = (
     return matchingWindow;
   }
 
-  return createWindow(localHost, repositoryPath, launchOptions, identity);
+  return createWindow(host, repositoryPath, launchOptions, identity);
 };
+
+/**
+ * @param {RepositoryHost} host
+ * @param {string} repositoryPath
+ * @param {CodiffLaunchOptions} [launchOptions]
+ */
+const focusOrCreateWindow = (
+  host,
+  repositoryPath,
+  launchOptions = { repositoryPathProvided: true, walkthrough: false },
+) => enqueueWindowLaunch(() => focusOrCreateWindowNow(host, repositoryPath, launchOptions));
 
 const INITIAL_UPDATE_CHECK_DELAY_MS = 10 * 1000;
 const UPDATE_CHECK_TIMER_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -1404,7 +1433,8 @@ if (squirrelStartup || !lock) {
     const launchPath = resolve(
       data.repositoryPath || getCommandLineRepositoryPath(commandLine) || workingDirectory,
     );
-    focusOrCreateWindow(
+    void focusOrCreateWindow(
+      localHost,
       getInitialRepositoryPath(launchPath, launchOptions, config.settings.lastRepositoryPath),
       launchOptions,
     );
@@ -1444,7 +1474,8 @@ if (squirrelStartup || !lock) {
     setInterval(runScheduledUpdateCheck, UPDATE_CHECK_TIMER_INTERVAL_MS);
 
     const launchOptions = getLaunchOptions();
-    focusOrCreateWindow(
+    void focusOrCreateWindow(
+      localHost,
       getInitialRepositoryPath(getLaunchPath(), launchOptions, config.settings.lastRepositoryPath),
       launchOptions,
     );
@@ -1479,17 +1510,21 @@ if (squirrelStartup || !lock) {
   app.on('will-quit', () => codexModelDiscoveryAbort.abort());
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      const launchOptions = getLaunchOptions();
-      focusOrCreateWindow(
-        getInitialRepositoryPath(
-          getLaunchPath(),
+    // Check for open windows only once earlier launches have created theirs.
+    void enqueueWindowLaunch(async () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        const launchOptions = getLaunchOptions();
+        await focusOrCreateWindowNow(
+          localHost,
+          getInitialRepositoryPath(
+            getLaunchPath(),
+            launchOptions,
+            config.settings.lastRepositoryPath,
+          ),
           launchOptions,
-          config.settings.lastRepositoryPath,
-        ),
-        launchOptions,
-      );
-    }
+        );
+      }
+    });
   });
 
   app.on('window-all-closed', () => {
@@ -1551,7 +1586,7 @@ ipcMain.handle('codiff:getRepositoryState', async (event, source) => {
   const state = initialState
     ? await initialState
     : await readRepositoryStateWithConfig(host, repositoryPath, source || launchOptions?.source);
-  storeResolvedRepositoryState(event.sender.id, state);
+  await storeResolvedRepositoryState(event.sender.id, state);
   rememberLastRepositoryPath(state.root);
   void resetRepositoryWatcher(host, event.sender.id, state.root);
   return state;
@@ -1569,9 +1604,9 @@ ipcMain.handle('codiff:resolvePullRequestUrl', (event, value) => {
     throw new Error('Enter a pull request number or a GitHub or GitLab pull request link.');
   }
 
-  // Reuse the CLI resolver so a bare number follows the repository's preferred remote.
-  const { repositoryPath } = windowRepositories.get(event.sender.id);
-  return resolveReviewUrl(repositoryPath, Number(number[1]));
+  // Resolve a bare number like the CLI does, so it follows the repository's preferred remote.
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  return resolveReviewUrl(host, repositoryPath, Number(number[1]));
 });
 
 ipcMain.handle('codiff:getMarkdownDocument', async (event, request) => {
