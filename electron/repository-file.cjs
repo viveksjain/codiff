@@ -90,8 +90,8 @@ const writeRepositoryFile = async (host, repositoryRoot, request) => {
     `.${basename(resolved.absolutePath)}.${process.pid}.${randomUUID()}.tmp`,
   );
   const mode = (await host.stat(resolved.absolutePath)).mode & 0o7777;
-  await host.writeFile(temporaryPath, request.content, { exclusive: true, mode });
   try {
+    await host.writeFile(temporaryPath, request.content, { exclusive: true, mode });
     // Check again after preparing the replacement, including symlink retargets.
     const latestResolved = await resolveRepositoryFile(host, repositoryRoot, request.path);
     const latest = await readResolvedFile(host, latestResolved);

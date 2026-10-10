@@ -1,4 +1,13 @@
-import { chmod, lstat, readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  readdir,
+  readFile,
+  realpath,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { expect, test } from 'vite-plus/test';
@@ -129,4 +138,30 @@ test('saves edited files through the host with an atomic rename', async () => {
   const write = calls.find(({ method }) => method === 'writeFile');
   expect(write?.args[2]).toEqual({ exclusive: true, mode: 0o755 });
   expect(calls.some(({ method }) => method === 'rename')).toBe(true);
+});
+
+test('removes the temporary file when preparing the replacement fails', async () => {
+  await using directory = await createTemporaryDirectory('codiff-repository-file-cleanup-');
+  const root = await realpath(directory.path);
+  await writeFile(join(root, 'a.txt'), 'before\n');
+  const failingHost: RepositoryHost = {
+    ...host,
+    writeFile: async (path, contents, options) => {
+      await host.writeFile(path, contents, options);
+      throw new Error('disk full');
+    },
+  };
+
+  const current = await readRepositoryFile(host, root, 'a.txt');
+  await expect(
+    writeRepositoryFile(failingHost, root, {
+      baseVersion: current.version,
+      content: 'after\n',
+      path: 'a.txt',
+      root: current.root,
+    }),
+  ).rejects.toThrow('disk full');
+
+  expect(await readdir(root)).toEqual(['a.txt']);
+  expect(await readFile(join(root, 'a.txt'), 'utf8')).toBe('before\n');
 });
