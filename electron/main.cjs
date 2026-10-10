@@ -1583,16 +1583,17 @@ ipcMain.handle('codiff:getMarkdownDocument', async (event, request) => {
   return document;
 });
 
-ipcMain.handle('codiff:getRepositoryFile', (event, path) =>
-  readRepositoryFile(getWindowRepository(event.sender.id).repositoryPath, path),
-);
+ipcMain.handle('codiff:getRepositoryFile', (event, path) => {
+  const { host, repositoryPath } = getWindowRepository(event.sender.id);
+  return readRepositoryFile(host, repositoryPath, path);
+});
 
 ipcMain.handle('codiff:saveRepositoryFile', async (event, request) => {
-  const { repositoryPath: root } = getWindowRepository(event.sender.id);
-  const current = await readRepositoryFile(root, request.path);
+  const { host, repositoryPath: root } = getWindowRepository(event.sender.id);
+  const current = await readRepositoryFile(host, root, request.path);
   const selfWrite = beginRepositorySelfWrite(event.sender.id, current.path);
   try {
-    const result = await writeRepositoryFile(root, request);
+    const result = await writeRepositoryFile(host, root, request);
     finishRepositorySelfWrite(
       selfWrite,
       result.status === 'saved' ? result.document.version : null,
