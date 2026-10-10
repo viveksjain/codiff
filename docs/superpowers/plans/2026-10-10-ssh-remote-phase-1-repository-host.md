@@ -42,39 +42,41 @@
 
 ## File Structure
 
-| File | Status | Responsibility |
-| --- | --- | --- |
-| `electron/host/repository-host.cjs` | Create | JSDoc typedefs for `RepositoryHost`, `HostStat` and option types. No runtime code beyond `module.exports = {}`. |
-| `electron/host/local-host.cjs` | Create | `createLocalHost()`: `RepositoryHost` over `child_process`, `node-pty`, `fs`. |
-| `electron/window-repositories.cjs` | Create | Per-window `{host, repositoryPath}` registry with launch-path fallback. |
-| `electron/__tests__/helpers/repository-host-contract.ts` | Create | Shared contract suite every `RepositoryHost` implementation must pass. |
-| `electron/__tests__/local-host.test.ts` | Create | Runs the contract against `LocalHost`, plus local-only behavior. |
-| `electron/__tests__/window-repositories.test.ts` | Create | Registry tests. |
-| `core/__tests__/helpers/recording-host.ts` | Create | Wraps a host and records method calls for tests. |
-| `electron/__tests__/repository-host-boundary.test.ts` | Create | Guardrail: repository modules may not import `fs`, `child_process`, `os` or `pty`. |
-| `electron/git-state/common.cjs` | Modify | `git`, `gitBuffer`, `gitBufferWithInput`, `gitOrEmpty` and file readers take `host`; add `prefetchWorkingTreeFiles`. |
-| `electron/git-state/{commit,commit-metadata,comparison,git-files,working-tree,pull-request,merge-request}.cjs`, `electron/git-state.cjs` | Modify | Thread `host`. |
-| `electron/generated-files.cjs` | Modify | Thread `host`; temp index via `host.mkdtemp`. |
-| `electron/repository-watcher.cjs` | Modify | Thread `host`; batched `lstatMany`; coordinator keyed by host and root. |
-| `electron/definition-search.cjs` | Modify | Thread `host`; `git grep` via `host.spawn`. |
-| `electron/walkthrough-commit.cjs` | Modify | Thread `host`; PTY via `host.spawnPty`; message file on the host. |
-| `electron/repository-file.cjs` | Modify | Thread `host`; all file operations via host. |
-| `electron/review-source.cjs` | Modify | Pure remote parsing plus async `readReviewRemotes(host, path)`; sync local reader kept for CLI parsing. |
-| `electron/window-identity.cjs` | Modify | Async, host-based repository resolution. |
-| `electron/main.cjs` | Modify | Create `LocalHost`, use `window-repositories`, pass host everywhere, async window identity. |
-| Existing tests listed per task | Modify | Pass `host` to changed functions. |
+| File                                                                                                                                     | Status | Responsibility                                                                                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------- |
+| `electron/host/repository-host.cjs`                                                                                                      | Create | JSDoc typedefs for `RepositoryHost`, `HostStat` and option types. No runtime code beyond `module.exports = {}`.      |
+| `electron/host/local-host.cjs`                                                                                                           | Create | `createLocalHost()`: `RepositoryHost` over `child_process`, `node-pty`, `fs`.                                        |
+| `electron/window-repositories.cjs`                                                                                                       | Create | Per-window `{host, repositoryPath}` registry with launch-path fallback.                                              |
+| `electron/__tests__/helpers/repository-host-contract.ts`                                                                                 | Create | Shared contract suite every `RepositoryHost` implementation must pass.                                               |
+| `electron/__tests__/local-host.test.ts`                                                                                                  | Create | Runs the contract against `LocalHost`, plus local-only behavior.                                                     |
+| `electron/__tests__/window-repositories.test.ts`                                                                                         | Create | Registry tests.                                                                                                      |
+| `core/__tests__/helpers/recording-host.ts`                                                                                               | Create | Wraps a host and records method calls for tests.                                                                     |
+| `electron/__tests__/repository-host-boundary.test.ts`                                                                                    | Create | Guardrail: repository modules may not import `fs`, `child_process`, `os` or `pty`.                                   |
+| `electron/git-state/common.cjs`                                                                                                          | Modify | `git`, `gitBuffer`, `gitBufferWithInput`, `gitOrEmpty` and file readers take `host`; add `prefetchWorkingTreeFiles`. |
+| `electron/git-state/{commit,commit-metadata,comparison,git-files,working-tree,pull-request,merge-request}.cjs`, `electron/git-state.cjs` | Modify | Thread `host`.                                                                                                       |
+| `electron/generated-files.cjs`                                                                                                           | Modify | Thread `host`; temp index via `host.mkdtemp`.                                                                        |
+| `electron/repository-watcher.cjs`                                                                                                        | Modify | Thread `host`; batched `lstatMany`; coordinator keyed by host and root.                                              |
+| `electron/definition-search.cjs`                                                                                                         | Modify | Thread `host`; `git grep` via `host.spawn`.                                                                          |
+| `electron/walkthrough-commit.cjs`                                                                                                        | Modify | Thread `host`; PTY via `host.spawnPty`; message file on the host.                                                    |
+| `electron/repository-file.cjs`                                                                                                           | Modify | Thread `host`; all file operations via host.                                                                         |
+| `electron/review-source.cjs`                                                                                                             | Modify | Pure remote parsing plus async `readReviewRemotes(host, path)`; sync local reader kept for CLI parsing.              |
+| `electron/window-identity.cjs`                                                                                                           | Modify | Async, host-based repository resolution.                                                                             |
+| `electron/main.cjs`                                                                                                                      | Modify | Create `LocalHost`, use `window-repositories`, pass host everywhere, async window identity.                          |
+| Existing tests listed per task                                                                                                           | Modify | Pass `host` to changed functions.                                                                                    |
 
 ---
 
 ### Task 1: `RepositoryHost` types, `LocalHost` and the contract suite
 
 **Files:**
+
 - Create: `electron/host/repository-host.cjs`
 - Create: `electron/host/local-host.cjs`
 - Create: `electron/__tests__/helpers/repository-host-contract.ts`
 - Create: `electron/__tests__/local-host.test.ts`
 
 **Interfaces:**
+
 - Consumes: `spawnPty` from `electron/pty.cjs` (existing).
 - Produces:
   - `RepositoryHost`, `HostStat`, `HostFileType`, `HostExecOptions`, `HostSpawnOptions`, `HostPtyOptions`, `HostWriteFileOptions` typedefs, importable from TS as `import type { RepositoryHost } from '../host/repository-host.cjs'` (adjust relative path).
@@ -241,7 +243,10 @@ export const defineRepositoryHostContract = (
     await using fixture = await createFixture();
     const output = await fixture.host.exec(
       '/bin/sh',
-      ['-c', 'pwd -P; printf "%s\\n" "$CODIFF_HOST_TEST"; command -v git >/dev/null && echo has-path'],
+      [
+        '-c',
+        'pwd -P; printf "%s\\n" "$CODIFF_HOST_TEST"; command -v git >/dev/null && echo has-path',
+      ],
       { cwd: fixture.root, env: { CODIFF_HOST_TEST: 'value with spaces' } },
     );
     expect(output.toString('utf8').trim().split('\n')).toEqual([
@@ -513,7 +518,9 @@ const exec = (command, args, options = {}) => {
         resolve(Buffer.concat(stdout));
       } else {
         reject(
-          new Error(Buffer.concat(stderr).toString('utf8') || `${command} exited with status ${code}`),
+          new Error(
+            Buffer.concat(stderr).toString('utf8') || `${command} exited with status ${code}`,
+          ),
         );
       }
     });
@@ -590,10 +597,12 @@ git commit -m "Add a RepositoryHost interface with a local implementation."
 ### Task 2: Per-window repository registry
 
 **Files:**
+
 - Create: `electron/window-repositories.cjs`
 - Create: `electron/__tests__/window-repositories.test.ts`
 
 **Interfaces:**
+
 - Consumes: `RepositoryHost` (Task 1).
 - Produces: `createWindowRepositories({getLaunchPath, localHost})` returning `{delete(id: number): void; get(id: number): WindowRepository; set(id: number, repository: WindowRepository): void}` where `WindowRepository = {host: RepositoryHost; repositoryPath: string}`.
 
@@ -705,6 +714,7 @@ git commit -m "Add a per-window repository registry."
 This task changes the Git helpers' signatures and propagates `host` to every caller in one green step. It is mechanical; the type-check drives it.
 
 **Files:**
+
 - Modify: `electron/git-state/common.cjs:51-110` (helpers) and `:850` (`gitOrEmpty`)
 - Modify: `electron/git-state/commit.cjs`, `commit-metadata.cjs`, `comparison.cjs`, `git-files.cjs`, `working-tree.cjs`, `pull-request.cjs`, `merge-request.cjs`
 - Modify: `electron/git-state.cjs`
@@ -716,6 +726,7 @@ This task changes the Git helpers' signatures and propagates `host` to every cal
 - Test: `core/__tests__/git-state.test.ts`, `core/__tests__/git-files.test.ts`, `core/__tests__/gitlab.test.ts`, `core/__tests__/git-state.bench.ts`, `electron/__tests__/repository-watcher.test.ts`, `electron/__tests__/definition-search.test.ts`, `electron/__tests__/walkthrough-commit.test.ts`, `electron/__tests__/git-identity.test.ts`, `electron/__tests__/pull-request-command.test.ts`, `electron/__tests__/pull-request-remote.test.ts`, `electron/__tests__/pull-request-review.test.ts`, `electron/__tests__/narrative-walkthrough.test.ts` (only where it calls changed functions)
 
 **Interfaces:**
+
 - Consumes: `RepositoryHost`, `createLocalHost` (Task 1); `createWindowRepositories` (Task 2).
 - Produces (later tasks rely on these exact signatures):
   - `git(host, repoPath, args, options?) => Promise<string>`
@@ -933,6 +944,7 @@ git commit -m "Pass a RepositoryHost to every Git operation."
 ### Task 4: Read working-tree files through the host
 
 **Files:**
+
 - Create: `core/__tests__/helpers/recording-host.ts`
 - Modify: `electron/git-state/common.cjs` (`readFileStat`, `readWorkingTreeImageFile`, `readWorkingTreeFile`)
 - Modify: `electron/git-state/working-tree.cjs` (`getStatusItemForPath`, around line 305)
@@ -940,6 +952,7 @@ git commit -m "Pass a RepositoryHost to every Git operation."
 - Test: `core/__tests__/git-state.test.ts`, `electron/__tests__/repository-watcher.test.ts`
 
 **Interfaces:**
+
 - Consumes: Task 3 signatures; `HostStat`.
 - Produces:
   - `readFileStat(host, repoRoot, path): Promise<HostStat | undefined>` (callers test `stat.type === 'file'` etc. instead of `stat.isFile()`).
@@ -1104,12 +1117,14 @@ git commit -m "Read working-tree files through the repository host."
 ### Task 5: Batch untracked-file and watcher reads
 
 **Files:**
+
 - Modify: `electron/git-state/common.cjs` (add `prefetchWorkingTreeFiles`; `readWorkingTreeFile`, `getWorkingTreeContents` and `createSection` accept a prefetched entry)
 - Modify: `electron/git-state/working-tree.cjs` (`readWorkingTreeState`)
 - Modify: `electron/repository-watcher.cjs` (`readRepositoryWatcherSnapshot`)
 - Test: `core/__tests__/git-state.test.ts`, `electron/__tests__/repository-watcher.test.ts`
 
 **Interfaces:**
+
 - Consumes: Task 4's `readFileStat` and recording host.
 - Produces:
   - `prefetchWorkingTreeFiles(host, repoRoot, paths: ReadonlyArray<string>): Promise<Map<string, PrefetchedWorkingTreeFile>>` where `PrefetchedWorkingTreeFile = {contents?: Buffer; stat: HostStat | undefined}`.
@@ -1139,10 +1154,14 @@ test('readWorkingTreeState batches untracked file reads and skips oversized file
     const readFilesCalls = calls.filter(({ method }) => method === 'readFiles');
     expect(readFilesCalls).toHaveLength(1);
     expect(readFilesCalls[0].args[0]).toEqual([join(repo, 'a.txt'), join(repo, 'b.txt')]);
+    expect(calls.filter(({ method }) => method === 'lstat' || method === 'readFile')).toHaveLength(
+      0,
+    );
     expect(
-      calls.filter(({ method }) => method === 'lstat' || method === 'readFile'),
-    ).toHaveLength(0);
-    expect(calls.some(({ args, method }) => method === 'readlink' && args[0] === join(repo, 'outside-link'))).toBe(true);
+      calls.some(
+        ({ args, method }) => method === 'readlink' && args[0] === join(repo, 'outside-link'),
+      ),
+    ).toBe(true);
 
     const byPath = new Map(state.files.map((file) => [file.path, file]));
     expect(byPath.get('a.txt')?.sections[0].newFile?.contents).toBe('alpha\n');
@@ -1254,9 +1273,7 @@ const stats = await host.lstatMany(pathList.map((path) => join(repoRoot, path)))
 const exactFilePaths = pathList.filter(
   (path, index) => normalizedExactPaths.has(path) && stats[index]?.type === 'file',
 );
-const exactFileContents = await host.readFiles(
-  exactFilePaths.map((path) => join(repoRoot, path)),
-);
+const exactFileContents = await host.readFiles(exactFilePaths.map((path) => join(repoRoot, path)));
 /** @type {Map<string, Buffer | Error>} */
 const exactFiles = new Map(exactFilePaths.map((path, index) => [path, exactFileContents[index]]));
 const states = await Promise.all(
@@ -1328,11 +1345,13 @@ git commit -m "Batch untracked file and watcher reads through the repository hos
 ### Task 6: Run `git grep` and temporary indexes on the host
 
 **Files:**
+
 - Modify: `electron/definition-search.cjs` (`runBoundedGitGrep`)
 - Modify: `electron/generated-files.cjs` (`readGeneratedAttributeStatesFromTree`)
 - Test: `electron/__tests__/definition-search.test.ts`, `core/__tests__/git-state.test.ts`
 
 **Interfaces:**
+
 - Consumes: Task 3 signatures; `host.spawn`, `host.mkdtemp`, `host.rm`.
 - Produces: `runBoundedGitGrep(host, repoPath, args, options?: {maxMatches?; maxOutputBytes?; signal?; timeoutMs?})` (the `spawnProcess` option is removed).
 
@@ -1401,7 +1420,12 @@ test('the historical-tree attribute fallback uses and removes a host temporary d
           ? Promise.reject(new Error('unknown option `source`'))
           : host.exec(command, args, options),
     });
-    const states = await readGeneratedAttributeStates(recordingHost, repo, ['generated.ts'], 'HEAD');
+    const states = await readGeneratedAttributeStates(
+      recordingHost,
+      repo,
+      ['generated.ts'],
+      'HEAD',
+    );
 
     expect(states.get('generated.ts')).toBe(true);
     const temporary = calls.find(({ method }) => method === 'mkdtemp');
@@ -1490,10 +1514,12 @@ git commit -m "Run git grep and temporary indexes on the repository host."
 ### Task 7: Commit through the host
 
 **Files:**
+
 - Modify: `electron/walkthrough-commit.cjs`
 - Test: `electron/__tests__/walkthrough-commit.test.ts`
 
 **Interfaces:**
+
 - Consumes: `host.spawnPty`, `host.mkdtemp`, `host.writeFile`, `host.rm` (Task 1); `createWalkthroughCommit(host, repoPath, request, onOutput?)` (Task 3).
 - Produces: no new exports.
 
@@ -1565,6 +1591,7 @@ In `electron/walkthrough-commit.cjs`:
    ```
 
    The rest of `gitStreaming` is unchanged.
+
 3. Replace the message-file block inside `createWalkthroughCommit`:
 
    ```js
@@ -1598,11 +1625,13 @@ git commit -m "Create walkthrough commits through the repository host."
 ### Task 8: Read and save edited files through the host
 
 **Files:**
+
 - Modify: `electron/repository-file.cjs`
 - Modify: `electron/main.cjs` (`codiff:getRepositoryFile`, `codiff:saveRepositoryFile` handlers)
 - Test: `electron/__tests__/repository-file.test.ts`
 
 **Interfaces:**
+
 - Consumes: `host.realpath`, `host.stat`, `host.readFile`, `host.writeFile({exclusive, mode})`, `host.rename`, `host.rm`.
 - Produces: `resolveRepositoryFile(host, repositoryRoot, path)`, `readRepositoryFile(host, repositoryRoot, path)`, `writeRepositoryFile(host, repositoryRoot, request)`.
 
@@ -1681,10 +1710,7 @@ try {
   // Check again after preparing the replacement, including symlink retargets.
   const latestResolved = await resolveRepositoryFile(host, repositoryRoot, request.path);
   const latest = await readResolvedFile(host, latestResolved);
-  if (
-    latestResolved.absolutePath !== resolved.absolutePath ||
-    latest.version !== current.version
-  ) {
+  if (latestResolved.absolutePath !== resolved.absolutePath || latest.version !== current.version) {
     await host.rm(temporaryPath, { force: true });
     return { document: latest, status: 'conflict' };
   }
@@ -1721,6 +1747,7 @@ git commit -m "Read and save edited files through the repository host."
 ### Task 9: Resolve window identity and review remotes through the host
 
 **Files:**
+
 - Modify: `electron/review-source.cjs`
 - Modify: `electron/window-identity.cjs`
 - Modify: `electron/git-state/merge-request.cjs` (`selectMergeRequestRemote`)
@@ -1730,6 +1757,7 @@ git commit -m "Read and save edited files through the repository host."
 - Test: `electron/__tests__/review-source.test.ts`, `electron/__tests__/window-identity.test.ts`, `core/__tests__/gitlab.test.ts`, `electron/__tests__/command-line.test.ts`, `core/__tests__/codiff-cli.test.ts`
 
 **Interfaces:**
+
 - Consumes: Task 3 signatures, `host.realpath`.
 - Produces:
   - `review-source.cjs`: `parseReviewRemotes(raw: string): Array<ReviewRemote>` (pure), `selectReviewUrl(remotes, number, provider?): string` (pure; throws the same errors as today), `readReviewRemotes(host, repositoryPath): Promise<Array<ReviewRemote>>`, `resolveReviewUrl(host, repositoryPath, number, provider?): Promise<string>`, `readLocalReviewRemotesSync(repositoryPath): Array<ReviewRemote>` and `resolveLocalReviewUrlSync(repositoryPath, number, provider?): string` (used only by CLI parsing).
@@ -1839,7 +1867,9 @@ const readLocalReviewRemotesSync = (repositoryPath) => {
   const root = execFileSync('git', ['-C', repositoryPath, 'rev-parse', '--show-toplevel'], {
     encoding: 'utf8',
   }).trim();
-  return parseReviewRemotes(execFileSync('git', ['-C', root, 'remote', '-v'], { encoding: 'utf8' }));
+  return parseReviewRemotes(
+    execFileSync('git', ['-C', root, 'remote', '-v'], { encoding: 'utf8' }),
+  );
 };
 
 /**
@@ -1965,9 +1995,11 @@ git commit -m "Resolve window identity and review remotes through the repository
 ### Task 10: Guard the host boundary
 
 **Files:**
+
 - Create: `electron/__tests__/repository-host-boundary.test.ts`
 
 **Interfaces:**
+
 - Consumes: the final module layout from Tasks 3-9.
 - Produces: a test that fails when a repository module imports `fs`, `child_process`, `os` or the PTY module directly.
 

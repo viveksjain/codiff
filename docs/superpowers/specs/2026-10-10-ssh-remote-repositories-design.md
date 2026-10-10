@@ -54,7 +54,14 @@ interface RepositoryHost {
   exec(
     command: string,
     args: ReadonlyArray<string>,
-    options?: { cwd?: string; encoding?: BufferEncoding | 'buffer'; env?: Record<string, string>; input?: string | Buffer; maxBuffer?: number; signal?: AbortSignal },
+    options?: {
+      cwd?: string;
+      encoding?: BufferEncoding | 'buffer';
+      env?: Record<string, string>;
+      input?: string | Buffer;
+      maxBuffer?: number;
+      signal?: AbortSignal;
+    },
   ): Promise<string | Buffer>;
 
   spawn(
@@ -69,7 +76,9 @@ interface RepositoryHost {
   readFiles(paths: ReadonlyArray<string>): Promise<Array<Buffer | Error>>;
   readFileTail(path: string, maxBytes: number): Promise<Buffer>;
   readlink(path: string): Promise<string>;
-  readdir(path: string): Promise<Array<{ name: string; type: 'file' | 'directory' | 'symlink' | 'other' }>>;
+  readdir(
+    path: string,
+  ): Promise<Array<{ name: string; type: 'file' | 'directory' | 'symlink' | 'other' }>>;
   writeFile(path: string, contents: string | Buffer): Promise<void>;
   mkdtemp(prefix: string): Promise<string>;
   rm(path: string, options?: { recursive?: boolean }): Promise<void>;
@@ -200,19 +209,19 @@ over stdin.
 
 ## Feature behavior on a remote host
 
-| Feature | Behavior |
-| --- | --- |
-| Status, diffs, commit/branch/compare views, history | Git via `host.exec`; working-tree and untracked contents and images via `host.lstatMany` / `host.readFiles`. |
-| Live refresh (`repository-watcher.cjs`) | Same polling (2.5s focused, 10s visible, 30s hidden) through `host.exec`; self-write checks via `host.lstat`. Pauses while disconnected and resumes after reconnect. |
-| Definition search | `git grep` via `host.spawn` with the existing timeout and abort, using PID-based cancellation. |
-| Generated-file detection | Temporary `GIT_INDEX_FILE` from `host.mkdtemp()`, removed afterwards. |
-| Save file edits | `host.writeFile`. |
-| Stage and commit (`walkthrough-commit.cjs`) | `git add` via `host.exec`. Commit message passed with `commit -F -` over stdin instead of a local temp file (for both hosts). Hook output streamed via `host.spawn({pty: true})`. |
-| Walkthroughs | Agent runs on the remote host (see below). |
-| Session context (`~/.claude`, `~/.codex` transcripts) | Read through the host with `readdir` and `readFileTail`; home, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` come from the remote environment. |
-| `--context <file>` CLI flag | Stays a local file. |
-| Walkthrough cache, viewed state, comments, plan reviews, config | Local, keyed by `host.id` + `repoPath`. |
-| PR/MR review, Open in Editor, Show in Folder | Hidden for remote repositories. |
+| Feature                                                         | Behavior                                                                                                                                                                          |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status, diffs, commit/branch/compare views, history             | Git via `host.exec`; working-tree and untracked contents and images via `host.lstatMany` / `host.readFiles`.                                                                      |
+| Live refresh (`repository-watcher.cjs`)                         | Same polling (2.5s focused, 10s visible, 30s hidden) through `host.exec`; self-write checks via `host.lstat`. Pauses while disconnected and resumes after reconnect.              |
+| Definition search                                               | `git grep` via `host.spawn` with the existing timeout and abort, using PID-based cancellation.                                                                                    |
+| Generated-file detection                                        | Temporary `GIT_INDEX_FILE` from `host.mkdtemp()`, removed afterwards.                                                                                                             |
+| Save file edits                                                 | `host.writeFile`.                                                                                                                                                                 |
+| Stage and commit (`walkthrough-commit.cjs`)                     | `git add` via `host.exec`. Commit message passed with `commit -F -` over stdin instead of a local temp file (for both hosts). Hook output streamed via `host.spawn({pty: true})`. |
+| Walkthroughs                                                    | Agent runs on the remote host (see below).                                                                                                                                        |
+| Session context (`~/.claude`, `~/.codex` transcripts)           | Read through the host with `readdir` and `readFileTail`; home, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` come from the remote environment.                                             |
+| `--context <file>` CLI flag                                     | Stays a local file.                                                                                                                                                               |
+| Walkthrough cache, viewed state, comments, plan reviews, config | Local, keyed by `host.id` + `repoPath`.                                                                                                                                           |
+| PR/MR review, Open in Editor, Show in Folder                    | Hidden for remote repositories.                                                                                                                                                   |
 
 ### Walkthroughs on the remote
 
@@ -255,13 +264,13 @@ then hand `{hostId, repoPath, source}` to the app using the existing launch hand
 
 ### Errors
 
-| Error | Cause | Message |
-| --- | --- | --- |
-| `HostAuthRequiredError` | `BatchMode` hit an authentication prompt | "devbox needs interactive login. Run `codiff devbox:~/app` from a terminal." |
-| `HostUnreachableError` | ssh exit 255 with connect timeout, DNS or refused connection | ssh's stderr verbatim |
-| `HostDisconnectedError` | master died and the fallback connection also failed | Disconnected banner |
-| `UnsupportedRemoteShellError` | login shell is not POSIX or fish | "Codiff needs a POSIX or fish login shell on devbox" |
-| `RemoteCommandMissingError` | `git` or the agent binary is not on the remote `PATH` | Names the command and the host |
+| Error                         | Cause                                                        | Message                                                                      |
+| ----------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `HostAuthRequiredError`       | `BatchMode` hit an authentication prompt                     | "devbox needs interactive login. Run `codiff devbox:~/app` from a terminal." |
+| `HostUnreachableError`        | ssh exit 255 with connect timeout, DNS or refused connection | ssh's stderr verbatim                                                        |
+| `HostDisconnectedError`       | master died and the fallback connection also failed          | Disconnected banner                                                          |
+| `UnsupportedRemoteShellError` | login shell is not POSIX or fish                             | "Codiff needs a POSIX or fish login shell on devbox"                         |
+| `RemoteCommandMissingError`   | `git` or the agent binary is not on the remote `PATH`        | Names the command and the host                                               |
 
 A non-zero git exit is not an SSH failure and keeps today's handling. Exit status 255 is ambiguous
 (ssh failure or a command that exited 255), so the host runs `-O check` before classifying it.
