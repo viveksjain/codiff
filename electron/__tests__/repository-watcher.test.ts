@@ -9,6 +9,7 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 type Snapshot = {
   head: string;
@@ -26,6 +27,7 @@ type SubscriberState = {
 type Coordinator = {
   attach: (subscriber: {
     getState: () => SubscriberState;
+    host: RepositoryHost;
     id: number;
     notify: (root: string) => void;
     root: string;
@@ -33,21 +35,25 @@ type Coordinator = {
   beginWrite: (
     id: number,
     path: string,
-  ) => { generation: number; path: string; root: string } | null;
+  ) => { generation: number; key: string; path: string; root: string } | null;
   checkNow: (id: number) => Promise<void>;
   detach: (id: number) => void;
   finishWrite: (
-    token: { generation: number; path: string; root: string } | null,
+    token: { generation: number; key: string; path: string; root: string } | null,
     version: string | null,
   ) => void;
   focus: (id: number) => void;
   getWatcherCount: () => number;
-  getWatcherSubscriberCount: (root: string) => number;
-  reset: (id: number, root: string) => Promise<void>;
+  getWatcherSubscriberCount: (host: RepositoryHost, root: string) => number;
+  reset: (id: number, host: RepositoryHost, root: string) => Promise<void>;
   visibilityChanged: (id: number) => void;
 };
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const {
   createRepositoryWatcherCoordinator,
   getRepositoryWatcherPollInterval,
@@ -59,6 +65,7 @@ const {
   createRepositoryWatcherCoordinator: (options: {
     clearTimeoutImpl?: (timer: unknown) => void;
     readSnapshot: (
+      host: RepositoryHost,
       root: string,
       exactPaths: Iterable<string>,
       knownDirtyPaths: Iterable<string>,
@@ -69,6 +76,7 @@ const {
   normalizeRepositoryWatcherPath: (path: string, pathSeparator?: string) => string;
   parseRepositoryWatcherStatus: (raw: string) => { head: string; paths: Array<string> };
   readRepositoryWatcherSnapshot: (
+    host: RepositoryHost,
     root: string,
     exactPaths?: Iterable<string>,
     knownDirtyPaths?: Iterable<string>,
@@ -215,7 +223,7 @@ test('shares one watcher per repository and adapts polling to window state', asy
     clearTimeoutImpl: (timer) => {
       (timer as (typeof timers)[number]).cleared = true;
     },
-    readSnapshot: async (root) => {
+    readSnapshot: async (_host, root) => {
       reads += 1;
       return { ...current, root };
     },
@@ -228,12 +236,14 @@ test('shares one watcher per repository and adapts polling to window state', asy
 
   await coordinator.attach({
     getState: () => states.get(1) as SubscriberState,
+    host,
     id: 1,
     notify: () => notifications.push(1),
     root: '/repo',
   });
   await coordinator.attach({
     getState: () => states.get(2) as SubscriberState,
+    host,
     id: 2,
     notify: () => notifications.push(2),
     root: '/repo',
@@ -241,7 +251,7 @@ test('shares one watcher per repository and adapts polling to window state', asy
 
   expect(reads).toBe(1);
   expect(coordinator.getWatcherCount()).toBe(1);
-  expect(coordinator.getWatcherSubscriberCount('/repo')).toBe(2);
+  expect(coordinator.getWatcherSubscriberCount(host, '/repo')).toBe(2);
   expect(timers.filter(({ cleared }) => !cleared).at(-1)?.delay).toBe(2500);
 
   states.set(1, { focused: false, visible: true });
@@ -274,12 +284,14 @@ test('resetting one subscriber preserves change notifications for other windows'
   });
   await coordinator.attach({
     getState: () => ({ focused: true, visible: true }),
+    host,
     id: 1,
     notify: () => notifications.push(1),
     root: '/repo',
   });
   await coordinator.attach({
     getState: () => ({ focused: true, visible: true }),
+    host,
     id: 2,
     notify: () => notifications.push(2),
     root: '/repo',
@@ -292,7 +304,7 @@ test('resetting one subscriber preserves change notifications for other windows'
       'src/app.ts': 'first-external-change',
     },
   };
-  await coordinator.reset(1, '/repo');
+  await coordinator.reset(1, host, '/repo');
   expect(notifications).toEqual([2]);
 
   current = {
@@ -315,7 +327,7 @@ test('uses exact hashes while suppressing Codiff-authored writes only for their 
   const knownDirtyPathReads: Array<Array<string>> = [];
   const notifications: Array<number> = [];
   const coordinator = createRepositoryWatcherCoordinator({
-    readSnapshot: async (_root, exactPaths, knownDirtyPaths) => {
+    readSnapshot: async (_host, _root, exactPaths, knownDirtyPaths) => {
       const paths = [...exactPaths];
       exactPathReads.push(paths);
       knownDirtyPathReads.push([...knownDirtyPaths]);
@@ -329,12 +341,14 @@ test('uses exact hashes while suppressing Codiff-authored writes only for their 
   });
   await coordinator.attach({
     getState: () => ({ focused: true, visible: true }),
+    host,
     id: 1,
     notify: () => notifications.push(1),
     root: '/repo',
   });
   await coordinator.attach({
     getState: () => ({ focused: true, visible: true }),
+    host,
     id: 2,
     notify: () => notifications.push(2),
     root: '/repo',
@@ -382,7 +396,7 @@ test('clean and large dirty repository watcher polls use one Git process', async
   const countGitProcesses = async (label: string, knownDirtyPaths: ReadonlyArray<string>) => {
     const tracePath = join(repository, '.git', `trace-${label}.jsonl`);
     await using _traceEnvironment = createTemporaryEnvironment({ GIT_TRACE2_EVENT: tracePath });
-    await readRepositoryWatcherSnapshot(repository, [], knownDirtyPaths);
+    await readRepositoryWatcherSnapshot(host, repository, [], knownDirtyPaths);
     return (await readFile(tracePath, 'utf8'))
       .trim()
       .split('\n')
@@ -398,14 +412,19 @@ test('clean and large dirty repository watcher polls use one Git process', async
 
   const cleanProcessCount = await countGitProcesses('clean', []);
   await writeFile(largePath, Buffer.alloc(largeTestFileSize, 2));
-  const initialDirtySnapshot = await readRepositoryWatcherSnapshot(repository);
+  const initialDirtySnapshot = await readRepositoryWatcherSnapshot(host, repository);
   const dirtyProcessCount = await countGitProcesses(
     'dirty',
     Object.keys(initialDirtySnapshot.pathSignatures),
   );
   await writeFile(join(repository, 'new.txt'), 'new\n');
-  const combinedSnapshot = await readRepositoryWatcherSnapshot(repository, [], ['large.bin']);
-  const snapshot = await readRepositoryWatcherSnapshot(repository, ['large.bin'], ['large.bin']);
+  const combinedSnapshot = await readRepositoryWatcherSnapshot(host, repository, [], ['large.bin']);
+  const snapshot = await readRepositoryWatcherSnapshot(
+    host,
+    repository,
+    ['large.bin'],
+    ['large.bin'],
+  );
 
   expect(cleanProcessCount).toBe(1);
   expect(dirtyProcessCount).toBe(1);
@@ -424,7 +443,7 @@ test('detects same-size edits when the modification time is preserved', async ()
   await git(repository, ['init']);
   await writeFile(path, 'first\n');
   await utimes(path, fixedTime, fixedTime);
-  const before = await readRepositoryWatcherSnapshot(repository);
+  const before = await readRepositoryWatcherSnapshot(host, repository);
   const beforeStat = await stat(path);
 
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -432,6 +451,7 @@ test('detects same-size edits when the modification time is preserved', async ()
   await utimes(path, fixedTime, fixedTime);
   const afterStat = await stat(path);
   const after = await readRepositoryWatcherSnapshot(
+    host,
     repository,
     [],
     Object.keys(before.pathSignatures),
@@ -453,8 +473,9 @@ test('preserves literal backslashes in POSIX repository paths', async () => {
 
   await git(repository, ['init']);
   await writeFile(join(repository, path), 'dirty\n');
-  const before = await readRepositoryWatcherSnapshot(repository);
+  const before = await readRepositoryWatcherSnapshot(host, repository);
   const after = await readRepositoryWatcherSnapshot(
+    host,
     repository,
     [],
     Object.keys(before.pathSignatures),

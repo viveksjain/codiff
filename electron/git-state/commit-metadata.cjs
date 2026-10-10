@@ -3,6 +3,7 @@
 const { fileSort, getGravatarHash, git, gitBufferWithInput, gitOrEmpty } = require('./common.cjs');
 
 /**
+ * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').CommitMetadata} CommitMetadata
  * @typedef {import('../../core/types.ts').CommitMetadataFile} CommitMetadataFile
  * @typedef {import('./common.cjs').StatusItem} StatusItem
@@ -66,13 +67,15 @@ const parseNumstat = (raw) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} commit
  * @param {string | undefined} firstParent
  */
-const readCommitNumstat = async (repoRoot, commit, firstParent) =>
+const readCommitNumstat = async (host, repoRoot, commit, firstParent) =>
   parseNumstat(
     await git(
+      host,
       repoRoot,
       firstParent
         ? ['diff', '--numstat', '-z', '--find-renames', firstParent, commit]
@@ -94,19 +97,21 @@ const parseTrailers = (raw) =>
   });
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} subject
  * @param {string} body
  */
-const readCommitMessageParts = async (repoRoot, subject, body) => {
+const readCommitMessageParts = async (host, repoRoot, subject, body) => {
   const message = `${subject}\n\n${body}`;
   const [rawTrailerBlock, parsedTrailerBlock] = await Promise.all([
     gitBufferWithInput(
+      host,
       repoRoot,
       ['interpret-trailers', '--only-trailers', '--only-input'],
       message,
     ),
-    gitBufferWithInput(repoRoot, ['interpret-trailers', '--parse'], message),
+    gitBufferWithInput(host, repoRoot, ['interpret-trailers', '--parse'], message),
   ]);
   const trailerBlock = rawTrailerBlock.toString('utf8').trimEnd();
   const trimmedBody = body.trimEnd();
@@ -211,14 +216,15 @@ const createCommitMetadataStats = (files) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} commit
  * @param {string | undefined} firstParent
  * @param {ReadonlyArray<Pick<StatusItem, 'oldPath' | 'path' | 'status'>>} status
  * @returns {Promise<CommitMetadata>}
  */
-const readCommitMetadataForCommit = async (repoRoot, commit, firstParent, status) => {
-  const rawHeader = await git(repoRoot, [
+const readCommitMetadataForCommit = async (host, repoRoot, commit, firstParent, status) => {
+  const rawHeader = await git(host, repoRoot, [
     'show',
     '-s',
     '--format=%H%x00%h%x00%P%x00%aN%x00%aE%x00%aI%x00%cN%x00%cE%x00%cI%x00%s%x00%b%x00%G?%x00%GS%x00%GK',
@@ -226,9 +232,14 @@ const readCommitMetadataForCommit = async (repoRoot, commit, firstParent, status
   ]);
   const header = parseCommitMetadataHeader(rawHeader);
   const [numstat, refs, messageParts] = await Promise.all([
-    readCommitNumstat(repoRoot, commit, firstParent),
-    gitOrEmpty(repoRoot, ['for-each-ref', '--points-at', commit, '--format=%(refname:short)']),
-    readCommitMessageParts(repoRoot, header.subject, header.body),
+    readCommitNumstat(host, repoRoot, commit, firstParent),
+    gitOrEmpty(host, repoRoot, [
+      'for-each-ref',
+      '--points-at',
+      commit,
+      '--format=%(refname:short)',
+    ]),
+    readCommitMessageParts(host, repoRoot, header.subject, header.body),
   ]);
   const files = createCommitMetadataFiles(status, numstat).sort(fileSort);
 

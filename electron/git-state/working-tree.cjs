@@ -21,6 +21,7 @@ const {
 } = require('./common.cjs');
 
 /**
+ * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageContentRequest} DiffImageContentRequest
  * @typedef {import('../../core/types.ts').DiffImageContentResult} DiffImageContentResult
@@ -131,23 +132,24 @@ const splitPatchByPath = (rawPatch) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {WorkingTreeSectionKind} kind
  * @param {{showWhitespace?: boolean}} [options]
  * @returns {Promise<Map<string, {binary: boolean; patch: string}>>}
  */
-const readPatchMap = async (repoRoot, kind, options = {}) => {
+const readPatchMap = async (host, repoRoot, kind, options = {}) => {
   const whitespaceArgs = getWhitespaceDiffArgs(options);
   const args =
     kind === 'staged'
       ? ['diff', '--cached', '--patch', '--no-ext-diff', ...whitespaceArgs]
       : ['diff', '--patch', '--no-ext-diff', ...whitespaceArgs];
-  return splitPatchByPath(await git(repoRoot, args));
+  return splitPatchByPath(await git(host, repoRoot, args));
 };
 
-/** @param {string} repoRoot @returns {Promise<Array<StatusItem>>} */
-const listUntrackedItems = async (repoRoot) => {
-  const rawFiles = await git(repoRoot, [
+/** @param {RepositoryHost} host @param {string} repoRoot @returns {Promise<Array<StatusItem>>} */
+const listUntrackedItems = async (host, repoRoot) => {
+  const rawFiles = await git(host, repoRoot, [
     'ls-files',
     '--others',
     '--exclude-standard',
@@ -183,7 +185,7 @@ const listUntrackedItems = async (repoRoot) => {
     });
   }
 
-  const rawDirectories = await git(repoRoot, [
+  const rawDirectories = await git(host, repoRoot, [
     'ls-files',
     '--others',
     '--exclude-standard',
@@ -213,22 +215,23 @@ const listUntrackedItems = async (repoRoot) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {{eagerContents?: boolean; showWhitespace?: boolean}} [options]
  * @returns {Promise<RepositoryState>}
  */
-const readWorkingTreeState = async (launchPath, options = {}) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+const readWorkingTreeState = async (host, launchPath, options = {}) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const [trackedStatus, untrackedItems] = await Promise.all([
-    git(repoRoot, ['status', '--porcelain=v1', '-z', '-uno']),
-    listUntrackedItems(repoRoot),
+    git(host, repoRoot, ['status', '--porcelain=v1', '-z', '-uno']),
+    listUntrackedItems(host, repoRoot),
   ]);
   const status = [...parseStatus(trackedStatus), ...untrackedItems].sort(fileSort);
   const shouldUsePatchOnly = options.eagerContents === false;
   const [stagedPatches, unstagedPatches] = shouldUsePatchOnly
     ? await Promise.all([
-        readPatchMap(repoRoot, 'staged', options),
-        readPatchMap(repoRoot, 'unstaged', options),
+        readPatchMap(host, repoRoot, 'staged', options),
+        readPatchMap(host, repoRoot, 'unstaged', options),
       ])
     : [new Map(), new Map()];
   /** @type {Array<ChangedFile>} */
@@ -241,7 +244,7 @@ const readWorkingTreeState = async (launchPath, options = {}) => {
 
     if (item.staged) {
       sections.push(
-        await createSection(repoRoot, item, 'staged', {
+        await createSection(host, repoRoot, item, 'staged', {
           patch: stagedPatches.get(item.path),
           patchOnly,
           showWhitespace: options.showWhitespace,
@@ -251,7 +254,7 @@ const readWorkingTreeState = async (launchPath, options = {}) => {
 
     if (item.unstaged) {
       sections.push(
-        await createSection(repoRoot, item, 'unstaged', {
+        await createSection(host, repoRoot, item, 'unstaged', {
           patch: item.status === 'conflicted' ? undefined : unstagedPatches.get(item.path),
           patchOnly,
           showWhitespace: options.showWhitespace,
@@ -292,17 +295,17 @@ const readWorkingTreeState = async (launchPath, options = {}) => {
   };
 };
 
-/** @param {string} repoRoot @param {string} path @returns {Promise<StatusItem>} */
-const getStatusItemForPath = async (repoRoot, path) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} path @returns {Promise<StatusItem>} */
+const getStatusItemForPath = async (host, repoRoot, path) => {
   const trackedStatus = parseStatus(
-    await git(repoRoot, ['status', '--porcelain=v1', '-z', '-uno']),
+    await git(host, repoRoot, ['status', '--porcelain=v1', '-z', '-uno']),
   );
   const trackedItem = trackedStatus.find((item) => item.path === path);
   if (trackedItem) {
     return trackedItem;
   }
 
-  const stat = await readFileStat(repoRoot, path);
+  const stat = await readFileStat(host, repoRoot, path);
   return {
     directory: Boolean(stat?.isDirectory()),
     path,
@@ -313,47 +316,48 @@ const getStatusItemForPath = async (repoRoot, path) => {
   };
 };
 
-/** @param {string} launchPath @param {DiffSectionContentRequest} request */
-const readDiffSectionContent = async (launchPath, request) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {DiffSectionContentRequest} request */
+const readDiffSectionContent = async (host, launchPath, request) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const path = validateRepositoryPath(request.path);
   if (request.kind === 'commit' || request.source?.type === 'commit') {
     throw new Error('Lazy loading commit diffs is not supported.');
   }
 
-  const item = await getStatusItemForPath(repoRoot, path);
-  return createSection(repoRoot, item, /** @type {WorkingTreeSectionKind} */ (request.kind), {
+  const item = await getStatusItemForPath(host, repoRoot, path);
+  return createSection(host, repoRoot, item, /** @type {WorkingTreeSectionKind} */ (request.kind), {
     force: request.force,
     showWhitespace: request.showWhitespace,
   });
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {DiffImageContentRequest} request
  * @returns {Promise<DiffImageContentResult>}
  */
-const readDiffImageContent = async (launchPath, request) => {
+const readDiffImageContent = async (host, launchPath, request) => {
   try {
-    const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+    const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
     const path = validateRepositoryPath(request.path);
     if (request.kind === 'commit' || request.source?.type === 'commit') {
       throw new Error('Commit image diffs are loaded through the commit reader.');
     }
 
-    const item = await getStatusItemForPath(repoRoot, path);
+    const item = await getStatusItemForPath(host, repoRoot, path);
     const oldPath = item.oldPath || item.path;
     const [oldImage, newImage] =
       request.kind === 'staged'
         ? await Promise.all([
-            readGitImageFile(repoRoot, 'HEAD', oldPath),
-            readIndexImageFile(repoRoot, item.path),
+            readGitImageFile(host, repoRoot, 'HEAD', oldPath),
+            readIndexImageFile(host, repoRoot, item.path),
           ])
         : await Promise.all([
             item.untracked
               ? undefined
-              : readIndexImageFile(repoRoot, item.path, item.conflictStage),
-            readWorkingTreeImageFile(repoRoot, item.path),
+              : readIndexImageFile(host, repoRoot, item.path, item.conflictStage),
+            readWorkingTreeImageFile(host, repoRoot, item.path),
           ]);
 
     if (!oldImage && !newImage) {
@@ -376,20 +380,20 @@ const readDiffImageContent = async (launchPath, request) => {
   }
 };
 
-/** @param {string} repoRoot @param {ReadonlyArray<string>} args */
-const gitOrEmpty = async (repoRoot, args) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {ReadonlyArray<string>} args */
+const gitOrEmpty = async (host, repoRoot, args) => {
   try {
-    return await git(repoRoot, args);
+    return await git(host, repoRoot, args);
   } catch {
     return '';
   }
 };
 
-/** @param {string} launchPath */
-const readGitIdentity = async (launchPath) => {
+/** @param {RepositoryHost} host @param {string} launchPath */
+const readGitIdentity = async (host, launchPath) => {
   const [configuredName, configuredEmail] = await Promise.all([
-    gitOrEmpty(launchPath, ['config', '--get', 'user.name']),
-    gitOrEmpty(launchPath, ['config', '--get', 'user.email']),
+    gitOrEmpty(host, launchPath, ['config', '--get', 'user.name']),
+    gitOrEmpty(host, launchPath, ['config', '--get', 'user.email']),
   ]);
   const email = configuredEmail.trim();
   const name = configuredName.trim();

@@ -82,6 +82,8 @@ const {
 const { createSkillInstaller } = require('./main/agent-skill.cjs');
 const { createEditorOpener } = require('./main/editor.cjs');
 const { createDefinitionSearchCoordinator } = require('./definition-search.cjs');
+const { createLocalHost } = require('./host/local-host.cjs');
+const { createWindowRepositories } = require('./window-repositories.cjs');
 const { createTerminalHelper } = require('./main/terminal-helper.cjs');
 const {
   MIN_WINDOW_HEIGHT,
@@ -121,6 +123,7 @@ const { createSharedPlanSnapshot } = require('./shared-plan.cjs');
 const { createWalkthroughProgressReporter } = require('./walkthrough-progress.cjs');
 
 /**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../core/config/types.ts').CodiffConfig} CodiffConfig
  * @typedef {import('../core/types.ts').CodiffLaunchOptions} CodiffLaunchOptions
  * @typedef {import('../core/types.ts').CodiffTheme} CodiffTheme
@@ -135,8 +138,8 @@ const { createWalkthroughProgressReporter } = require('./walkthrough-progress.cj
 const root = dirname(__dirname);
 /** @type {Map<number, WindowIdentity | null>} */
 const windowIdentities = new Map();
-/** @type {Map<number, string>} */
-const windowRepositories = new Map();
+const localHost = createLocalHost();
+const windowRepositories = createWindowRepositories({ getLaunchPath, localHost });
 /** @type {Map<number, CodiffLaunchOptions>} */
 const windowLaunchOptions = new Map();
 /** @type {Map<number, Promise<RepositoryState>>} */
@@ -193,19 +196,19 @@ const refreshInstalledAgentFiles = () => {
 
 const getActiveAgent = () => getAgent(config.settings.agentBackend);
 
-/** @param {string} repositoryPath @param {ReviewSource} [source] */
-const readRepositoryStateWithConfig = (repositoryPath, source) =>
-  readRepositoryState(repositoryPath, source, {
+/** @param {RepositoryHost} host @param {string} repositoryPath @param {ReviewSource} [source] */
+const readRepositoryStateWithConfig = (host, repositoryPath, source) =>
+  readRepositoryState(host, repositoryPath, source, {
     showWhitespace: config.settings.showWhitespace,
   });
 
-/** @param {string} repositoryPath @param {CodiffLaunchOptions} launchOptions */
-const readInitialRepositoryStateWithConfig = (repositoryPath, launchOptions) =>
+/** @param {RepositoryHost} host @param {string} repositoryPath @param {CodiffLaunchOptions} launchOptions */
+const readInitialRepositoryStateWithConfig = (host, repositoryPath, launchOptions) =>
   launchOptions.walkthrough && !launchOptions.walkthroughFile
-    ? readWalkthroughRepositoryState(repositoryPath, launchOptions.source, {
+    ? readWalkthroughRepositoryState(host, repositoryPath, launchOptions.source, {
         showWhitespace: config.settings.showWhitespace,
       })
-    : readRepositoryStateWithConfig(repositoryPath, launchOptions.source);
+    : readRepositoryStateWithConfig(host, repositoryPath, launchOptions.source);
 
 /** @param {number} webContentsId */
 const resolveWindowAgent = (webContentsId) => {
@@ -235,21 +238,25 @@ const openConfigFile = async () => {
   await openFileInEditor(getConfigPath());
 };
 
-/** @param {number} webContentsId */
-const getWindowRepositoryRoot = (webContentsId) =>
-  windowIdentities.get(webContentsId)?.repositoryRoot ||
-  windowRepositories.get(webContentsId) ||
-  getLaunchPath();
+/** @param {number} webContentsId @returns {import('./window-repositories.cjs').WindowRepository} */
+const getWindowRepository = (webContentsId) => {
+  const repository = windowRepositories.get(webContentsId);
+  const identityRoot = windowIdentities.get(webContentsId)?.repositoryRoot;
+  return identityRoot ? { ...repository, repositoryPath: identityRoot } : repository;
+};
 
 /** @param {number} webContentsId */
 const getMarkdownDocumentContext = (webContentsId) => ({
   planFile: windowLaunchOptions.get(webContentsId)?.planFile,
-  repositoryRoot: getWindowRepositoryRoot(webContentsId),
+  repositoryRoot: getWindowRepository(webContentsId).repositoryPath,
 });
 
 /** @param {number} webContentsId @param {RepositoryState} state */
 const storeResolvedRepositoryState = (webContentsId, state) => {
-  windowRepositories.set(webContentsId, state.root);
+  windowRepositories.set(webContentsId, {
+    host: windowRepositories.get(webContentsId).host,
+    repositoryPath: state.root,
+  });
   const browserWindow = BrowserWindow.getAllWindows().find(
     (window) => window.webContents.id === webContentsId,
   );
@@ -490,17 +497,19 @@ const rememberLastRepositoryPath = (repositoryPath) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repositoryRoot
  * @param {Iterable<string>} [exactPaths]
  * @param {Iterable<string>} [knownDirtyPaths]
  */
 const readSafeRepositoryWatcherSnapshot = async (
+  host,
   repositoryRoot,
   exactPaths = [],
   knownDirtyPaths = [],
 ) => {
   try {
-    return await readRepositoryWatcherSnapshot(repositoryRoot, exactPaths, knownDirtyPaths);
+    return await readRepositoryWatcherSnapshot(host, repositoryRoot, exactPaths, knownDirtyPaths);
   } catch (error) {
     return {
       head: `error:${error instanceof Error ? error.message : String(error)}`,
@@ -516,9 +525,9 @@ const repositoryWatcherCoordinator = createRepositoryWatcherCoordinator({
   readSnapshot: readSafeRepositoryWatcherSnapshot,
 });
 
-/** @param {number} webContentsId @param {string} repositoryPath */
-const resetRepositoryWatcher = (webContentsId, repositoryPath) =>
-  repositoryWatcherCoordinator.reset(webContentsId, repositoryPath);
+/** @param {RepositoryHost} host @param {number} webContentsId @param {string} repositoryPath */
+const resetRepositoryWatcher = (host, webContentsId, repositoryPath) =>
+  repositoryWatcherCoordinator.reset(webContentsId, host, repositoryPath);
 
 /**
  * @param {number} webContentsId
@@ -527,12 +536,12 @@ const resetRepositoryWatcher = (webContentsId, repositoryPath) =>
 const beginRepositorySelfWrite = (webContentsId, path) =>
   repositoryWatcherCoordinator.beginWrite(webContentsId, path);
 
-/** @param {{generation: number; path: string; root: string} | null} token @param {string | null} version */
+/** @param {{generation: number; key: string; path: string; root: string} | null} token @param {string | null} version */
 const finishRepositorySelfWrite = (token, version) =>
   repositoryWatcherCoordinator.finishWrite(token, version);
 
-/** @param {import('electron').BrowserWindow} browserWindow @param {string} repositoryPath */
-const startRepositoryWatcher = (browserWindow, repositoryPath) => {
+/** @param {RepositoryHost} host @param {import('electron').BrowserWindow} browserWindow @param {string} repositoryPath */
+const startRepositoryWatcher = (host, browserWindow, repositoryPath) => {
   const webContentsId = browserWindow.webContents.id;
   void repositoryWatcherCoordinator.attach({
     getState: () => ({
@@ -540,6 +549,7 @@ const startRepositoryWatcher = (browserWindow, repositoryPath) => {
       visible:
         !browserWindow.isDestroyed() && browserWindow.isVisible() && !browserWindow.isMinimized(),
     }),
+    host,
     id: webContentsId,
     notify: (root) => {
       if (!browserWindow.isDestroyed()) {
@@ -937,11 +947,13 @@ ipcMain.on(
 );
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repositoryPath
  * @param {CodiffLaunchOptions} [launchOptions]
  * @param {WindowIdentity | null} [identity]
  */
 const createWindow = (
+  host,
   repositoryPath,
   launchOptions = { repositoryPathProvided: true, walkthrough: false },
   identity = getWindowIdentity(repositoryPath, launchOptions),
@@ -997,11 +1009,14 @@ const createWindow = (
   if (identity) {
     windowIdentities.set(webContentsId, identity);
   }
-  windowRepositories.set(webContentsId, identity?.repositoryRoot || repositoryPath);
+  windowRepositories.set(webContentsId, {
+    host,
+    repositoryPath: identity?.repositoryRoot || repositoryPath,
+  });
   windowLaunchOptions.set(webContentsId, launchOptions);
   const initialRepositoryStatePromise = launchOptions.planFile
     ? null
-    : readInitialRepositoryStateWithConfig(repositoryPath, launchOptions);
+    : readInitialRepositoryStateWithConfig(host, repositoryPath, launchOptions);
   const initialRepositoryState = initialRepositoryStatePromise?.then((state) => {
     if (!window.isDestroyed()) {
       storeResolvedRepositoryState(webContentsId, state);
@@ -1024,7 +1039,7 @@ const createWindow = (
           (state.source.type === 'working-tree' || state.source.type === 'branch-working-tree') &&
           !window.isDestroyed()
         ) {
-          startRepositoryWatcher(window, state.root);
+          startRepositoryWatcher(host, window, state.root);
         }
       })
       .catch(() => {});
@@ -1181,8 +1196,8 @@ const focusWindow = (window) => {
 
 /** @param {number} webContentsId */
 const getWalkthroughShareContext = async (webContentsId) => {
-  const repositoryPath = windowRepositories.get(webContentsId) || getLaunchPath();
-  const uploader = await readGitIdentity(repositoryPath);
+  const { host, repositoryPath } = windowRepositories.get(webContentsId);
+  const uploader = await readGitIdentity(host, repositoryPath);
 
   return {
     target: resolveWalkthroughShareTarget({
@@ -1195,8 +1210,8 @@ const getWalkthroughShareContext = async (webContentsId) => {
 
 /** @param {number} webContentsId */
 const getPlanShareContext = async (webContentsId) => {
-  const repositoryPath = windowRepositories.get(webContentsId) || getLaunchPath();
-  const uploader = await readGitIdentity(repositoryPath);
+  const { host, repositoryPath } = windowRepositories.get(webContentsId);
+  const uploader = await readGitIdentity(host, repositoryPath);
   return {
     target: resolvePlanShareTarget({
       email: uploader.email,
@@ -1269,7 +1284,10 @@ const focusOrCreateWindow = (
 
   if (matchingWindow) {
     if (launchOptions.planFile || launchOptions.walkthrough || launchOptions.walkthroughFile) {
-      windowRepositories.set(matchingWebContentsId, identity?.repositoryRoot || repositoryPath);
+      windowRepositories.set(matchingWebContentsId, {
+        host: localHost,
+        repositoryPath: identity?.repositoryRoot || repositoryPath,
+      });
       windowLaunchOptions.set(matchingWebContentsId, launchOptions);
       if (launchOptions.planFile) {
         planInitialVersions.delete(matchingWebContentsId);
@@ -1278,7 +1296,7 @@ const focusOrCreateWindow = (
       } else {
         windowInitialRepositoryStates.set(
           matchingWebContentsId,
-          readInitialRepositoryStateWithConfig(repositoryPath, launchOptions),
+          readInitialRepositoryStateWithConfig(localHost, repositoryPath, launchOptions),
         );
       }
       if (identity) {
@@ -1290,7 +1308,7 @@ const focusOrCreateWindow = (
     return matchingWindow;
   }
 
-  return createWindow(repositoryPath, launchOptions, identity);
+  return createWindow(localHost, repositoryPath, launchOptions, identity);
 };
 
 const INITIAL_UPDATE_CHECK_DELAY_MS = 10 * 1000;
@@ -1524,7 +1542,7 @@ ipcMain.handle('codiff:openReleasePage', () => {
 });
 
 ipcMain.handle('codiff:getRepositoryState', async (event, source) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const initialState = !source ? windowInitialRepositoryStates.get(event.sender.id) : undefined;
   if (initialState) {
@@ -1532,10 +1550,10 @@ ipcMain.handle('codiff:getRepositoryState', async (event, source) => {
   }
   const state = initialState
     ? await initialState
-    : await readRepositoryStateWithConfig(repositoryPath, source || launchOptions?.source);
+    : await readRepositoryStateWithConfig(host, repositoryPath, source || launchOptions?.source);
   storeResolvedRepositoryState(event.sender.id, state);
   rememberLastRepositoryPath(state.root);
-  void resetRepositoryWatcher(event.sender.id, state.root);
+  void resetRepositoryWatcher(host, event.sender.id, state.root);
   return state;
 });
 
@@ -1552,7 +1570,7 @@ ipcMain.handle('codiff:resolvePullRequestUrl', (event, value) => {
   }
 
   // Reuse the CLI resolver so a bare number follows the repository's preferred remote.
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
+  const { repositoryPath } = windowRepositories.get(event.sender.id);
   return resolveReviewUrl(repositoryPath, Number(number[1]));
 });
 
@@ -1566,11 +1584,11 @@ ipcMain.handle('codiff:getMarkdownDocument', async (event, request) => {
 });
 
 ipcMain.handle('codiff:getRepositoryFile', (event, path) =>
-  readRepositoryFile(getWindowRepositoryRoot(event.sender.id), path),
+  readRepositoryFile(getWindowRepository(event.sender.id).repositoryPath, path),
 );
 
 ipcMain.handle('codiff:saveRepositoryFile', async (event, request) => {
-  const root = getWindowRepositoryRoot(event.sender.id);
+  const { repositoryPath: root } = getWindowRepository(event.sender.id);
   const current = await readRepositoryFile(root, request.path);
   const selfWrite = beginRepositorySelfWrite(event.sender.id, current.path);
   try {
@@ -1685,8 +1703,9 @@ ipcMain.handle('codiff:getNarrativeWalkthrough', async (event, source, options) 
   );
 
   try {
-    const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
+    const { host, repositoryPath } = windowRepositories.get(event.sender.id);
     const state = await readRepositoryStateWithConfig(
+      host,
       repositoryPath,
       source || launchOptions?.source,
     );
@@ -1735,7 +1754,7 @@ ipcMain.handle('codiff:getNarrativeWalkthrough', async (event, source, options) 
         // The usual cause of an unanchored working-tree walkthrough is that the
         // changes were committed (or reverted) after it was authored. Surface a
         // specific explanation when we can determine one.
-        const diagnosis = await diagnoseWalkthroughMismatch({
+        const diagnosis = await diagnoseWalkthroughMismatch(host, {
           hasFiles: state.files.length > 0,
           input,
           repositoryRoot: state.root,
@@ -1871,9 +1890,10 @@ ipcMain.handle('codiff:getFeatureFlags', async (event) => {
 });
 
 ipcMain.handle('codiff:askReviewAssistant', async (event, request) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const state = await readRepositoryStateWithConfig(
+    host,
     repositoryPath,
     request?.source || launchOptions?.source,
   );
@@ -1882,22 +1902,23 @@ ipcMain.handle('codiff:askReviewAssistant', async (event, request) => {
 });
 
 ipcMain.handle('codiff:createWalkthroughCommit', async (event, request) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
-  const result = await createWalkthroughCommit(repositoryPath, request, (chunk) => {
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  const result = await createWalkthroughCommit(host, repositoryPath, request, (chunk) => {
     if (!event.sender.isDestroyed()) {
       event.sender.send('codiff:walkthroughCommitOutput', chunk);
     }
   });
   if (result.status === 'committed') {
-    await resetRepositoryWatcher(event.sender.id, repositoryPath);
+    await resetRepositoryWatcher(host, event.sender.id, repositoryPath);
   }
   return result;
 });
 
 ipcMain.handle('codiff:updateWalkthroughCommitMessage', async (event, request) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const state = await readRepositoryStateWithConfig(
+    host,
     repositoryPath,
     request?.source || launchOptions?.source,
   );
@@ -1906,36 +1927,36 @@ ipcMain.handle('codiff:updateWalkthroughCommitMessage', async (event, request) =
 });
 
 ipcMain.handle('codiff:submitPullRequestComment', async (event, request) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
-  return submitPullRequestComment(repositoryPath, request);
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  return submitPullRequestComment(host, repositoryPath, request);
 });
 
 ipcMain.handle('codiff:submitPullRequestReview', async (event, request) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
-  return submitPullRequestReview(repositoryPath, request);
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  return submitPullRequestReview(host, repositoryPath, request);
 });
 
 ipcMain.handle('codiff:getDiffSectionContent', async (event, request) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
-  return readDiffSectionContent(repositoryPath, {
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  return readDiffSectionContent(host, repositoryPath, {
     ...request,
     showWhitespace: request?.showWhitespace ?? config.settings.showWhitespace,
   });
 });
 
 ipcMain.handle('codiff:getDiffImageContent', async (event, request) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
-  return readDiffImageContent(repositoryPath, request);
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  return readDiffImageContent(host, repositoryPath, request);
 });
 
 ipcMain.handle('codiff:getRepositoryHistory', async (event, limit, source) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
-  return listRepositoryHistory(repositoryPath, limit, source);
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  return listRepositoryHistory(host, repositoryPath, limit, source);
 });
 
 ipcMain.handle('codiff:getGitIdentity', async (event) => {
-  const repositoryPath = windowRepositories.get(event.sender.id) || getLaunchPath();
-  return readGitIdentity(repositoryPath);
+  const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  return readGitIdentity(host, repositoryPath);
 });
 
 ipcMain.handle('codiff:getPreferences', () => configToPreferences(config));
@@ -1984,16 +2005,13 @@ ipcMain.handle('codiff:openRepositoryFolder', (event) =>
   openRepositoryFolder(BrowserWindow.fromWebContents(event.sender) ?? undefined),
 );
 
-ipcMain.handle('codiff:findDefinitions', (event, request) =>
-  definitionSearchCoordinator.find(
-    event.sender.id,
-    getWindowRepositoryRoot(event.sender.id),
-    request,
-  ),
-);
+ipcMain.handle('codiff:findDefinitions', (event, request) => {
+  const { host, repositoryPath } = getWindowRepository(event.sender.id);
+  return definitionSearchCoordinator.find(event.sender.id, host, repositoryPath, request);
+});
 
 ipcMain.handle('codiff:openFile', async (event, filePath, lineNumber) => {
-  const repositoryRoot = getWindowRepositoryRoot(event.sender.id);
+  const { repositoryPath: repositoryRoot } = getWindowRepository(event.sender.id);
   const repositoryFilePath = validateRepositoryPath(filePath);
   const absolutePath = resolve(repositoryRoot, repositoryFilePath);
 
@@ -2008,7 +2026,7 @@ ipcMain.handle('codiff:openFile', async (event, filePath, lineNumber) => {
 });
 
 ipcMain.handle('codiff:showInFolder', (event, filePath) => {
-  const repositoryRoot = getWindowRepositoryRoot(event.sender.id);
+  const { repositoryPath: repositoryRoot } = getWindowRepository(event.sender.id);
   const repositoryFilePath = validateRepositoryPath(filePath);
   const absolutePath = resolve(repositoryRoot, repositoryFilePath);
 
@@ -2020,5 +2038,5 @@ ipcMain.handle('codiff:showInFolder', (event, filePath) => {
 });
 
 ipcMain.handle('codiff:getRelativePath', (event, filePath) =>
-  relative(getWindowRepositoryRoot(event.sender.id), filePath),
+  relative(getWindowRepository(event.sender.id).repositoryPath, filePath),
 );

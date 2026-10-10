@@ -18,6 +18,7 @@ const {
 } = require('./working-tree.cjs');
 
 /**
+ * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageContentRequest} DiffImageContentRequest
  * @typedef {import('../../core/types.ts').DiffImageContentResult} DiffImageContentResult
@@ -76,21 +77,23 @@ const parseCommitNameStatus = (raw, options = {}) => {
   return options.sort === false ? files : files.sort(fileSort);
 };
 
-/** @param {string} repoRoot @param {string} commit @returns {Promise<Array<string>>} */
-const readCommitParents = async (repoRoot, commit) => {
-  const raw = (await git(repoRoot, ['rev-list', '--parents', '-n', '1', commit])).trim();
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} commit @returns {Promise<Array<string>>} */
+const readCommitParents = async (host, repoRoot, commit) => {
+  const raw = (await git(host, repoRoot, ['rev-list', '--parents', '-n', '1', commit])).trim();
   return raw ? raw.split(' ').slice(1) : [];
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} commit
  * @param {string | undefined} firstParent
  * @param {{sort?: boolean}} [options]
  */
-const readCommitNameStatus = async (repoRoot, commit, firstParent, options = {}) =>
+const readCommitNameStatus = async (host, repoRoot, commit, firstParent, options = {}) =>
   parseCommitNameStatus(
     await git(
+      host,
       repoRoot,
       firstParent
         ? ['diff', '--name-status', '-r', '-z', '-M', firstParent, commit]
@@ -100,34 +103,42 @@ const readCommitNameStatus = async (repoRoot, commit, firstParent, options = {})
   );
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} ref
  */
-const resolveRangeEndpoint = async (repoRoot, ref) => {
+const resolveRangeEndpoint = async (host, repoRoot, ref) => {
   if (ref !== 'HEAD') {
     try {
-      return (await git(repoRoot, ['rev-parse', '--verify', `refs/heads/${ref}^{commit}`])).trim();
+      return (
+        await git(host, repoRoot, ['rev-parse', '--verify', `refs/heads/${ref}^{commit}`])
+      ).trim();
     } catch {
       // Fall back to Git's normal ref parser for tags, hashes, and fully-qualified refs.
     }
   }
 
-  return (await git(repoRoot, ['rev-parse', '--verify', `${ref}^{commit}`])).trim();
+  return (await git(host, repoRoot, ['rev-parse', '--verify', `${ref}^{commit}`])).trim();
 };
 
 /**
  * Resolve a `base...head` (symmetric -> merge-base) or `base..head` range to the
  * concrete (oldRef, newRef) pair the commit helpers diff against.
+ * @param {RepositoryHost} host
  * @param {string} repoRoot @param {string} base @param {string} head @param {boolean} symmetric
  * @returns {Promise<{ newRef: string; oldRef: string }>}
  */
-const resolveRangeRefs = async (repoRoot, base, head, symmetric) => {
-  const newRef = await resolveRangeEndpoint(repoRoot, head);
+const resolveRangeRefs = async (host, repoRoot, base, head, symmetric) => {
+  const newRef = await resolveRangeEndpoint(host, repoRoot, head);
   const oldRef = symmetric
     ? (
-        await git(repoRoot, ['merge-base', await resolveRangeEndpoint(repoRoot, base), newRef])
+        await git(host, repoRoot, [
+          'merge-base',
+          await resolveRangeEndpoint(host, repoRoot, base),
+          newRef,
+        ])
       ).trim()
-    : await resolveRangeEndpoint(repoRoot, base);
+    : await resolveRangeEndpoint(host, repoRoot, base);
   return { newRef, oldRef };
 };
 
@@ -178,9 +189,9 @@ const getBranchSuggestionScore = (requested, candidate) => {
 const getBranchSuggestionThreshold = (ref) =>
   ref.length <= 4 ? 1 : ref.length <= 8 ? 2 : Math.floor(ref.length / 3);
 
-/** @param {string} repoRoot @param {string} ref @returns {Promise<string | null>} */
-const getBranchSuggestion = async (repoRoot, ref) => {
-  const raw = await git(repoRoot, [
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} ref @returns {Promise<string | null>} */
+const getBranchSuggestion = async (host, repoRoot, ref) => {
+  const raw = await git(host, repoRoot, [
     'for-each-ref',
     '--format=%(refname:short)',
     'refs/heads',
@@ -209,11 +220,12 @@ const normalizeBranchSourceInput = (input) =>
   typeof input === 'string' ? { ref: input, type: 'branch' } : input;
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {BranchSource | BranchDiffSource} source
  * @returns {Promise<{newRef: string; oldRef: string; source: BranchDiffSource; sourceLabel: string}>}
  */
-const resolveBranchComparison = async (repoRoot, source) => {
+const resolveBranchComparison = async (host, repoRoot, source) => {
   if (source.type === 'branch-diff') {
     return {
       newRef: source.headRef,
@@ -223,19 +235,19 @@ const resolveBranchComparison = async (repoRoot, source) => {
     };
   }
 
-  const newRef = await resolveRangeEndpoint(repoRoot, 'HEAD');
+  const newRef = await resolveRangeEndpoint(host, repoRoot, 'HEAD');
   let branchRef;
   try {
-    branchRef = await resolveRangeEndpoint(repoRoot, source.ref);
+    branchRef = await resolveRangeEndpoint(host, repoRoot, source.ref);
   } catch {
-    const suggestion = await getBranchSuggestion(repoRoot, source.ref);
+    const suggestion = await getBranchSuggestion(host, repoRoot, source.ref);
     throw new Error(
       `Branch "${source.ref}" does not exist in this repository.${
         suggestion ? ` Did you mean "${suggestion}"?` : ''
       }`,
     );
   }
-  const oldRef = (await git(repoRoot, ['merge-base', branchRef, newRef])).trim();
+  const oldRef = (await git(host, repoRoot, ['merge-base', branchRef, newRef])).trim();
   return {
     newRef,
     oldRef,
@@ -250,16 +262,17 @@ const resolveBranchComparison = async (repoRoot, source) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {ComparisonSource} source
  * @returns {Promise<Omit<ResolvedComparison, 'repoRoot' | 'status'>>}
  */
-const resolveComparisonSource = async (repoRoot, source) => {
+const resolveComparisonSource = async (host, repoRoot, source) => {
   if (source.type === 'commit') {
     const commit = (
-      await git(repoRoot, ['rev-parse', '--verify', `${source.ref}^{commit}`])
+      await git(host, repoRoot, ['rev-parse', '--verify', `${source.ref}^{commit}`])
     ).trim();
-    const [firstParent] = await readCommitParents(repoRoot, commit);
+    const [firstParent] = await readCommitParents(host, repoRoot, commit);
     return {
       newRef: commit,
       oldRef: firstParent,
@@ -273,6 +286,7 @@ const resolveComparisonSource = async (repoRoot, source) => {
 
   if (source.type === 'range') {
     const { newRef, oldRef } = await resolveRangeRefs(
+      host,
       repoRoot,
       source.base,
       source.head,
@@ -287,17 +301,17 @@ const resolveComparisonSource = async (repoRoot, source) => {
   }
 
   if (source.type === 'branch' || source.type === 'branch-diff') {
-    return resolveBranchComparison(repoRoot, source);
+    return resolveBranchComparison(host, repoRoot, source);
   }
 
   throw new Error('Unsupported comparison source.');
 };
 
-/** @param {string} launchPath @param {ComparisonSource} source @returns {Promise<ResolvedComparison>} */
-const readResolvedComparison = async (launchPath, source) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
-  const comparison = await resolveComparisonSource(repoRoot, source);
-  const status = await readCommitNameStatus(repoRoot, comparison.newRef, comparison.oldRef, {
+/** @param {RepositoryHost} host @param {string} launchPath @param {ComparisonSource} source @returns {Promise<ResolvedComparison>} */
+const readResolvedComparison = async (host, launchPath, source) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const comparison = await resolveComparisonSource(host, repoRoot, source);
+  const status = await readCommitNameStatus(host, repoRoot, comparison.newRef, comparison.oldRef, {
     sort: false,
   });
 
@@ -308,10 +322,10 @@ const readResolvedComparison = async (launchPath, source) => {
   };
 };
 
-/** @param {string} repoRoot @param {string} commit @returns {Promise<ResolvedComparison>} */
-const readResolvedCommitComparison = async (repoRoot, commit) => {
-  const [firstParent] = await readCommitParents(repoRoot, commit);
-  const status = await readCommitNameStatus(repoRoot, commit, firstParent, {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} commit @returns {Promise<ResolvedComparison>} */
+const readResolvedCommitComparison = async (host, repoRoot, commit) => {
+  const [firstParent] = await readCommitParents(host, repoRoot, commit);
+  const status = await readCommitNameStatus(host, repoRoot, commit, firstParent, {
     sort: false,
   });
   return {
@@ -327,9 +341,9 @@ const readResolvedCommitComparison = async (repoRoot, commit) => {
   };
 };
 
-/** @param {string} launchPath @param {ResolvedComparison} comparison */
-const readResolvedComparisonState = (launchPath, comparison) =>
-  readComparisonState({
+/** @param {RepositoryHost} host @param {string} launchPath @param {ResolvedComparison} comparison */
+const readResolvedComparisonState = (host, launchPath, comparison) =>
+  readComparisonState(host, {
     launchPath,
     newRef: comparison.newRef,
     oldRef: comparison.oldRef,
@@ -338,38 +352,42 @@ const readResolvedComparisonState = (launchPath, comparison) =>
     status: comparison.status,
   });
 
-/** @param {ResolvedComparison} comparison */
-const readComparisonGeneratedAttributeStates = (comparison) =>
+/** @param {RepositoryHost} host @param {ResolvedComparison} comparison */
+const readComparisonGeneratedAttributeStates = (host, comparison) =>
   readGeneratedAttributeStates(
+    host,
     comparison.repoRoot,
     comparison.status.map((file) => file.path),
     comparison.newRef,
   );
 
-/** @param {string} launchPath @param {ComparisonSource} source @returns {Promise<RepositoryState>} */
-const readComparisonSourceState = async (launchPath, source) => {
-  const comparison = await readResolvedComparison(launchPath, source);
+/** @param {RepositoryHost} host @param {string} launchPath @param {ComparisonSource} source @returns {Promise<RepositoryState>} */
+const readComparisonSourceState = async (host, launchPath, source) => {
+  const comparison = await readResolvedComparison(host, launchPath, source);
   const [state, generatedAttributeStates] = await Promise.all([
-    readResolvedComparisonState(launchPath, comparison),
-    readComparisonGeneratedAttributeStates(comparison),
+    readResolvedComparisonState(host, launchPath, comparison),
+    readComparisonGeneratedAttributeStates(host, comparison),
   ]);
   return applyGeneratedAttributeStates(state, generatedAttributeStates);
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {ComparisonSource} source
  * @param {string} requestedPath
  * @param {{force?: boolean}} [options]
  */
 const readComparisonSourceSectionContent = async (
+  host,
   launchPath,
   source,
   requestedPath,
   options = {},
 ) => {
-  const comparison = await readResolvedComparison(launchPath, source);
+  const comparison = await readResolvedComparison(host, launchPath, source);
   return readComparisonSectionContent(
+    host,
     comparison.repoRoot,
     comparison.newRef,
     comparison.oldRef,
@@ -381,15 +399,17 @@ const readComparisonSourceSectionContent = async (
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {ComparisonSource} source
  * @param {string} requestedPath
  * @returns {Promise<DiffImageContentResult>}
  */
-const readComparisonSourceImageContent = async (launchPath, source, requestedPath) => {
+const readComparisonSourceImageContent = async (host, launchPath, source, requestedPath) => {
   try {
-    const comparison = await readResolvedComparison(launchPath, source);
+    const comparison = await readResolvedComparison(host, launchPath, source);
     return await readComparisonImageContent(
+      host,
       comparison.repoRoot,
       comparison.newRef,
       comparison.oldRef,
@@ -405,17 +425,18 @@ const readComparisonSourceImageContent = async (launchPath, source, requestedPat
   }
 };
 
-/** @param {string} launchPath @param {ResolvedComparison} comparison */
-const readCommitStateFromComparison = async (launchPath, comparison) => {
+/** @param {RepositoryHost} host @param {string} launchPath @param {ResolvedComparison} comparison */
+const readCommitStateFromComparison = async (host, launchPath, comparison) => {
   const [commitMetadata, state, generatedAttributeStates] = await Promise.all([
     readCommitMetadataForCommit(
+      host,
       comparison.repoRoot,
       comparison.newRef,
       comparison.oldRef,
       comparison.status,
     ),
-    readResolvedComparisonState(launchPath, comparison),
-    readComparisonGeneratedAttributeStates(comparison),
+    readResolvedComparisonState(host, launchPath, comparison),
+    readComparisonGeneratedAttributeStates(host, comparison),
   ]);
 
   return {
@@ -424,46 +445,61 @@ const readCommitStateFromComparison = async (launchPath, comparison) => {
   };
 };
 
-/** @param {string} launchPath @param {string} ref @returns {Promise<RepositoryState>} */
-const readCommitState = async (launchPath, ref) =>
+/** @param {RepositoryHost} host @param {string} launchPath @param {string} ref @returns {Promise<RepositoryState>} */
+const readCommitState = async (host, launchPath, ref) =>
   readCommitStateFromComparison(
+    host,
     launchPath,
-    await readResolvedComparison(launchPath, { ref, type: 'commit' }),
+    await readResolvedComparison(host, launchPath, { ref, type: 'commit' }),
   );
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {string} repoRoot
  * @param {string} commit
  * @returns {Promise<RepositoryState>}
  */
-const readResolvedCommitState = async (launchPath, repoRoot, commit) =>
-  readCommitStateFromComparison(launchPath, await readResolvedCommitComparison(repoRoot, commit));
+const readResolvedCommitState = async (host, launchPath, repoRoot, commit) =>
+  readCommitStateFromComparison(
+    host,
+    launchPath,
+    await readResolvedCommitComparison(host, repoRoot, commit),
+  );
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {string} ref
  * @param {string} requestedPath
  * @param {{force?: boolean}} [options]
  */
-const readCommitSectionContent = (launchPath, ref, requestedPath, options = {}) =>
-  readComparisonSourceSectionContent(launchPath, { ref, type: 'commit' }, requestedPath, options);
+const readCommitSectionContent = (host, launchPath, ref, requestedPath, options = {}) =>
+  readComparisonSourceSectionContent(
+    host,
+    launchPath,
+    { ref, type: 'commit' },
+    requestedPath,
+    options,
+  );
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {string} ref
  * @param {string} requestedPath
  * @returns {Promise<DiffImageContentResult>}
  */
-const readCommitImageContent = (launchPath, ref, requestedPath) =>
-  readComparisonSourceImageContent(launchPath, { ref, type: 'commit' }, requestedPath);
+const readCommitImageContent = (host, launchPath, ref, requestedPath) =>
+  readComparisonSourceImageContent(host, launchPath, { ref, type: 'commit' }, requestedPath);
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath @param {string} base @param {string} head @param {boolean} symmetric
  * @returns {Promise<RepositoryState>}
  */
-const readRangeState = (launchPath, base, head, symmetric) =>
-  readComparisonSourceState(launchPath, {
+const readRangeState = (host, launchPath, base, head, symmetric) =>
+  readComparisonSourceState(host, launchPath, {
     base,
     head,
     symmetric,
@@ -471,10 +507,20 @@ const readRangeState = (launchPath, base, head, symmetric) =>
   });
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath @param {string} base @param {string} head @param {boolean} symmetric @param {string} requestedPath @param {{encoding?: BufferEncoding, force?: boolean}} [options]
  */
-const readRangeSectionContent = (launchPath, base, head, symmetric, requestedPath, options = {}) =>
+const readRangeSectionContent = (
+  host,
+  launchPath,
+  base,
+  head,
+  symmetric,
+  requestedPath,
+  options = {},
+) =>
   readComparisonSourceSectionContent(
+    host,
     launchPath,
     {
       base,
@@ -487,11 +533,13 @@ const readRangeSectionContent = (launchPath, base, head, symmetric, requestedPat
   );
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath @param {string} base @param {string} head @param {boolean} symmetric @param {string} requestedPath
  * @returns {Promise<DiffImageContentResult>}
  */
-const readRangeImageContent = (launchPath, base, head, symmetric, requestedPath) =>
+const readRangeImageContent = (host, launchPath, base, head, symmetric, requestedPath) =>
   readComparisonSourceImageContent(
+    host,
     launchPath,
     {
       base,
@@ -502,18 +550,20 @@ const readRangeImageContent = (launchPath, base, head, symmetric, requestedPath)
     requestedPath,
   );
 
-/** @param {string} launchPath @param {string | BranchSource | BranchDiffSource} input @returns {Promise<RepositoryState>} */
-const readBranchState = (launchPath, input) =>
-  readComparisonSourceState(launchPath, normalizeBranchSourceInput(input));
+/** @param {RepositoryHost} host @param {string} launchPath @param {string | BranchSource | BranchDiffSource} input @returns {Promise<RepositoryState>} */
+const readBranchState = (host, launchPath, input) =>
+  readComparisonSourceState(host, launchPath, normalizeBranchSourceInput(input));
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {string | BranchSource | BranchDiffSource} input
  * @param {string} requestedPath
  * @param {{force?: boolean}} [options]
  */
-const readBranchSectionContent = (launchPath, input, requestedPath, options = {}) =>
+const readBranchSectionContent = (host, launchPath, input, requestedPath, options = {}) =>
   readComparisonSourceSectionContent(
+    host,
     launchPath,
     normalizeBranchSourceInput(input),
     requestedPath,
@@ -521,13 +571,19 @@ const readBranchSectionContent = (launchPath, input, requestedPath, options = {}
   );
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {string | BranchSource | BranchDiffSource} input
  * @param {string} requestedPath
  * @returns {Promise<DiffImageContentResult>}
  */
-const readBranchImageContent = (launchPath, input, requestedPath) =>
-  readComparisonSourceImageContent(launchPath, normalizeBranchSourceInput(input), requestedPath);
+const readBranchImageContent = (host, launchPath, input, requestedPath) =>
+  readComparisonSourceImageContent(
+    host,
+    launchPath,
+    normalizeBranchSourceInput(input),
+    requestedPath,
+  );
 
 /**
  * Reduce a `branch-working-tree` input (which may or may not already carry a
@@ -623,15 +679,16 @@ const mergeBranchAndWorkingTreeState = (branchState, workingTreeState) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {string | BranchSource | BranchDiffSource | BranchWorkingTreeSource} input
  * @param {{showWhitespace?: boolean}} [options]
  * @returns {Promise<RepositoryState>}
  */
-const readBranchWorkingTreeState = async (launchPath, input, options = {}) => {
+const readBranchWorkingTreeState = async (host, launchPath, input, options = {}) => {
   const [branchState, workingTreeState] = await Promise.all([
-    readBranchState(launchPath, toBranchComparisonInput(input)),
-    readWorkingTreeState(launchPath, {
+    readBranchState(host, launchPath, toBranchComparisonInput(input)),
+    readWorkingTreeState(host, launchPath, {
       eagerContents: false,
       showWhitespace: options.showWhitespace,
     }),
@@ -657,38 +714,40 @@ const toResolvedBranchDiffSource = (source) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {DiffSectionContentRequest} request
  */
-const readBranchWorkingTreeSectionContent = (launchPath, request) => {
+const readBranchWorkingTreeSectionContent = (host, launchPath, request) => {
   const source = /** @type {BranchWorkingTreeSource} */ (request.source);
   return request.kind === 'staged' || request.kind === 'unstaged'
-    ? readWorkingTreeDiffSectionContent(launchPath, request)
-    : readBranchSectionContent(launchPath, toResolvedBranchDiffSource(source), request.path, {
+    ? readWorkingTreeDiffSectionContent(host, launchPath, request)
+    : readBranchSectionContent(host, launchPath, toResolvedBranchDiffSource(source), request.path, {
         force: request.force,
       });
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {DiffImageContentRequest} request
  * @returns {Promise<DiffImageContentResult>}
  */
-const readBranchWorkingTreeImageContent = (launchPath, request) => {
+const readBranchWorkingTreeImageContent = (host, launchPath, request) => {
   const source = /** @type {BranchWorkingTreeSource} */ (request.source);
   return request.kind === 'staged' || request.kind === 'unstaged'
-    ? readWorkingTreeDiffImageContent(launchPath, request)
-    : readBranchImageContent(launchPath, toResolvedBranchDiffSource(source), request.path);
+    ? readWorkingTreeDiffImageContent(host, launchPath, request)
+    : readBranchImageContent(host, launchPath, toResolvedBranchDiffSource(source), request.path);
 };
 
-/** @param {string} launchPath @param {number} [limit] @param {string} [ref] */
-const listRepositoryHistory = async (launchPath, limit = 200, ref = 'HEAD') => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {number} [limit] @param {string} [ref] */
+const listRepositoryHistory = async (host, launchPath, limit = 200, ref = 'HEAD') => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   try {
     if (ref.includes('..')) {
-      await git(repoRoot, ['rev-list', '--max-count=1', ref]);
+      await git(host, repoRoot, ['rev-list', '--max-count=1', ref]);
     } else {
-      await git(repoRoot, ['rev-parse', '--verify', `${ref}^{commit}`]);
+      await git(host, repoRoot, ['rev-parse', '--verify', `${ref}^{commit}`]);
     }
   } catch {
     return {
@@ -697,7 +756,7 @@ const listRepositoryHistory = async (launchPath, limit = 200, ref = 'HEAD') => {
     };
   }
 
-  const raw = await git(repoRoot, [
+  const raw = await git(host, repoRoot, [
     'log',
     `--max-count=${limit}`,
     '--format=%H%x1f%P%x1f%ct%x1f%s%x1f%aN%x1f%aE%x1e',

@@ -8,13 +8,19 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { GH_NOT_FOUND_CODE, getGhCommand, submitPullRequestReview } =
   require('../git-state/pull-request.cjs') as {
     GH_NOT_FOUND_CODE: string;
     getGhCommand: () => string;
     submitPullRequestReview: (
+      host: RepositoryHost,
       launchPath: string,
       request: {
         body?: string;
@@ -101,7 +107,7 @@ test('reports a missing GitHub CLI when the resolved executable cannot be spawne
   });
 
   await expect(
-    submitPullRequestReview(repo, {
+    submitPullRequestReview(host, repo, {
       body: 'General feedback.',
       comments: [],
       event: 'COMMENT',
@@ -164,7 +170,7 @@ printf '%s' '{}'
     SHELL: undefined,
   });
 
-  await submitPullRequestReview(repo, {
+  await submitPullRequestReview(host, repo, {
     body: 'General feedback.',
     comments: [],
     event: 'COMMENT',
@@ -234,7 +240,7 @@ printf '%s' '{}'
     SHELL: fakeShell,
   });
 
-  await submitPullRequestReview(repo, {
+  await submitPullRequestReview(host, repo, {
     body: 'General feedback.',
     comments: [],
     event: 'COMMENT',
@@ -294,7 +300,7 @@ printf '%s' '{}'
     SHELL: fakeShell,
   });
 
-  await submitPullRequestReview(repo, {
+  await submitPullRequestReview(host, repo, {
     body: 'General feedback.',
     comments: [],
     event: 'COMMENT',

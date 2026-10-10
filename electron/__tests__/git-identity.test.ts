@@ -8,10 +8,15 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { readGitIdentity } = require('../git-state/working-tree.cjs') as {
-  readGitIdentity: (path: string) => Promise<{ email: string; name: string }>;
+  readGitIdentity: (host: RepositoryHost, path: string) => Promise<{ email: string; name: string }>;
 };
 
 const execFileAsync = promisify(execFile);
@@ -36,14 +41,14 @@ test('uses configured git identity without inferring it from the current commit 
 
   await git(directory.path, ['config', 'user.name', 'Configured User']);
   await git(directory.path, ['config', 'user.email', 'configured@example.com']);
-  await expect(readGitIdentity(directory.path)).resolves.toMatchObject({
+  await expect(readGitIdentity(host, directory.path)).resolves.toMatchObject({
     email: 'configured@example.com',
     name: 'Configured User',
   });
 
   await git(directory.path, ['config', 'user.name', '']);
   await git(directory.path, ['config', 'user.email', '']);
-  await expect(readGitIdentity(directory.path)).resolves.toMatchObject({
+  await expect(readGitIdentity(host, directory.path)).resolves.toMatchObject({
     email: '',
     name: '',
   });
@@ -55,7 +60,7 @@ test('reads the global git identity outside a repository', async () => {
   await writeFile(globalConfig, '[user]\n\tname = Global User\n\temail = global@example.com\n');
   await using _environment = createTemporaryEnvironment({ GIT_CONFIG_GLOBAL: globalConfig });
 
-  await expect(readGitIdentity(directory.path)).resolves.toMatchObject({
+  await expect(readGitIdentity(host, directory.path)).resolves.toMatchObject({
     email: 'global@example.com',
     name: 'Global User',
   });

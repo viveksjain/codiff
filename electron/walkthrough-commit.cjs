@@ -13,6 +13,7 @@ const { git, validateRepositoryPath } = require('./git-state/common.cjs');
 const { spawnPty } = require('./pty.cjs');
 
 /**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../core/types.ts').WalkthroughCommitRequest} WalkthroughCommitRequest
  * @typedef {import('../core/types.ts').WalkthroughCommitResult} WalkthroughCommitResult
  */
@@ -42,12 +43,13 @@ const normalizeTerminalOutput = (text) =>
  * git and its hooks believe they are attached to a real terminal, so they emit
  * the same colors and progress output they would in a shell.
  *
+ * @param {RepositoryHost} host
  * @param {string} repoPath
  * @param {ReadonlyArray<string>} args
  * @param {((chunk: string) => void) | undefined} onOutput
  * @returns {Promise<void>}
  */
-const gitStreaming = (repoPath, args, onOutput) =>
+const gitStreaming = (host, repoPath, args, onOutput) =>
   new Promise((resolve, reject) => {
     /** @type {import('node-pty').IPty} */
     let child;
@@ -79,13 +81,14 @@ const gitStreaming = (repoPath, args, onOutput) =>
   });
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoPath Absolute repository root.
  * @param {WalkthroughCommitRequest} request
  * @param {(chunk: string) => void} [onOutput] Receives commit output (hook
  *   output included) as it is produced.
  * @returns {Promise<WalkthroughCommitResult>}
  */
-const createWalkthroughCommit = async (repoPath, request, onOutput) => {
+const createWalkthroughCommit = async (host, repoPath, request, onOutput) => {
   const subject = typeof request?.subject === 'string' ? request.subject.trim() : '';
   if (!subject) {
     return { reason: 'A commit subject is required.', status: 'failed' };
@@ -111,16 +114,16 @@ const createWalkthroughCommit = async (repoPath, request, onOutput) => {
   try {
     // Stage exactly the chosen paths (covers untracked files too), then commit
     // only those paths so previously-staged work on other files stays staged.
-    await git(repoPath, ['add', '--', ...paths]);
+    await git(host, repoPath, ['add', '--', ...paths]);
     const tempDirectory = mkdtempSync(join(tmpdir(), 'codiff-commit-message-'));
     const messagePath = join(tempDirectory, 'message.txt');
     try {
       writeFileSync(messagePath, message);
-      await gitStreaming(repoPath, ['commit', '-F', messagePath, '--', ...paths], onOutput);
+      await gitStreaming(host, repoPath, ['commit', '-F', messagePath, '--', ...paths], onOutput);
     } finally {
       rmSync(tempDirectory, { force: true, recursive: true });
     }
-    const hash = (await git(repoPath, ['rev-parse', 'HEAD'])).trim();
+    const hash = (await git(host, repoPath, ['rev-parse', 'HEAD'])).trim();
     return { hash, status: 'committed' };
   } catch (error) {
     return {

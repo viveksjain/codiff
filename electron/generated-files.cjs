@@ -6,6 +6,8 @@ const { join } = require('node:path');
 const { gitBufferWithInput } = require('./git-state/common.cjs');
 const { isGeneratedWalkthroughPath } = require('../core/lib/narrative-walkthrough-diff.cjs');
 
+/** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
+
 const GENERATED_ATTRIBUTES = ['linguist-generated', 'gitlab-generated'];
 
 /** @param {string} value */
@@ -47,14 +49,16 @@ const parseGeneratedAttributeStates = (output) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {ReadonlyArray<string>} paths
  * @param {ReadonlyArray<string>} options
- * @param {NodeJS.ProcessEnv} [env]
+ * @param {Readonly<Record<string, string>>} [env]
  */
-const checkGeneratedAttributeStates = async (repoRoot, paths, options, env) =>
+const checkGeneratedAttributeStates = async (host, repoRoot, paths, options, env) =>
   parseGeneratedAttributeStates(
     await gitBufferWithInput(
+      host,
       repoRoot,
       ['check-attr', ...options, '-z', '--stdin', ...GENERATED_ATTRIBUTES],
       Buffer.from(`${paths.join('\0')}\0`),
@@ -67,42 +71,46 @@ const checkGeneratedAttributeStates = async (repoRoot, paths, options, env) =>
  * isolated index from the reviewed tree and ask the older `--cached` mode to
  * resolve attributes from that index instead.
  *
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {ReadonlyArray<string>} paths
  * @param {string} source
  */
-const readGeneratedAttributeStatesFromTree = async (repoRoot, paths, source) => {
+const readGeneratedAttributeStatesFromTree = async (host, repoRoot, paths, source) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), 'codiff-generated-files-'));
-  const env = {
-    ...process.env,
-    GIT_INDEX_FILE: join(temporaryDirectory, 'index'),
-  };
+  const env = { GIT_INDEX_FILE: join(temporaryDirectory, 'index') };
 
   try {
-    await gitBufferWithInput(repoRoot, ['read-tree', source], Buffer.alloc(0), { env });
-    return await checkGeneratedAttributeStates(repoRoot, paths, ['--cached'], env);
+    await gitBufferWithInput(host, repoRoot, ['read-tree', source], Buffer.alloc(0), { env });
+    return await checkGeneratedAttributeStates(host, repoRoot, paths, ['--cached'], env);
   } finally {
     await rm(temporaryDirectory, { force: true, recursive: true });
   }
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {ReadonlyArray<string>} paths
  * @param {string | undefined} source
  */
-const readGeneratedAttributeStates = async (repoRoot, paths, source) => {
+const readGeneratedAttributeStates = async (host, repoRoot, paths, source) => {
   if (paths.length === 0) {
     return new Map();
   }
 
   try {
-    return await checkGeneratedAttributeStates(repoRoot, paths, source ? ['--source', source] : []);
+    return await checkGeneratedAttributeStates(
+      host,
+      repoRoot,
+      paths,
+      source ? ['--source', source] : [],
+    );
   } catch {
     if (source) {
       try {
         // Git before 2.40 rejects `--source`; use its historical-tree fallback.
-        return await readGeneratedAttributeStatesFromTree(repoRoot, paths, source);
+        return await readGeneratedAttributeStatesFromTree(host, repoRoot, paths, source);
       } catch {
         // Ignore invalid or unavailable historical sources.
       }
@@ -129,11 +137,12 @@ const applyGeneratedAttributeStates = (state, generatedAttributeStates) => ({
   }),
 });
 
-/** @param {import('../core/types.ts').RepositoryState} state */
-const annotateGeneratedFiles = async (state) =>
+/** @param {RepositoryHost} host @param {import('../core/types.ts').RepositoryState} state */
+const annotateGeneratedFiles = async (host, state) =>
   applyGeneratedAttributeStates(
     state,
     await readGeneratedAttributeStates(
+      host,
       state.root,
       state.files.map((file) => file.path),
       getGeneratedAttributeSource(state.source),

@@ -8,6 +8,8 @@ const { createSharedPlanSnapshot } = require('./shared-plan.cjs');
 const { uploadSnapshot } = require('./headless-walkthrough-share.cjs');
 const { resolvePlanShareTarget } = require('./walkthrough-sharing.cjs');
 
+/** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
+
 /** @param {string} repositoryPath */
 const hasGitMetadata = (repositoryPath) => {
   let current = resolve(repositoryPath);
@@ -24,6 +26,7 @@ const hasGitMetadata = (repositoryPath) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {{
  *   agent?: 'claude' | 'codex' | 'opencode' | 'pi';
  *   codiffVersion: string;
@@ -35,18 +38,23 @@ const hasGitMetadata = (repositoryPath) => {
  *   sessionId?: string;
  * }} options
  */
-const sharePlanFile = async ({
-  agent,
-  codiffVersion,
-  forcePublic,
-  openExternal,
-  planFile,
-  repositoryPath,
-  serviceUrlOverride,
-  sessionId,
-}) => {
+const sharePlanFile = async (
+  host,
+  {
+    agent,
+    codiffVersion,
+    forcePublic,
+    openExternal,
+    planFile,
+    repositoryPath,
+    serviceUrlOverride,
+    sessionId,
+  },
+) => {
   const config = readConfig();
-  const uploader = hasGitMetadata(repositoryPath) ? await readGitIdentity(repositoryPath) : {};
+  const uploader = hasGitMetadata(repositoryPath)
+    ? await readGitIdentity(host, repositoryPath)
+    : {};
   const content = readFileSync(planFile, 'utf8');
   const review = {
     document: {

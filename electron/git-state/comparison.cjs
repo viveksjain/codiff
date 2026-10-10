@@ -11,6 +11,7 @@ const {
 const { createEmptyFileContent, readGitFiles } = require('./git-files.cjs');
 
 /**
+ * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageContentResult} DiffImageContentResult
  * @typedef {import('../../core/types.ts').RepositoryState} RepositoryState
@@ -24,9 +25,9 @@ const createComparisonPatchArgs = (newRef, oldRef, paths) =>
     ? ['diff', '--patch', '--no-ext-diff', '--find-renames', oldRef, newRef, '--', ...paths]
     : ['show', '--format=', '--patch', '--no-ext-diff', '--find-renames', newRef, '--', ...paths];
 
-/** @param {string} repoRoot @param {string} newRef @param {string | undefined} oldRef @param {string} path */
-const readComparisonPatch = (repoRoot, newRef, oldRef, path) =>
-  git(repoRoot, createComparisonPatchArgs(newRef, oldRef, [path]));
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} newRef @param {string | undefined} oldRef @param {string} path */
+const readComparisonPatch = (host, repoRoot, newRef, oldRef, path) =>
+  git(host, repoRoot, createComparisonPatchArgs(newRef, oldRef, [path]));
 
 /** @param {ReadonlyArray<string>} values @param {number} size */
 const chunk = (values, size) => {
@@ -47,12 +48,13 @@ const splitCommitPatch = (patch) =>
     .map((part) => `${part}\n`);
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} newRef
  * @param {string | undefined} oldRef
  * @param {ReadonlyArray<Pick<StatusItem, 'path'>>} items
  */
-const readComparisonPatches = async (repoRoot, newRef, oldRef, items) => {
+const readComparisonPatches = async (host, repoRoot, newRef, oldRef, items) => {
   /** @type {Map<string, string>} */
   const patches = new Map();
 
@@ -64,7 +66,7 @@ const readComparisonPatches = async (repoRoot, newRef, oldRef, items) => {
       continue;
     }
 
-    const patch = await git(repoRoot, createComparisonPatchArgs(newRef, oldRef, itemChunk));
+    const patch = await git(host, repoRoot, createComparisonPatchArgs(newRef, oldRef, itemChunk));
     const patchChunks = splitCommitPatch(patch);
 
     if (patchChunks.length === itemChunk.length) {
@@ -74,7 +76,7 @@ const readComparisonPatches = async (repoRoot, newRef, oldRef, items) => {
     } else {
       await Promise.all(
         itemChunk.map(async (path) => {
-          patches.set(path, await readComparisonPatch(repoRoot, newRef, oldRef, path));
+          patches.set(path, await readComparisonPatch(host, repoRoot, newRef, oldRef, path));
         }),
       );
     }
@@ -140,16 +142,18 @@ const getOldComparisonFile = (oldFiles, oldRef, item) =>
     : createEmptyFileContent(item.oldPath || item.path);
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} newRef
  * @param {string | undefined} oldRef
  * @param {ReadonlyArray<Pick<StatusItem, 'oldPath' | 'path' | 'status'>>} status
  * @param {{force?: boolean}} [options]
  */
-const readComparisonFiles = async (repoRoot, newRef, oldRef, status, options = {}) => {
+const readComparisonFiles = async (host, repoRoot, newRef, oldRef, status, options = {}) => {
   const [oldFiles, newFiles] = await Promise.all([
     oldRef
       ? readGitFiles(
+          host,
           repoRoot,
           oldRef,
           status.map((item) => item.oldPath || item.path),
@@ -157,6 +161,7 @@ const readComparisonFiles = async (repoRoot, newRef, oldRef, status, options = {
         )
       : Promise.resolve(new Map()),
     readGitFiles(
+      host,
       repoRoot,
       newRef,
       status.map((item) => item.path),
@@ -168,6 +173,7 @@ const readComparisonFiles = async (repoRoot, newRef, oldRef, status, options = {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {{
  *   launchPath: string;
  *   newRef: string;
@@ -178,14 +184,17 @@ const readComparisonFiles = async (repoRoot, newRef, oldRef, status, options = {
  * }} input
  * @returns {Promise<RepositoryState>}
  */
-const readComparisonState = async ({ launchPath, newRef, oldRef, repoRoot, source, status }) => {
-  const { oldFiles, newFiles } = await readComparisonFiles(repoRoot, newRef, oldRef, status);
+const readComparisonState = async (
+  host,
+  { launchPath, newRef, oldRef, repoRoot, source, status },
+) => {
+  const { oldFiles, newFiles } = await readComparisonFiles(host, repoRoot, newRef, oldRef, status);
   const readyItems = status.filter((item) => {
     const oldFile = getOldComparisonFile(oldFiles, oldRef, item);
     const newFile = newFiles.get(item.path) || createEmptyFileContent(item.path);
     return summarizeContent(oldFile, newFile).loadState === 'ready';
   });
-  const patches = await readComparisonPatches(repoRoot, newRef, oldRef, readyItems);
+  const patches = await readComparisonPatches(host, repoRoot, newRef, oldRef, readyItems);
   /** @type {Array<ChangedFile>} */
   const files = status
     .map((item) =>
@@ -209,6 +218,7 @@ const readComparisonState = async ({ launchPath, newRef, oldRef, repoRoot, sourc
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} newRef
  * @param {string | undefined} oldRef
@@ -218,6 +228,7 @@ const readComparisonState = async ({ launchPath, newRef, oldRef, repoRoot, sourc
  * @param {{force?: boolean}} [options]
  */
 const readComparisonSectionContent = async (
+  host,
   repoRoot,
   newRef,
   oldRef,
@@ -233,6 +244,7 @@ const readComparisonSectionContent = async (
   }
 
   const { oldFiles, newFiles } = await readComparisonFiles(
+    host,
     repoRoot,
     newRef,
     oldRef,
@@ -244,13 +256,14 @@ const readComparisonSectionContent = async (
   const summary = summarizeContent(oldFile, newFile);
   const patch =
     summary.loadState === 'ready'
-      ? await readComparisonPatch(repoRoot, newRef, oldRef, item.path)
+      ? await readComparisonPatch(host, repoRoot, newRef, oldRef, item.path)
       : '';
 
   return createComparisonSection(newRef, item, oldFile, newFile, patch);
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} newRef
  * @param {string | undefined} oldRef
@@ -260,6 +273,7 @@ const readComparisonSectionContent = async (
  * @returns {Promise<DiffImageContentResult>}
  */
 const readComparisonImageContent = async (
+  host,
   repoRoot,
   newRef,
   oldRef,
@@ -275,8 +289,8 @@ const readComparisonImageContent = async (
     }
 
     const [oldImage, newImage] = await Promise.all([
-      oldRef ? readGitImageFile(repoRoot, oldRef, item.oldPath || item.path) : undefined,
-      readGitImageFile(repoRoot, newRef, item.path),
+      oldRef ? readGitImageFile(host, repoRoot, oldRef, item.oldPath || item.path) : undefined,
+      readGitImageFile(host, repoRoot, newRef, item.path),
     ]);
 
     if (!oldImage && !newImage) {

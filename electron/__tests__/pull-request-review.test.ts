@@ -8,10 +8,16 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { submitPullRequestReview } = require('../git-state/pull-request.cjs') as {
   submitPullRequestReview: (
+    host: RepositoryHost,
     launchPath: string,
     request: {
       body?: string;
@@ -80,7 +86,7 @@ process.stdin.on('end', () => {
     url: 'https://github.com/nkzw-tech/codiff/pull/12',
   };
 
-  await submitPullRequestReview(repo, {
+  await submitPullRequestReview(host, repo, {
     comments: [
       {
         body: 'Please keep this explicit.',
@@ -92,21 +98,21 @@ process.stdin.on('end', () => {
     event: 'COMMENT',
     source,
   });
-  await submitPullRequestReview(repo, {
+  await submitPullRequestReview(host, repo, {
     body: '  General feedback.  ',
     comments: [],
     event: 'COMMENT',
     source,
   });
   await expect(
-    submitPullRequestReview(repo, {
+    submitPullRequestReview(host, repo, {
       body: '   ',
       comments: [],
       event: 'COMMENT',
       source,
     }),
   ).rejects.toThrow('A comment review requires an inline comment or a review comment.');
-  await submitPullRequestReview(repo, {
+  await submitPullRequestReview(host, repo, {
     comments: [],
     event: 'REQUEST_CHANGES',
     source,

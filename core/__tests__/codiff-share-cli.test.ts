@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, test } from 'vite-plus/test';
+import type { RepositoryHost } from '../../electron/host/repository-host.cjs';
 import {
   bindDisposableHttpServer,
   createTemporaryDirectory,
@@ -12,8 +13,13 @@ import {
 } from './helpers/resources.ts';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../../electron/host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { readRepositoryState } = require('../../electron/git-state.cjs') as {
   readRepositoryState: (
+    host: RepositoryHost,
     path: string,
     source?: { ref: string; type: 'commit' },
   ) => Promise<{
@@ -110,7 +116,7 @@ test('headless share uploads the canonical snapshot and prints its URL', async (
   await git(repositoryPath, ['commit', '-m', 'Initial commit']);
   await writeFile(join(repositoryPath, 'example.txt'), 'after\n');
 
-  const state = await readRepositoryState(repositoryPath);
+  const state = await readRepositoryState(host, repositoryPath);
   const file = state.files[0];
   const hunk = getSectionWalkthroughHunks(file, file.sections[0])[0];
   await writeFile(
@@ -402,7 +408,7 @@ test.each(['', 'high', 'ultra'])(
     const { stdout: headOutput } = await git(repositoryPath, ['rev-parse', 'HEAD']);
     const head = headOutput.trim();
 
-    const state = await readRepositoryState(repositoryPath, { ref: 'HEAD', type: 'commit' });
+    const state = await readRepositoryState(host, repositoryPath, { ref: 'HEAD', type: 'commit' });
     const file = state.files[0];
     const hunk = getSectionWalkthroughHunks(file, file.sections[0])[0];
     const generatedWalkthrough = JSON.stringify({

@@ -22,6 +22,7 @@ const {
 const { parseReviewUrl, readReviewRemotes } = require('../review-source.cjs');
 
 /**
+ * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').PullRequestReviewComment} PullRequestReviewComment
  * @typedef {import('../../core/types.ts').ReviewSource} ReviewSource
@@ -366,23 +367,28 @@ const createMergeRequestFetchRefspecs = (mergeRequest, metadata) => [
     : []),
 ];
 
-/** @param {string} repoRoot @param {any} remote @param {any} mergeRequest @param {any} metadata */
-const fetchMergeRequestRefs = (repoRoot, remote, mergeRequest, metadata) =>
-  git(repoRoot, [
+/** @param {RepositoryHost} host @param {string} repoRoot @param {any} remote @param {any} mergeRequest @param {any} metadata */
+const fetchMergeRequestRefs = (host, repoRoot, remote, mergeRequest, metadata) =>
+  git(host, repoRoot, [
     'fetch',
     '--no-tags',
     remote.name,
     ...createMergeRequestFetchRefspecs(mergeRequest, metadata),
   ]);
 
-/** @param {string} repoRoot @param {any} mergeRequest @param {any} metadata */
-const resolveMergeRequestContentRefs = async (repoRoot, mergeRequest, metadata) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {any} mergeRequest @param {any} metadata */
+const resolveMergeRequestContentRefs = async (host, repoRoot, mergeRequest, metadata) => {
   const head = `refs/codiff/merge-requests/${mergeRequest.number}/head`;
   const base = `refs/codiff/merge-requests/${mergeRequest.number}/base`;
-  const localHead = (await gitOrEmpty(repoRoot, ['rev-parse', '--verify', '--quiet', head])).trim();
-  const localBase = (await gitOrEmpty(repoRoot, ['rev-parse', '--verify', '--quiet', base])).trim();
+  const localHead = (
+    await gitOrEmpty(host, repoRoot, ['rev-parse', '--verify', '--quiet', head])
+  ).trim();
+  const localBase = (
+    await gitOrEmpty(host, repoRoot, ['rev-parse', '--verify', '--quiet', base])
+  ).trim();
   if (!localHead || !localBase || (metadata.sha && localHead !== metadata.sha)) {
     await fetchMergeRequestRefs(
+      host,
       repoRoot,
       selectMergeRequestRemote(repoRoot, mergeRequest),
       mergeRequest,
@@ -392,17 +398,22 @@ const resolveMergeRequestContentRefs = async (repoRoot, mergeRequest, metadata) 
   const metadataBase = metadata.diff_refs?.base_sha;
   if (
     metadataBase &&
-    (await gitOrEmpty(repoRoot, ['rev-parse', '--verify', '--quiet', `${metadataBase}^{commit}`]))
+    (await gitOrEmpty(host, repoRoot, [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `${metadataBase}^{commit}`,
+    ]))
   ) {
     return { base: metadataBase, head };
   }
-  const mergeBase = (await gitOrEmpty(repoRoot, ['merge-base', base, head])).trim();
+  const mergeBase = (await gitOrEmpty(host, repoRoot, ['merge-base', base, head])).trim();
   return mergeBase ? { base: mergeBase, head } : null;
 };
 
-/** @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source */
-const readMergeRequestState = async (launchPath, source) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source */
+const readMergeRequestState = async (host, launchPath, source) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const mergeRequest = parseGitLabMergeRequestUrl(source.url);
   selectMergeRequestRemote(repoRoot, mergeRequest);
   const [metadata, diffs, reviewComments] = await Promise.all([
@@ -410,7 +421,7 @@ const readMergeRequestState = async (launchPath, source) => {
     readMergeRequestDiffs(repoRoot, mergeRequest),
     readMergeRequestComments(repoRoot, mergeRequest),
   ]);
-  const refs = await resolveMergeRequestContentRefs(repoRoot, mergeRequest, metadata).catch(
+  const refs = await resolveMergeRequestContentRefs(host, repoRoot, mergeRequest, metadata).catch(
     () => null,
   );
   const reviewFiles = diffs.map((rawDiff) => {
@@ -424,12 +435,14 @@ const readMergeRequestState = async (launchPath, source) => {
   const [oldFiles, newFiles] = refs
     ? await Promise.all([
         readGitFiles(
+          host,
           repoRoot,
           refs.base,
           reviewFiles.map(({ oldPath }) => oldPath),
           { refScopedEmptyCacheKey: true },
         ),
         readGitFiles(
+          host,
           repoRoot,
           refs.head,
           reviewFiles.map(({ file }) => file.filename),
@@ -511,9 +524,9 @@ const readRepositoryCommits = async (repoRoot, mergeRequest, ref, limit) => {
   return commits;
 };
 
-/** @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {number} [limit] */
-const listMergeRequestHistory = async (launchPath, source, limit = 200) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {number} [limit] */
+const listMergeRequestHistory = async (host, launchPath, source, limit = 200) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const mergeRequest = parseGitLabMergeRequestUrl(source.url);
   const metadata = await readMergeRequestMetadata(repoRoot, mergeRequest);
   const commits = parseGlabJsonPages(
@@ -635,9 +648,9 @@ const getGitLabReviewQuickAction = (event) => {
   throw new Error(`GitLab merge request reviews do not support ${String(event)}.`);
 };
 
-/** @param {string} launchPath @param {any} request */
-const submitMergeRequestComment = async (launchPath, request) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {any} request */
+const submitMergeRequestComment = async (host, launchPath, request) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const mergeRequest = parseGitLabMergeRequestUrl(request.source.url);
   selectMergeRequestRemote(repoRoot, mergeRequest);
   if (request.comment.threadId) {
@@ -686,10 +699,10 @@ const submitMergeRequestComment = async (launchPath, request) => {
   return comment;
 };
 
-/** @param {string} launchPath @param {any} request */
-const submitMergeRequestReview = async (launchPath, request) => {
+/** @param {RepositoryHost} host @param {string} launchPath @param {any} request */
+const submitMergeRequestReview = async (host, launchPath, request) => {
   const quickAction = getGitLabReviewQuickAction(request.event);
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const mergeRequest = parseGitLabMergeRequestUrl(request.source.url);
   selectMergeRequestRemote(repoRoot, mergeRequest);
   const metadata = await readMergeRequestMetadata(repoRoot, mergeRequest);
@@ -716,10 +729,10 @@ const submitMergeRequestReview = async (launchPath, request) => {
   );
 };
 
-/** @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {string} requestedPath */
-const readMergeRequestImageContent = async (launchPath, source, requestedPath) => {
+/** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {string} requestedPath */
+const readMergeRequestImageContent = async (host, launchPath, source, requestedPath) => {
   try {
-    const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+    const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
     const path = validateRepositoryPath(requestedPath);
     const mergeRequest = parseGitLabMergeRequestUrl(source.url);
     const metadata = await readMergeRequestMetadata(repoRoot, mergeRequest);
@@ -728,10 +741,10 @@ const readMergeRequestImageContent = async (launchPath, source, requestedPath) =
     if (!rawDiff) {
       throw new Error('File is not part of this merge request.');
     }
-    const refs = await resolveMergeRequestContentRefs(repoRoot, mergeRequest, metadata);
+    const refs = await resolveMergeRequestContentRefs(host, repoRoot, mergeRequest, metadata);
     const [oldImage, newImage] = await Promise.all([
-      refs ? readGitImageFile(repoRoot, refs.base, rawDiff.old_path) : undefined,
-      refs ? readGitImageFile(repoRoot, refs.head, rawDiff.new_path) : undefined,
+      refs ? readGitImageFile(host, repoRoot, refs.base, rawDiff.old_path) : undefined,
+      refs ? readGitImageFile(host, repoRoot, refs.head, rawDiff.new_path) : undefined,
     ]);
     return oldImage || newImage
       ? { ...(newImage ? { newImage } : {}), ...(oldImage ? { oldImage } : {}), status: 'ready' }

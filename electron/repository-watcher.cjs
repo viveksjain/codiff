@@ -4,6 +4,8 @@ const { promises: fs } = require('node:fs');
 const { join, sep } = require('node:path');
 const { getFingerprint, git } = require('./git-state/common.cjs');
 
+/** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
+
 const FOCUSED_POLL_INTERVAL = 2500;
 const HIDDEN_POLL_INTERVAL = 30_000;
 const SELF_WRITE_CHECK_DELAY = 250;
@@ -72,11 +74,12 @@ const parseRepositoryWatcherStatus = (raw) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} path
  * @param {boolean} exact
  */
-const readRepositoryWatcherPathState = async (repoRoot, path, exact) => {
+const readRepositoryWatcherPathState = async (host, repoRoot, path, exact) => {
   try {
     const absolutePath = join(repoRoot, path);
     const stat = await fs.lstat(absolutePath);
@@ -108,11 +111,17 @@ const readRepositoryWatcherPathState = async (repoRoot, path, exact) => {
  * Read a repository watcher snapshot with one Git process. `repoRoot` must
  * already be the repository root.
  *
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {Iterable<string>} [exactPaths]
  * @param {Iterable<string>} [knownDirtyPaths]
  */
-const readRepositoryWatcherSnapshot = async (repoRoot, exactPaths = [], knownDirtyPaths = []) => {
+const readRepositoryWatcherSnapshot = async (
+  host,
+  repoRoot,
+  exactPaths = [],
+  knownDirtyPaths = [],
+) => {
   const knownDirtyPathSet = new Set(knownDirtyPaths);
   const statusArgs = ['status', '--porcelain=v2', '--branch', '-z', '-uall'];
   // Git status hashes modified tracked files. Known dirty paths are monitored
@@ -124,7 +133,7 @@ const readRepositoryWatcherSnapshot = async (repoRoot, exactPaths = [], knownDir
       ...[...knownDirtyPathSet].map((path) => `:(exclude,literal)${path}`),
     );
   }
-  const status = parseRepositoryWatcherStatus(await git(repoRoot, statusArgs));
+  const status = parseRepositoryWatcherStatus(await git(host, repoRoot, statusArgs));
   const normalizedExactPaths = new Set(
     [...exactPaths].map((path) => normalizeRepositoryWatcherPath(path)),
   );
@@ -133,7 +142,7 @@ const readRepositoryWatcherSnapshot = async (repoRoot, exactPaths = [], knownDir
   const states = await Promise.all(
     [...paths].map(async (path) => [
       path,
-      await readRepositoryWatcherPathState(repoRoot, path, normalizedExactPaths.has(path)),
+      await readRepositoryWatcherPathState(host, repoRoot, path, normalizedExactPaths.has(path)),
     ]),
   );
   /** @type {Record<string, string>} */
@@ -164,10 +173,10 @@ const readRepositoryWatcherSnapshot = async (repoRoot, exactPaths = [], knownDir
   };
 };
 
-/** @param {string} launchPath @param {Iterable<string>} [exactPaths] */
-const readRepositoryChangeSignature = async (launchPath, exactPaths = []) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
-  return readRepositoryWatcherSnapshot(repoRoot, exactPaths);
+/** @param {RepositoryHost} host @param {string} launchPath @param {Iterable<string>} [exactPaths] */
+const readRepositoryChangeSignature = async (host, launchPath, exactPaths = []) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  return readRepositoryWatcherSnapshot(host, repoRoot, exactPaths);
 };
 
 /**
@@ -213,10 +222,13 @@ const getRepositoryWatcherPollInterval = (states) => {
   return HIDDEN_POLL_INTERVAL;
 };
 
+/** @param {RepositoryHost} host @param {string} root */
+const getRepositoryWatcherKey = (host, root) => `${host.id}\0${root}`;
+
 /**
  * @param {{
  *   clearTimeoutImpl?: typeof clearTimeout;
- *   readSnapshot: (root: string, exactPaths: Iterable<string>, knownDirtyPaths: Iterable<string>) => Promise<{head: string; pathSignatures: Record<string, string>; pathVersions?: Record<string, string>; root: string; signature: string}>;
+ *   readSnapshot: (host: RepositoryHost, root: string, exactPaths: Iterable<string>, knownDirtyPaths: Iterable<string>) => Promise<{head: string; pathSignatures: Record<string, string>; pathVersions?: Record<string, string>; root: string; signature: string}>;
  *   setTimeoutImpl?: typeof setTimeout;
  * }} options
  */
@@ -228,6 +240,8 @@ const createRepositoryWatcherCoordinator = ({
   /**
    * @typedef {{
    *   checking: boolean;
+   *   host: RepositoryHost;
+   *   key: string;
    *   pendingSelfWrites: Map<string, {completed: boolean; generation: number; ownerId: number; version?: string}>;
    *   recheckRequested: boolean;
    *   resetRequested: Set<number>;
@@ -288,7 +302,7 @@ const createRepositoryWatcherCoordinator = ({
    * @param {Iterable<number>} [resetIds]
    */
   const check = async (watcher, resetIds = []) => {
-    if (watchers.get(watcher.root) !== watcher || watcher.subscribers.size === 0) {
+    if (watchers.get(watcher.key) !== watcher || watcher.subscribers.size === 0) {
       return;
     }
     clearTimer(watcher);
@@ -306,6 +320,7 @@ const createRepositoryWatcherCoordinator = ({
     const pendingSelfWrites = new Map(watcher.pendingSelfWrites);
     try {
       const snapshot = await readSnapshot(
+        watcher.host,
         watcher.root,
         pendingSelfWrites.keys(),
         Object.keys(watcher.snapshot?.pathSignatures ?? {}),
@@ -382,12 +397,12 @@ const createRepositoryWatcherCoordinator = ({
 
   /** @param {number} id */
   const detach = (id) => {
-    const root = subscriberRoots.get(id);
-    if (!root) {
+    const key = subscriberRoots.get(id);
+    if (!key) {
       return;
     }
     subscriberRoots.delete(id);
-    const watcher = watchers.get(root);
+    const watcher = watchers.get(key);
     if (!watcher) {
       return;
     }
@@ -400,7 +415,7 @@ const createRepositoryWatcherCoordinator = ({
     }
     if (watcher.subscribers.size === 0) {
       clearTimer(watcher);
-      watchers.delete(root);
+      watchers.delete(key);
     } else {
       schedule(watcher, 0);
     }
@@ -410,28 +425,32 @@ const createRepositoryWatcherCoordinator = ({
     /**
      * @param {{
      *   getState: () => {focused: boolean; visible: boolean};
+     *   host: RepositoryHost;
      *   id: number;
      *   notify: (root: string) => void;
      *   root: string;
      * }} subscriber
      */
     async attach(subscriber) {
-      const currentRoot = subscriberRoots.get(subscriber.id);
-      if (currentRoot && currentRoot !== subscriber.root) {
+      const key = getRepositoryWatcherKey(subscriber.host, subscriber.root);
+      const currentKey = subscriberRoots.get(subscriber.id);
+      if (currentKey && currentKey !== key) {
         detach(subscriber.id);
       }
 
-      let watcher = watchers.get(subscriber.root);
+      let watcher = watchers.get(key);
       if (!watcher) {
         watcher = {
           checking: false,
+          host: subscriber.host,
+          key,
           pendingSelfWrites: new Map(),
           recheckRequested: false,
           resetRequested: new Set(),
           root: subscriber.root,
           subscribers: new Map(),
         };
-        watchers.set(subscriber.root, watcher);
+        watchers.set(key, watcher);
       }
       watcher.subscribers.set(subscriber.id, {
         changed: false,
@@ -439,7 +458,7 @@ const createRepositoryWatcherCoordinator = ({
         notify: subscriber.notify,
         snapshot: watcher.snapshot,
       });
-      subscriberRoots.set(subscriber.id, subscriber.root);
+      subscriberRoots.set(subscriber.id, key);
 
       if (watcher.snapshot == null) {
         await check(watcher, [subscriber.id]);
@@ -450,8 +469,8 @@ const createRepositoryWatcherCoordinator = ({
 
     /** @param {number} id @param {string} path */
     beginWrite(id, path) {
-      const root = subscriberRoots.get(id);
-      const watcher = root ? watchers.get(root) : undefined;
+      const key = subscriberRoots.get(id);
+      const watcher = key ? watchers.get(key) : undefined;
       const subscriber = watcher?.subscribers.get(id);
       if (!watcher || !subscriber || subscriber.changed) {
         return null;
@@ -467,13 +486,13 @@ const createRepositoryWatcherCoordinator = ({
       if (watcher.checking) {
         watcher.recheckRequested = true;
       }
-      return { generation, path: normalizedPath, root };
+      return { generation, key: watcher.key, path: normalizedPath, root: watcher.root };
     },
 
     /** @param {number} id */
     async checkNow(id) {
-      const root = subscriberRoots.get(id);
-      const watcher = root ? watchers.get(root) : undefined;
+      const key = subscriberRoots.get(id);
+      const watcher = key ? watchers.get(key) : undefined;
       if (watcher) {
         await check(watcher);
       }
@@ -481,12 +500,12 @@ const createRepositoryWatcherCoordinator = ({
 
     detach,
 
-    /** @param {{generation: number; path: string; root: string} | null} token @param {string | null} version */
+    /** @param {{generation: number; key: string; path: string; root: string} | null} token @param {string | null} version */
     finishWrite(token, version) {
       if (!token) {
         return;
       }
-      const watcher = watchers.get(token.root);
+      const watcher = watchers.get(token.key);
       const pendingWrite = watcher?.pendingSelfWrites.get(token.path);
       if (!watcher || pendingWrite?.generation !== token.generation) {
         return;
@@ -503,8 +522,8 @@ const createRepositoryWatcherCoordinator = ({
 
     /** @param {number} id */
     focus(id) {
-      const root = subscriberRoots.get(id);
-      const watcher = root ? watchers.get(root) : undefined;
+      const key = subscriberRoots.get(id);
+      const watcher = key ? watchers.get(key) : undefined;
       if (watcher?.subscribers.get(id)?.changed === false) {
         schedule(watcher, 0);
       }
@@ -514,15 +533,15 @@ const createRepositoryWatcherCoordinator = ({
       return watchers.size;
     },
 
-    /** @param {string} root */
-    getWatcherSubscriberCount(root) {
-      return watchers.get(root)?.subscribers.size ?? 0;
+    /** @param {RepositoryHost} host @param {string} root */
+    getWatcherSubscriberCount(host, root) {
+      return watchers.get(getRepositoryWatcherKey(host, root))?.subscribers.size ?? 0;
     },
 
-    /** @param {number} id @param {string} root */
-    async reset(id, root) {
-      const watcherRoot = subscriberRoots.get(id);
-      const watcher = watcherRoot === root ? watchers.get(root) : undefined;
+    /** @param {number} id @param {RepositoryHost} host @param {string} root */
+    async reset(id, host, root) {
+      const key = getRepositoryWatcherKey(host, root);
+      const watcher = subscriberRoots.get(id) === key ? watchers.get(key) : undefined;
       if (watcher) {
         await check(watcher, [id]);
       }
@@ -530,8 +549,8 @@ const createRepositoryWatcherCoordinator = ({
 
     /** @param {number} id */
     visibilityChanged(id) {
-      const root = subscriberRoots.get(id);
-      const watcher = root ? watchers.get(root) : undefined;
+      const key = subscriberRoots.get(id);
+      const watcher = key ? watchers.get(key) : undefined;
       if (watcher) {
         schedulePoll(watcher);
       }

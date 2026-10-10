@@ -18,6 +18,7 @@ const { mergeWalkthroughContexts, readWalkthroughContext } = require('./walkthro
 const { resolveWalkthroughShareTarget } = require('./walkthrough-sharing.cjs');
 
 /**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../core/types.ts').ReviewSource} ReviewSource
  */
 
@@ -127,32 +128,35 @@ const uploadWalkthrough = async ({
   });
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repositoryPath
  * @param {ReviewSource} source
  * @param {ReturnType<typeof readConfig>} config
  */
-const readShareState = async (repositoryPath, source, config) =>
+const readShareState = async (host, repositoryPath, source, config) =>
   Promise.all([
-    readRepositoryState(repositoryPath, source, {
+    readRepositoryState(host, repositoryPath, source, {
       showWhitespace: config.settings.showWhitespace,
     }),
-    readGitIdentity(repositoryPath),
+    readGitIdentity(host, repositoryPath),
   ]);
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repositoryPath
  * @param {ReviewSource | undefined} source
  * @param {ReturnType<typeof readConfig>} config
  */
-const readGeneratedShareState = async (repositoryPath, source, config) =>
+const readGeneratedShareState = async (host, repositoryPath, source, config) =>
   Promise.all([
-    readWalkthroughRepositoryState(repositoryPath, source, {
+    readWalkthroughRepositoryState(host, repositoryPath, source, {
       showWhitespace: config.settings.showWhitespace,
     }),
-    readGitIdentity(repositoryPath),
+    readGitIdentity(host, repositoryPath),
   ]);
 
 /**
+ * @param {RepositoryHost} host
  * @param {{
  *   agent?: 'claude' | 'codex' | 'opencode' | 'pi';
  *   codiffVersion: string;
@@ -164,18 +168,21 @@ const readGeneratedShareState = async (repositoryPath, source, config) =>
  *   walkthroughFile: string;
  * }} options
  */
-const shareWalkthroughFile = async ({
-  agent,
-  codiffVersion,
-  forcePublic,
-  openExternal,
-  repositoryPath,
-  serviceUrlOverride,
-  source = { type: 'working-tree' },
-  walkthroughFile,
-}) => {
+const shareWalkthroughFile = async (
+  host,
+  {
+    agent,
+    codiffVersion,
+    forcePublic,
+    openExternal,
+    repositoryPath,
+    serviceUrlOverride,
+    source = { type: 'working-tree' },
+    walkthroughFile,
+  },
+) => {
   const config = readConfig();
-  const [state, uploader] = await readShareState(repositoryPath, source, config);
+  const [state, uploader] = await readShareState(host, repositoryPath, source, config);
 
   let input;
   try {
@@ -206,6 +213,7 @@ const shareWalkthroughFile = async ({
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {{
  *   agent?: 'claude' | 'codex' | 'opencode' | 'pi';
  *   claudeSessionId?: string;
@@ -221,23 +229,26 @@ const shareWalkthroughFile = async ({
  *   walkthroughContextPath?: string;
  * }} options
  */
-const generateAndShareWalkthrough = async ({
-  agent: agentOverride,
-  claudeSessionId,
-  codexSessionId,
-  codiffVersion,
-  forcePublic,
-  openExternal,
-  opencodeSessionId,
-  piSessionId,
-  repositoryPath,
-  serviceUrlOverride,
-  source,
-  walkthroughContextPath,
-}) => {
+const generateAndShareWalkthrough = async (
+  host,
+  {
+    agent: agentOverride,
+    claudeSessionId,
+    codexSessionId,
+    codiffVersion,
+    forcePublic,
+    openExternal,
+    opencodeSessionId,
+    piSessionId,
+    repositoryPath,
+    serviceUrlOverride,
+    source,
+    walkthroughContextPath,
+  },
+) => {
   const config = readConfig();
   const agent = getAgent(agentOverride || config.settings.agentBackend);
-  const [state, uploader] = await readGeneratedShareState(repositoryPath, source, config);
+  const [state, uploader] = await readGeneratedShareState(host, repositoryPath, source, config);
   const sessionIds = {
     claudeSessionId,
     codexSessionId,

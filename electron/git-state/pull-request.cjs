@@ -21,6 +21,7 @@ const { readGitFiles } = require('./git-files.cjs');
 const { parseReviewUrl } = require('../review-source.cjs');
 
 /**
+ * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageContentResult} DiffImageContentResult
  * @typedef {import('../../core/types.ts').PullRequestReviewComment} PullRequestReviewComment
@@ -163,9 +164,9 @@ const parseRemoteRepositoryPath = (value) => {
   }
 };
 
-/** @param {string} repoRoot @returns {Promise<Array<LocalGitRemote>>} */
-const readLocalGitRemotes = async (repoRoot) => {
-  const names = (await gitOrEmpty(repoRoot, ['remote']))
+/** @param {RepositoryHost} host @param {string} repoRoot @returns {Promise<Array<LocalGitRemote>>} */
+const readLocalGitRemotes = async (host, repoRoot) => {
+  const names = (await gitOrEmpty(host, repoRoot, ['remote']))
     .split('\n')
     .map((name) => name.trim())
     .filter(Boolean);
@@ -173,7 +174,7 @@ const readLocalGitRemotes = async (repoRoot) => {
     names.map(async (name) => {
       // Read the configured URL instead of `git remote -v`, which applies
       // `insteadOf` rewrites and can hide the original github.com host.
-      const url = (await gitOrEmpty(repoRoot, ['config', '--get', `remote.${name}.url`]))
+      const url = (await gitOrEmpty(host, repoRoot, ['config', '--get', `remote.${name}.url`]))
         .split('\n')[0]
         .trim();
       return url ? { name, url } : null;
@@ -189,23 +190,24 @@ const getRemotePriority = (remote) => (remote.name === 'origin' ? 0 : 1);
  * Let Git resolve SSH aliases, credential helpers, and URL rewrites, then make
  * sure the candidate remote exposes this exact GitHub pull request head.
  *
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {LocalGitRemote} remote
  * @param {PullRequestReference} pullRequest
  * @param {string} expectedHeadSha
  */
-const remoteHasPullRequestHead = async (repoRoot, remote, pullRequest, expectedHeadSha) => {
+const remoteHasPullRequestHead = async (host, repoRoot, remote, pullRequest, expectedHeadSha) => {
   const headRef = `refs/pull/${pullRequest.number}/head`;
-  const output = await gitOrEmpty(repoRoot, ['ls-remote', '--refs', remote.name, headRef]);
+  const output = await gitOrEmpty(host, repoRoot, ['ls-remote', '--refs', remote.name, headRef]);
   return output.split('\n').some((line) => {
     const [sha, ref] = line.trim().split(/\s+/);
     return ref === headRef && sha?.toLowerCase() === expectedHeadSha.toLowerCase();
   });
 };
 
-/** @param {string} repoRoot @param {PullRequestReference} pullRequest @param {string | undefined} expectedHeadSha @returns {Promise<GitHubRemote>} */
-const selectPullRequestRemote = async (repoRoot, pullRequest, expectedHeadSha) => {
-  const remotes = (await readLocalGitRemotes(repoRoot)).sort(
+/** @param {RepositoryHost} host @param {string} repoRoot @param {PullRequestReference} pullRequest @param {string | undefined} expectedHeadSha @returns {Promise<GitHubRemote>} */
+const selectPullRequestRemote = async (host, repoRoot, pullRequest, expectedHeadSha) => {
+  const remotes = (await readLocalGitRemotes(host, repoRoot)).sort(
     (left, right) => getRemotePriority(left) - getRemotePriority(right),
   );
   const remote = remotes
@@ -235,7 +237,7 @@ const selectPullRequestRemote = async (repoRoot, pullRequest, expectedHeadSha) =
     });
 
     for (const candidate of candidates) {
-      if (await remoteHasPullRequestHead(repoRoot, candidate, pullRequest, expectedHeadSha)) {
+      if (await remoteHasPullRequestHead(host, repoRoot, candidate, pullRequest, expectedHeadSha)) {
         return {
           direction: 'fetch',
           name: candidate.name,
@@ -259,9 +261,9 @@ const createPullRequestHistoryFetchRefspecs = (pullRequest, metadata) => [
     : []),
 ];
 
-/** @param {string} repoRoot @param {GitHubRemote} remote @param {PullRequestReference} pullRequest @param {GitHubPullRequestMetadata} metadata */
-const fetchPullRequestHistoryRefs = (repoRoot, remote, pullRequest, metadata) =>
-  git(repoRoot, [
+/** @param {RepositoryHost} host @param {string} repoRoot @param {GitHubRemote} remote @param {PullRequestReference} pullRequest @param {GitHubPullRequestMetadata} metadata */
+const fetchPullRequestHistoryRefs = (host, repoRoot, remote, pullRequest, metadata) =>
+  git(host, repoRoot, [
     'fetch',
     '--no-tags',
     remote.name,
@@ -622,16 +624,16 @@ const normalizeGitHubCommit = (commit, scope) => {
 /** @param {GitHubCommit} commit */
 const normalizeGitHubPullRequestCommit = (commit) => normalizeGitHubCommit(commit, 'pull-request');
 
-/** @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {number} [limit] */
-const listPullRequestHistory = async (launchPath, source, limit = 200) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {number} [limit] */
+const listPullRequestHistory = async (host, launchPath, source, limit = 200) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const pullRequest = parseGitHubPullRequestUrl(source.url);
   const [metadata, commits] = await Promise.all([
     readPullRequestMetadata(repoRoot, pullRequest),
     readPullRequestCommits(repoRoot, pullRequest),
   ]);
-  const remote = await selectPullRequestRemote(repoRoot, pullRequest, metadata.head?.sha);
-  await fetchPullRequestHistoryRefs(repoRoot, remote, pullRequest, metadata);
+  const remote = await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
+  await fetchPullRequestHistoryRefs(host, repoRoot, remote, pullRequest, metadata);
   const baseCommits = metadata.base?.sha
     ? await readRepositoryCommits(repoRoot, pullRequest, metadata.base.sha, limit)
     : [];
@@ -728,13 +730,20 @@ const createPullRequestSource = (pullRequest, metadata) => ({
  * callers fall back to the GitHub-provided patch (which cannot expand
  * unmodified context).
  *
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {PullRequestReference} pullRequest
  * @param {GitHubPullRequestMetadata} metadata
  * @param {GitHubRemote} [selectedRemote]
  * @returns {Promise<{base: string; head: string} | null>}
  */
-const resolvePullRequestContentRefs = async (repoRoot, pullRequest, metadata, selectedRemote) => {
+const resolvePullRequestContentRefs = async (
+  host,
+  repoRoot,
+  pullRequest,
+  metadata,
+  selectedRemote,
+) => {
   if (!metadata.base?.ref) {
     return null;
   }
@@ -744,10 +753,10 @@ const resolvePullRequestContentRefs = async (repoRoot, pullRequest, metadata, se
   const headSha = metadata.head?.sha;
   const baseSha = metadata.base?.sha;
   const localHead = (
-    await gitOrEmpty(repoRoot, ['rev-parse', '--verify', '--quiet', headRef])
+    await gitOrEmpty(host, repoRoot, ['rev-parse', '--verify', '--quiet', headRef])
   ).trim();
   const localBase = (
-    await gitOrEmpty(repoRoot, ['rev-parse', '--verify', '--quiet', baseRef])
+    await gitOrEmpty(host, repoRoot, ['rev-parse', '--verify', '--quiet', baseRef])
   ).trim();
 
   // Refetch when a ref is missing or has moved -- including when the base branch
@@ -763,14 +772,14 @@ const resolvePullRequestContentRefs = async (repoRoot, pullRequest, metadata, se
     try {
       const remote =
         selectedRemote ??
-        (await selectPullRequestRemote(repoRoot, pullRequest, metadata.head?.sha));
-      await fetchPullRequestHistoryRefs(repoRoot, remote, pullRequest, metadata);
+        (await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha));
+      await fetchPullRequestHistoryRefs(host, repoRoot, remote, pullRequest, metadata);
     } catch {
       return null;
     }
   }
 
-  const mergeBase = (await gitOrEmpty(repoRoot, ['merge-base', baseRef, headRef])).trim();
+  const mergeBase = (await gitOrEmpty(host, repoRoot, ['merge-base', baseRef, headRef])).trim();
   return mergeBase ? { base: mergeBase, head: headRef } : null;
 };
 
@@ -839,9 +848,9 @@ const createPullRequestSection = (pullRequest, file, patch, oldFile, newFile) =>
   };
 };
 
-/** @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @returns {Promise<RepositoryState>} */
-const readPullRequestState = async (launchPath, source) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @returns {Promise<RepositoryState>} */
+const readPullRequestState = async (host, launchPath, source) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const pullRequest = parseGitHubPullRequestUrl(source.url);
 
   const [metadata, apiFiles, diff, reviewComments] = await Promise.all([
@@ -850,13 +859,14 @@ const readPullRequestState = async (launchPath, source) => {
     readPullRequestDiff(repoRoot, pullRequest),
     readPullRequestComments(repoRoot, pullRequest),
   ]);
-  const remote = await selectPullRequestRemote(repoRoot, pullRequest, metadata.head?.sha);
+  const remote = await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const diffByPath = splitPullRequestDiff(diff);
   // Load every file's base and head contents up front from the local refs, so
   // each diff renders in its final collapsed layout immediately and never shifts
   // as expandable context becomes available. Files larger than the eager limit
   // stay patch-only.
   const contentRefs = await resolvePullRequestContentRefs(
+    host,
     repoRoot,
     pullRequest,
     metadata,
@@ -874,12 +884,14 @@ const readPullRequestState = async (launchPath, source) => {
   const [oldFiles, newFiles] = contentRefs
     ? await Promise.all([
         readGitFiles(
+          host,
           repoRoot,
           contentRefs.base,
           contentFiles.map(({ oldPath }) => oldPath),
           { refScopedEmptyCacheKey: true },
         ),
         readGitFiles(
+          host,
           repoRoot,
           contentRefs.head,
           contentFiles.map(({ file }) => file.filename),
@@ -928,14 +940,15 @@ const readPullRequestState = async (launchPath, source) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {Extract<ReviewSource, {type: 'pull-request'}>} source
  * @param {string} requestedPath
  * @returns {Promise<DiffImageContentResult>}
  */
-const readPullRequestImageContent = async (launchPath, source, requestedPath) => {
+const readPullRequestImageContent = async (host, launchPath, source, requestedPath) => {
   try {
-    const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+    const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
     const path = validateRepositoryPath(requestedPath);
     const pullRequest = parseGitHubPullRequestUrl(source.url);
 
@@ -943,7 +956,7 @@ const readPullRequestImageContent = async (launchPath, source, requestedPath) =>
       readPullRequestMetadata(repoRoot, pullRequest),
       readPullRequestFiles(repoRoot, pullRequest),
     ]);
-    await selectPullRequestRemote(repoRoot, pullRequest, metadata.head?.sha);
+    await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
     const file = files.find((candidate) => candidate.filename === path);
     if (!file) {
       throw new Error('File is not part of this pull request.');
@@ -1024,12 +1037,12 @@ const hasPendingPullRequestReview = async (repoRoot, pullRequest) => {
   return Array.isArray(pages) && pages.flat().some((review) => review?.state === 'PENDING');
 };
 
-/** @param {string} launchPath @param {SubmitPullRequestCommentRequest} request */
-const submitPullRequestComment = async (launchPath, request) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {SubmitPullRequestCommentRequest} request */
+const submitPullRequestComment = async (host, launchPath, request) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const pullRequest = parseGitHubPullRequestUrl(request.source.url);
   const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
-  await selectPullRequestRemote(repoRoot, pullRequest, metadata.head?.sha);
+  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const payload = {
     ...normalizePullRequestComment(request.comment),
     commit_id: metadata.head?.sha,
@@ -1063,12 +1076,12 @@ const submitPullRequestComment = async (launchPath, request) => {
   return comment;
 };
 
-/** @param {string} launchPath @param {SubmitPullRequestReviewRequest} request */
-const submitPullRequestReview = async (launchPath, request) => {
-  const repoRoot = (await git(launchPath, ['rev-parse', '--show-toplevel'])).trim();
+/** @param {RepositoryHost} host @param {string} launchPath @param {SubmitPullRequestReviewRequest} request */
+const submitPullRequestReview = async (host, launchPath, request) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const pullRequest = parseGitHubPullRequestUrl(request.source.url);
   const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
-  await selectPullRequestRemote(repoRoot, pullRequest, metadata.head?.sha);
+  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
 
   await ghApi(
     repoRoot,

@@ -11,6 +11,8 @@ import { getReviewSource, parseArguments, resolvePullRequestTargetUrl } from './
 const require = createRequire(import.meta.url);
 const { shareWalkthroughFile } = require('../electron/headless-walkthrough-share.cjs');
 const { sharePlanFile } = require('../electron/headless-plan-share.cjs');
+const { createLocalHost } = require('../electron/host/local-host.cjs');
+const localHost = createLocalHost();
 
 const openExternal = (url) =>
   new Promise((resolveOpen, reject) => {
@@ -113,7 +115,7 @@ try {
           ? parsed.piSessionId
           : parsed.codexSessionId;
   const url = planFilePath
-    ? await sharePlanFile({
+    ? await sharePlanFile(localHost, {
         agent: parsed.agentBackend ?? undefined,
         codiffVersion: packageJson.version,
         forcePublic: parsed.public,
@@ -123,7 +125,7 @@ try {
         serviceUrlOverride: process.env.CODIFF_SHARE_SERVER_URL,
         sessionId: sessionId ?? undefined,
       })
-    : await shareWalkthroughFile({
+    : await shareWalkthroughFile(localHost, {
         agent: parsed.agentBackend ?? undefined,
         codiffVersion: packageJson.version,
         forcePublic: parsed.public,

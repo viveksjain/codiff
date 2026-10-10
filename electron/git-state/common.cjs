@@ -1,14 +1,11 @@
 // @ts-check
 
-const { execFile, spawn } = require('node:child_process');
 const { promises: fs } = require('node:fs');
 const { createHash } = require('node:crypto');
 const { isAbsolute, join, normalize, sep } = require('node:path');
-const { promisify } = require('node:util');
-
-const execFileAsync = promisify(execFile);
 
 /**
+ * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageRevision} DiffImageRevision
  * @typedef {import('../../core/types.ts').DiffSection} DiffSection
@@ -49,68 +46,34 @@ const getFingerprint = (value) => createHash('sha256').update(value).digest('hex
 const getGravatarHash = (email) =>
   createHash('md5').update(email.trim().toLowerCase()).digest('hex');
 
+const GIT_MAX_BUFFER = 1024 * 1024 * 64;
+
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoPath
  * @param {ReadonlyArray<string>} args
  * @param {{encoding?: BufferEncoding}} [options]
  * @returns {Promise<string>}
  */
-const git = async (repoPath, args, options = {}) => {
-  const { stdout } = await execFileAsync('git', ['-C', repoPath, ...args], {
-    encoding: options.encoding || 'utf8',
-    maxBuffer: 1024 * 1024 * 64,
-  });
-  return stdout;
-};
+const git = async (host, repoPath, args, options = {}) =>
+  (await host.exec('git', ['-C', repoPath, ...args], { maxBuffer: GIT_MAX_BUFFER })).toString(
+    options.encoding || 'utf8',
+  );
 
-/** @param {string} repoPath @param {ReadonlyArray<string>} args @returns {Promise<Buffer>} */
-const gitBuffer = async (repoPath, args) => {
-  const { stdout } = await execFileAsync('git', ['-C', repoPath, ...args], {
-    encoding: 'buffer',
-    maxBuffer: 1024 * 1024 * 64,
-  });
-  return stdout;
-};
+/** @param {RepositoryHost} host @param {string} repoPath @param {ReadonlyArray<string>} args @returns {Promise<Buffer>} */
+const gitBuffer = (host, repoPath, args) =>
+  host.exec('git', ['-C', repoPath, ...args], { maxBuffer: GIT_MAX_BUFFER });
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoPath
  * @param {ReadonlyArray<string>} args
  * @param {string | Buffer} input
- * @param {{env?: NodeJS.ProcessEnv}} [options]
+ * @param {{env?: Readonly<Record<string, string>>}} [options]
  * @returns {Promise<Buffer>}
  */
-const gitBufferWithInput = (repoPath, args, input, options = {}) =>
-  new Promise((resolve, reject) => {
-    const child = spawn('git', ['-C', repoPath, ...args], {
-      env: options.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    /** @type {Array<Buffer>} */
-    const stdout = [];
-    /** @type {Array<Buffer>} */
-    const stderr = [];
-
-    child.stdout.on('data', (chunk) => stdout.push(chunk));
-    child.stderr.on('data', (chunk) => stderr.push(chunk));
-    child.stdin.on('error', (error) => {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EPIPE') {
-        reject(error);
-      }
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve(Buffer.concat(stdout));
-      } else {
-        const error = new Error(
-          Buffer.concat(stderr).toString('utf8') || `git exited with status ${code}`,
-        );
-        reject(error);
-      }
-    });
-
-    child.stdin.end(input);
-  });
+const gitBufferWithInput = (host, repoPath, args, input, options = {}) =>
+  host.exec('git', ['-C', repoPath, ...args], { env: options.env, input });
 
 const EAGER_TEXT_FILE_LIMIT = 1024 * 1024;
 const MANUAL_TEXT_FILE_LIMIT = 2 * 1024 * 1024;
@@ -313,8 +276,8 @@ const validateRepositoryPath = (path) => {
   return normalized;
 };
 
-/** @param {string} repoRoot @param {string} path */
-const readFileStat = async (repoRoot, path) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} path */
+const readFileStat = async (host, repoRoot, path) => {
   try {
     return await fs.lstat(join(repoRoot, path));
   } catch {
@@ -322,10 +285,10 @@ const readFileStat = async (repoRoot, path) => {
   }
 };
 
-/** @param {string} repoRoot @param {string} spec */
-const getBlobSize = async (repoRoot, spec) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} spec */
+const getBlobSize = async (host, repoRoot, spec) => {
   try {
-    return Number((await git(repoRoot, ['cat-file', '-s', spec])).trim());
+    return Number((await git(host, repoRoot, ['cat-file', '-s', spec])).trim());
   } catch {
     return undefined;
   }
@@ -359,18 +322,19 @@ const bufferToTextFile = (name, buffer, cacheKey) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} spec
  * @param {string} path
  * @returns {Promise<DiffImageRevision | undefined>}
  */
-const readImageSpec = async (repoRoot, spec, path) => {
+const readImageSpec = async (host, repoRoot, spec, path) => {
   const mimeType = getImageMimeType(path);
   if (!mimeType) {
     throw new Error('Unsupported image file type.');
   }
 
-  const size = await getBlobSize(repoRoot, spec);
+  const size = await getBlobSize(host, repoRoot, spec);
   if (size == null) {
     return undefined;
   }
@@ -380,27 +344,28 @@ const readImageSpec = async (repoRoot, spec, path) => {
   }
 
   try {
-    return bufferToImageRevision(path, await gitBuffer(repoRoot, ['show', spec]));
+    return bufferToImageRevision(path, await gitBuffer(host, repoRoot, ['show', spec]));
   } catch {
     return undefined;
   }
 };
 
-/** @param {string} repoRoot @param {string} ref @param {string} path */
-const readGitImageFile = (repoRoot, ref, path) => readImageSpec(repoRoot, `${ref}:${path}`, path);
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} ref @param {string} path */
+const readGitImageFile = (host, repoRoot, ref, path) =>
+  readImageSpec(host, repoRoot, `${ref}:${path}`, path);
 
-/** @param {string} repoRoot @param {string} path @param {1 | 2 | 3} [stage] */
-const readIndexImageFile = (repoRoot, path, stage) =>
-  readImageSpec(repoRoot, stage ? `:${stage}:${path}` : `:${path}`, path);
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} path @param {1 | 2 | 3} [stage] */
+const readIndexImageFile = (host, repoRoot, path, stage) =>
+  readImageSpec(host, repoRoot, stage ? `:${stage}:${path}` : `:${path}`, path);
 
-/** @param {string} repoRoot @param {string} path */
-const readWorkingTreeImageFile = async (repoRoot, path) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} path */
+const readWorkingTreeImageFile = async (host, repoRoot, path) => {
   const mimeType = getImageMimeType(path);
   if (!mimeType) {
     throw new Error('Unsupported image file type.');
   }
 
-  const stat = await readFileStat(repoRoot, path);
+  const stat = await readFileStat(host, repoRoot, path);
   if (!stat || !stat.isFile()) {
     return undefined;
   }
@@ -413,18 +378,19 @@ const readWorkingTreeImageFile = async (repoRoot, path) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} ref
  * @param {string} path
  * @param {ReadFileOptions} [options]
  * @returns {Promise<FileContentResult>}
  */
-const readGitFile = async (repoRoot, ref, path, options = {}) => {
+const readGitFile = async (host, repoRoot, ref, path, options = {}) => {
   const limit = options.force ? MANUAL_TEXT_FILE_LIMIT : EAGER_TEXT_FILE_LIMIT;
   const spec = `${ref}:${path}`;
 
   try {
-    const size = await getBlobSize(repoRoot, spec);
+    const size = await getBlobSize(host, repoRoot, spec);
     if (size != null && size > limit) {
       return {
         binary: false,
@@ -442,7 +408,7 @@ const readGitFile = async (repoRoot, ref, path, options = {}) => {
       };
     }
 
-    const buffer = await gitBuffer(repoRoot, ['show', spec]);
+    const buffer = await gitBuffer(host, repoRoot, ['show', spec]);
     return bufferToTextFile(path, buffer, `${ref}:${path}`);
   } catch {
     return {
@@ -457,18 +423,19 @@ const readGitFile = async (repoRoot, ref, path, options = {}) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} path
  * @param {ReadFileOptions} [options]
  * @param {1 | 2 | 3} [stage]
  * @returns {Promise<FileContentResult>}
  */
-const readIndexFile = async (repoRoot, path, options = {}, stage) => {
+const readIndexFile = async (host, repoRoot, path, options = {}, stage) => {
   const limit = options.force ? MANUAL_TEXT_FILE_LIMIT : EAGER_TEXT_FILE_LIMIT;
   const spec = stage ? `:${stage}:${path}` : `:${path}`;
 
   try {
-    const size = await getBlobSize(repoRoot, spec);
+    const size = await getBlobSize(host, repoRoot, spec);
     if (size != null && size > limit) {
       return {
         binary: false,
@@ -486,7 +453,7 @@ const readIndexFile = async (repoRoot, path, options = {}, stage) => {
       };
     }
 
-    const buffer = await gitBuffer(repoRoot, ['show', spec]);
+    const buffer = await gitBuffer(host, repoRoot, ['show', spec]);
     return bufferToTextFile(path, buffer, `index:${path}`);
   } catch {
     return {
@@ -501,16 +468,17 @@ const readIndexFile = async (repoRoot, path, options = {}, stage) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} path
  * @param {ReadFileOptions} [options]
  * @returns {Promise<FileContentResult>}
  */
-const readWorkingTreeFile = async (repoRoot, path, options = {}) => {
+const readWorkingTreeFile = async (host, repoRoot, path, options = {}) => {
   const limit = options.force ? MANUAL_TEXT_FILE_LIMIT : EAGER_TEXT_FILE_LIMIT;
 
   try {
-    const stat = await readFileStat(repoRoot, path);
+    const stat = await readFileStat(host, repoRoot, path);
     if (!stat) {
       throw new Error('File is missing.');
     }
@@ -623,11 +591,11 @@ const createPatchForNewFile = (path, contents) => {
 const getWhitespaceDiffArgs = (options = {}) =>
   options.showWhitespace === false ? ['--ignore-all-space'] : [];
 
-/** @param {string} repoRoot @param {StatusItem} item @param {WorkingTreeSectionKind} kind @param {{showWhitespace?: boolean}} [options] */
-const getPatch = async (repoRoot, item, kind, options = {}) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {StatusItem} item @param {WorkingTreeSectionKind} kind @param {{showWhitespace?: boolean}} [options] */
+const getPatch = async (host, repoRoot, item, kind, options = {}) => {
   const whitespaceArgs = getWhitespaceDiffArgs(options);
   if (item.status === 'conflicted' && !item.conflictStage) {
-    const newFile = await readWorkingTreeFile(repoRoot, item.path, options);
+    const newFile = await readWorkingTreeFile(host, repoRoot, item.path, options);
     return {
       binary: newFile.binary,
       patch: newFile.file ? createPatchForNewFile(item.path, newFile.file.contents) : '',
@@ -656,7 +624,7 @@ const getPatch = async (repoRoot, item, kind, options = {}) => {
             item.path,
           ]
         : ['diff', '--patch', '--no-ext-diff', ...whitespaceArgs, '--', item.path];
-  const rawPatch = await git(repoRoot, args);
+  const rawPatch = await git(host, repoRoot, args);
   const diffStart = item.status === 'conflicted' ? rawPatch.indexOf('diff --git ') : -1;
   const patch =
     item.status !== 'conflicted' ? rawPatch : diffStart === -1 ? '' : rawPatch.slice(diffStart);
@@ -703,15 +671,16 @@ const summarizeContent = (...results) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {StatusItem} item
  * @param {WorkingTreeSectionKind} kind
  * @param {ReadFileOptions} [options]
  */
-const getWorkingTreeContents = async (repoRoot, item, kind, options = {}) => {
+const getWorkingTreeContents = async (host, repoRoot, item, kind, options = {}) => {
   if (kind === 'staged') {
-    const oldFile = await readGitFile(repoRoot, 'HEAD', item.oldPath || item.path, options);
-    const newFile = await readIndexFile(repoRoot, item.path, options);
+    const oldFile = await readGitFile(host, repoRoot, 'HEAD', item.oldPath || item.path, options);
+    const newFile = await readIndexFile(host, repoRoot, item.path, options);
     const summary = summarizeContent(oldFile, newFile);
 
     return {
@@ -737,7 +706,7 @@ const getWorkingTreeContents = async (repoRoot, item, kind, options = {}) => {
               canLoad: false,
             }),
           }
-        : await readWorkingTreeFile(repoRoot, item.path, options);
+        : await readWorkingTreeFile(host, repoRoot, item.path, options);
     const summary = summarizeContent(newFile);
 
     return {
@@ -751,8 +720,8 @@ const getWorkingTreeContents = async (repoRoot, item, kind, options = {}) => {
     };
   }
 
-  const oldFile = await readIndexFile(repoRoot, item.path, options, item.conflictStage);
-  const newFile = await readWorkingTreeFile(repoRoot, item.path, options);
+  const oldFile = await readIndexFile(host, repoRoot, item.path, options, item.conflictStage);
+  const newFile = await readWorkingTreeFile(host, repoRoot, item.path, options);
   const summary = summarizeContent(oldFile, newFile);
 
   return {
@@ -763,18 +732,19 @@ const getWorkingTreeContents = async (repoRoot, item, kind, options = {}) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {StatusItem} item
  * @param {WorkingTreeSectionKind} kind
  * @param {ReadFileOptions} [options]
  * @returns {Promise<DiffSection>}
  */
-const createSection = async (repoRoot, item, kind, options = {}) => {
+const createSection = async (host, repoRoot, item, kind, options = {}) => {
   const id = `${item.path}:${kind}`;
   const needsWorkingTreeBaseline = item.status === 'conflicted' && !item.conflictStage;
 
   if (options.patchOnly && !item.untracked && !needsWorkingTreeBaseline) {
-    const patch = options.patch ?? (await getPatch(repoRoot, item, kind, options));
+    const patch = options.patch ?? (await getPatch(host, repoRoot, item, kind, options));
 
     if (patch.binary) {
       return {
@@ -798,7 +768,7 @@ const createSection = async (repoRoot, item, kind, options = {}) => {
     };
   }
 
-  const contents = await getWorkingTreeContents(repoRoot, item, kind, options);
+  const contents = await getWorkingTreeContents(host, repoRoot, item, kind, options);
 
   if (contents.loadState !== 'ready') {
     return {
@@ -823,7 +793,7 @@ const createSection = async (repoRoot, item, kind, options = {}) => {
     };
   }
 
-  const patch = await getPatch(repoRoot, item, kind, options);
+  const patch = await getPatch(host, repoRoot, item, kind, options);
 
   return {
     binary: patch.binary || contents.binary,
@@ -846,10 +816,10 @@ const normalizeStatus = (statusCode) =>
         ? 'renamed'
         : 'modified';
 
-/** @param {string} repoRoot @param {ReadonlyArray<string>} args */
-const gitOrEmpty = async (repoRoot, args) => {
+/** @param {RepositoryHost} host @param {string} repoRoot @param {ReadonlyArray<string>} args */
+const gitOrEmpty = async (host, repoRoot, args) => {
   try {
-    return await git(repoRoot, args);
+    return await git(host, repoRoot, args);
   } catch {
     return '';
   }

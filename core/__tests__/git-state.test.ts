@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, test } from 'vite-plus/test';
+import type { RepositoryHost } from '../../electron/host/repository-host.cjs';
 import { fileHasVisibleDiff, getDiffLineCount } from '../lib/diff.ts';
 import type {
   DiffSection,
@@ -35,6 +36,7 @@ type PullRequestFileContent = {
 
 type GeneratedFilesModule = {
   readGeneratedAttributeStates: (
+    host: RepositoryHost,
     repoRoot: string,
     paths: ReadonlyArray<string>,
     source?: string,
@@ -79,6 +81,7 @@ type GitStateModule = {
     },
   ) => { owner: string; ref: string; repo: string };
   listRepositoryHistory: (
+    host: RepositoryHost,
     launchPath: string,
     limit?: number,
     source?: ReviewSource,
@@ -95,27 +98,33 @@ type GitStateModule = {
   parseStatus: (raw: string) => Array<StatusEntry>;
   PENDING_REVIEW_COMMENT_ERROR: string;
   readDiffSectionContent: (
+    host: RepositoryHost,
     launchPath: string,
     request: DiffSectionContentRequest,
   ) => Promise<DiffSection>;
   readRepositoryChangeSignature: (
+    host: RepositoryHost,
     launchPath: string,
   ) => Promise<{ root: string; signature: string }>;
   readRepositoryState: (
+    host: RepositoryHost,
     launchPath: string,
     source?: ReviewSource,
     options?: { showWhitespace?: boolean },
   ) => Promise<RepositoryState>;
   readWalkthroughRepositoryState: (
+    host: RepositoryHost,
     launchPath: string,
     source?: ReviewSource,
     options?: { showWhitespace?: boolean },
   ) => Promise<RepositoryState>;
   readWorkingTreeState: (
+    host: RepositoryHost,
     launchPath: string,
     options?: { eagerContents?: boolean; showWhitespace?: boolean },
   ) => Promise<RepositoryState>;
   resolvePullRequestContentRefs: (
+    host: RepositoryHost,
     repoRoot: string,
     pullRequest: { number: number; owner: string; repo: string; url: string },
     metadata: { base?: { ref?: string; sha?: string }; head?: { ref?: string; sha?: string } },
@@ -125,6 +134,7 @@ type GitStateModule = {
     resolvedCommentIds: ReadonlySet<number>,
   ) => Array<Record<string, unknown>>;
   submitPullRequestComment: (
+    host: RepositoryHost,
     launchPath: string,
     request: {
       comment: {
@@ -141,6 +151,10 @@ type GitStateModule = {
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../../electron/host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { readGeneratedAttributeStates } =
   require('../../electron/generated-files.cjs') as GeneratedFilesModule;
 const {
@@ -297,7 +311,7 @@ test('readRepositoryState marks generated files from gitattributes and path heur
     await writeRepoFile(repo, 'pnpm-lock.yaml', 'lockfileVersion: 9\n');
     await writeRepoFile(repo, 'src/__generated__/api.ts', 'export const api = 1;\n');
 
-    const state = await readRepositoryState(repo);
+    const state = await readRepositoryState(host, repo);
     const generatedByPath = new Map(state.files.map((file) => [file.path, file.generated]));
 
     expect(generatedByPath.get('service.gen.yaml')).toBe(true);
@@ -316,7 +330,7 @@ test('commit reviews evaluate generated attributes from the reviewed commit', as
     const commit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
 
     await writeRepoFile(repo, '.gitattributes', '*.api.ts -linguist-generated\n');
-    const state = await readRepositoryState(repo, { ref: commit, type: 'commit' });
+    const state = await readRepositoryState(host, repo, { ref: commit, type: 'commit' });
 
     expect(state.files.find((file) => file.path === 'client.api.ts')?.generated).toBe(true);
   });
@@ -362,6 +376,7 @@ exec git "$@"
       PATH: `${wrapperDirectory.path}:${process.env.PATH ?? ''}`,
     });
     const generatedStates = await readGeneratedAttributeStates(
+      host,
       repo,
       ['client.api.ts', 'pnpm-lock.yaml'],
       commit,
@@ -427,7 +442,7 @@ test('readWorkingTreeState renders a merge conflict against our version', async 
     await commitAll(repo, 'ours');
     await expect(git(repo, ['merge', 'other'])).rejects.toThrow();
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     expect(state.files).toHaveLength(1);
     expect(state.files[0]).toMatchObject({ path: 'file.txt', status: 'conflicted' });
     expect(state.files[0].sections).toHaveLength(1);
@@ -454,7 +469,7 @@ test('readWorkingTreeState compares delete-by-us conflicts against an empty file
     await git(repo, ['commit', '-m', 'ours deletion']);
     await expect(git(repo, ['merge', 'other'])).rejects.toThrow();
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const conflict = state.files[0];
     expect(conflict.status).toBe('conflicted');
     expect(conflict.sections).toHaveLength(1);
@@ -464,7 +479,7 @@ test('readWorkingTreeState compares delete-by-us conflicts against an empty file
     expect(conflict.sections[0].patch).toContain('+theirs');
     expect(conflict.sections[0].patch).not.toContain('* Unmerged path');
 
-    const patchOnlyState = await readWorkingTreeState(repo, { eagerContents: false });
+    const patchOnlyState = await readWorkingTreeState(host, repo, { eagerContents: false });
     expect(patchOnlyState.files[0].sections[0].oldFile?.contents).toBe('');
     expect(patchOnlyState.files[0].sections[0].newFile?.contents).toBe('theirs\n');
   });
@@ -485,7 +500,7 @@ test('readWorkingTreeState omits unmerged diagnostics when our conflict version 
     await commitAll(repo, 'ours');
     await expect(git(repo, ['merge', 'other'])).rejects.toThrow();
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     expect(state.files[0].sections[0]).toMatchObject({
       kind: 'unstaged',
       newFile: { contents: 'ours\n' },
@@ -493,7 +508,7 @@ test('readWorkingTreeState omits unmerged diagnostics when our conflict version 
       patch: '',
     });
 
-    const patchOnlyState = await readWorkingTreeState(repo, { eagerContents: false });
+    const patchOnlyState = await readWorkingTreeState(host, repo, { eagerContents: false });
     expect(patchOnlyState.files[0].sections[0].patch).toBe('');
   });
 });
@@ -732,7 +747,7 @@ test('resolvePullRequestContentRefs resolves the diff against the merge base', a
     const baseTip = (await git(repo, ['rev-parse', 'HEAD'])).trim();
     await git(repo, ['update-ref', 'refs/codiff/pull-requests/7/base', baseTip]);
 
-    const refs = await resolvePullRequestContentRefs(repo, pullRequestFixture, {
+    const refs = await resolvePullRequestContentRefs(host, repo, pullRequestFixture, {
       base: { ref: 'main' },
       head: { sha: headSha },
     });
@@ -763,7 +778,7 @@ test('resolvePullRequestContentRefs refetches when the fetched base no longer ma
     // base branch moved or the pull request was retargeted). Resolution must
     // refetch rather than diff against the stale local base; with no remote
     // configured here the refetch fails and resolution reports it cannot resolve.
-    const refs = await resolvePullRequestContentRefs(repo, pullRequestFixture, {
+    const refs = await resolvePullRequestContentRefs(host, repo, pullRequestFixture, {
       base: { ref: 'main', sha: '0'.repeat(40) },
       head: { sha: headSha },
     });
@@ -1008,7 +1023,7 @@ test('normalizePullRequestComment uses the start side for ranged comments', () =
 
 test('pull request comments explain when a pending GitHub review blocks submission', async () => {
   await withFakeGitHub('pending-review', async (repo, readCalls) => {
-    await expect(submitPullRequestComment(repo, pullRequestCommentRequest)).rejects.toThrow(
+    await expect(submitPullRequestComment(host, repo, pullRequestCommentRequest)).rejects.toThrow(
       PENDING_REVIEW_COMMENT_ERROR,
     );
 
@@ -1023,7 +1038,7 @@ test('pull request comments explain when a pending GitHub review blocks submissi
 test('pull request comments preserve GitHub validation errors when no pending review is found', async () => {
   for (const mode of ['diagnosis-fails', 'no-pending-review'] as const) {
     await withFakeGitHub(mode, async (repo) => {
-      await expect(submitPullRequestComment(repo, pullRequestCommentRequest)).rejects.toThrow(
+      await expect(submitPullRequestComment(host, repo, pullRequestCommentRequest)).rejects.toThrow(
         'gh: Validation Failed (HTTP 422)',
       );
     });
@@ -1032,7 +1047,9 @@ test('pull request comments preserve GitHub validation errors when no pending re
 
 test('successful pull request comments skip pending review diagnosis', async () => {
   await withFakeGitHub('success', async (repo, readCalls) => {
-    await expect(submitPullRequestComment(repo, pullRequestCommentRequest)).resolves.toMatchObject({
+    await expect(
+      submitPullRequestComment(host, repo, pullRequestCommentRequest),
+    ).resolves.toMatchObject({
       body: 'Keep this comment.',
       filePath: 'src/app.ts',
       id: 'github:1',
@@ -1069,7 +1086,7 @@ test('readWorkingTreeState separates staged and unstaged modifications', async (
     await git(repo, ['add', 'file.txt']);
     await writeRepoFile(repo, 'file.txt', 'three\n');
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
 
     expect(state.root).toBe(repo);
     expect(state.files).toHaveLength(1);
@@ -1089,7 +1106,7 @@ test('readRepositoryState uses hidden-whitespace patches for patch-only working 
     await commitAll(repo, 'initial commit');
     await writeRepoFile(repo, 'src/code.ts', 'const  value = 1;\n');
 
-    const state = await readRepositoryState(repo, undefined, { showWhitespace: false });
+    const state = await readRepositoryState(host, repo, undefined, { showWhitespace: false });
     const file = state.files.find((candidate) => candidate.path === 'src/code.ts');
 
     expect(file?.sections[0]?.oldFile).toBeUndefined();
@@ -1114,7 +1131,7 @@ test('readWorkingTreeState ignores files saved only in the stash', async () => {
     await git(repo, ['stash', 'push', '--include-untracked', '-m', 'codiff test stash']);
     await writeRepoFile(repo, 'other.txt', 'visible local change\n');
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
 
     expect(state.files.map((file) => file.path)).toEqual(['other.txt']);
     expect(state.files[0].sections[0].newFile?.contents).toBe('visible local change\n');
@@ -1126,8 +1143,8 @@ test('readRepositoryState and history handle fresh repositories', async () => {
     await writeRepoFile(repo, 'notes/todo.txt', 'write tests\n');
 
     const [state, history] = await Promise.all([
-      readRepositoryState(repo),
-      listRepositoryHistory(repo),
+      readRepositoryState(host, repo),
+      listRepositoryHistory(host, repo),
     ]);
 
     expect(history).toEqual({
@@ -1146,24 +1163,24 @@ test('readWalkthroughRepositoryState falls back to HEAD only for a clean implici
     await writeRepoFile(repo, 'example.txt', 'after\n');
     await commitAll(repo, 'update example');
 
-    const cleanState = await readWalkthroughRepositoryState(repo);
+    const cleanState = await readWalkthroughRepositoryState(host, repo);
     expect(cleanState.source).toMatchObject({ type: 'commit' });
     expect(cleanState.commitMetadata?.subject).toBe('update example');
 
-    const explicitWorkingTreeState = await readWalkthroughRepositoryState(repo, {
+    const explicitWorkingTreeState = await readWalkthroughRepositoryState(host, repo, {
       type: 'working-tree',
     });
     expect(explicitWorkingTreeState.source).toEqual({ type: 'working-tree' });
     expect(explicitWorkingTreeState.files).toEqual([]);
 
     await writeRepoFile(repo, 'example.txt', 'local\n');
-    const dirtyState = await readWalkthroughRepositoryState(repo);
+    const dirtyState = await readWalkthroughRepositoryState(host, repo);
     expect(dirtyState.source).toEqual({ type: 'working-tree' });
   }));
 
 test('readWalkthroughRepositoryState keeps a fresh repository on the working tree', () =>
   withRepo(async (repo) => {
-    const state = await readWalkthroughRepositoryState(repo);
+    const state = await readWalkthroughRepositoryState(host, repo);
     expect(state.source).toEqual({ type: 'working-tree' });
     expect(state.files).toEqual([]);
   }));
@@ -1174,12 +1191,12 @@ test('readWalkthroughRepositoryState preserves nested launch paths', () =>
     await commitAll(repo, 'initial commit');
     const launchPath = join(repo, 'nested');
 
-    const cleanState = await readWalkthroughRepositoryState(launchPath);
+    const cleanState = await readWalkthroughRepositoryState(host, launchPath);
     expect(cleanState.launchPath).toBe(launchPath);
     expect(cleanState.root).toBe(repo);
 
     await writeRepoFile(repo, 'nested/example.txt', 'after\n');
-    const dirtyState = await readWalkthroughRepositoryState(launchPath);
+    const dirtyState = await readWalkthroughRepositoryState(host, launchPath);
     expect(dirtyState.launchPath).toBe(launchPath);
     expect(dirtyState.root).toBe(repo);
   }));
@@ -1194,7 +1211,7 @@ test(
 
       const tracePath = join(repo, '.git', 'walkthrough-trace.jsonl');
       await using _environment = createTemporaryEnvironment({ GIT_TRACE2_EVENT: tracePath });
-      await readWalkthroughRepositoryState(repo);
+      await readWalkthroughRepositoryState(host, repo);
       const processCount = readFileSync(tracePath, 'utf8')
         .trim()
         .split('\n')
@@ -1211,7 +1228,7 @@ test('readRepositoryState reports commit metadata for root commits', async () =>
     await commitAll(repo, 'initial commit');
     const commit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
 
-    const state = await readRepositoryState(repo, { ref: commit, type: 'commit' });
+    const state = await readRepositoryState(host, repo, { ref: commit, type: 'commit' });
     const metadata = state.commitMetadata;
 
     if (!metadata) {
@@ -1259,7 +1276,7 @@ test('readRepositoryState reports commit body, trailers, refs, and rename stats'
     const commit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
     await git(repo, ['tag', 'v-test', commit]);
 
-    const state = await readRepositoryState(repo, { ref: 'HEAD', type: 'commit' });
+    const state = await readRepositoryState(host, repo, { ref: 'HEAD', type: 'commit' });
     const metadata = state.commitMetadata;
 
     if (!metadata) {
@@ -1303,7 +1320,7 @@ test('readRepositoryState preserves numstat for committed paths with tabs', asyn
     await writeRepoFile(repo, path, 'one\ntwo\n');
     await commitAll(repo, 'modify tab path');
 
-    const state = await readRepositoryState(repo, { ref: 'HEAD', type: 'commit' });
+    const state = await readRepositoryState(host, repo, { ref: 'HEAD', type: 'commit' });
     const metadata = state.commitMetadata;
 
     if (!metadata) {
@@ -1344,9 +1361,9 @@ test('readRepositoryState opens branch refs as current branch diffs against the 
     await commitAll(repo, 'main change');
     await git(repo, ['checkout', 'feature']);
 
-    const state = await readRepositoryState(repo, { ref: baseBranch, type: 'branch' });
+    const state = await readRepositoryState(host, repo, { ref: baseBranch, type: 'branch' });
     const source = state.source as Extract<ReviewSource, { type: 'branch-diff' }>;
-    const history = await listRepositoryHistory(repo, 10, source);
+    const history = await listRepositoryHistory(host, repo, 10, source);
 
     expect(source.ref).toBe(baseBranch);
     expect(source.type).toBe('branch-diff');
@@ -1364,13 +1381,13 @@ test('readRepositoryState opens branch refs as current branch diffs against the 
     await commitAll(repo, 'feature three');
 
     const [section, staleHistory] = await Promise.all([
-      readDiffSectionContent(repo, {
+      readDiffSectionContent(host, repo, {
         force: true,
         kind: state.files[0].sections[0].kind,
         path: 'file.txt',
         source,
       }),
-      listRepositoryHistory(repo, 10, source),
+      listRepositoryHistory(host, repo, 10, source),
     ]);
 
     expect(section.oldFile?.contents).toBe('base\n');
@@ -1388,7 +1405,7 @@ test('readRepositoryState reports missing branch refs clearly', async () => {
     await commitAll(repo, 'initial commit');
 
     await expect(
-      readRepositoryState(repo, { ref: 'definitely-missing-branch', type: 'branch' }),
+      readRepositoryState(host, repo, { ref: 'definitely-missing-branch', type: 'branch' }),
     ).rejects.toThrow('Branch "definitely-missing-branch" does not exist in this repository.');
   });
 });
@@ -1400,7 +1417,7 @@ test('readRepositoryState suggests nearby branch refs', async () => {
     await git(repo, ['branch', 'feature/login']);
 
     await expect(
-      readRepositoryState(repo, { ref: 'feature/logn', type: 'branch' }),
+      readRepositoryState(host, repo, { ref: 'feature/logn', type: 'branch' }),
     ).rejects.toThrow(
       'Branch "feature/logn" does not exist in this repository. Did you mean "feature/login"?',
     );
@@ -1414,7 +1431,7 @@ test('readRepositoryState suggests master when main is missing', async () => {
     await git(repo, ['checkout', '-B', 'master']);
     await git(repo, ['branch', '-D', 'main']).catch(() => undefined);
 
-    await expect(readRepositoryState(repo, { ref: 'main', type: 'branch' })).rejects.toThrow(
+    await expect(readRepositoryState(host, repo, { ref: 'main', type: 'branch' })).rejects.toThrow(
       'Branch "main" does not exist in this repository. Did you mean "master"?',
     );
   });
@@ -1427,9 +1444,9 @@ test('readRepositoryState suggests main when master is missing', async () => {
     await git(repo, ['checkout', '-B', 'main']);
     await git(repo, ['branch', '-D', 'master']).catch(() => undefined);
 
-    await expect(readRepositoryState(repo, { ref: 'master', type: 'branch' })).rejects.toThrow(
-      'Branch "master" does not exist in this repository. Did you mean "main"?',
-    );
+    await expect(
+      readRepositoryState(host, repo, { ref: 'master', type: 'branch' }),
+    ).rejects.toThrow('Branch "master" does not exist in this repository. Did you mean "main"?');
   });
 });
 
@@ -1439,7 +1456,7 @@ test('readWorkingTreeState reports staged pure renames with old and new paths', 
     await commitAll(repo, 'initial commit');
     await git(repo, ['mv', 'old.txt', 'new.txt']);
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
 
     expect(state.files).toHaveLength(1);
     expect(state.files[0].oldPath).toBe('old.txt');
@@ -1463,7 +1480,7 @@ test('readWorkingTreeState keeps rename metadata and the renamed index baseline'
     await git(repo, ['mv', 'old.txt', 'new.txt']);
     await writeRepoFile(repo, 'new.txt', 'one\nchanged\n');
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const [staged, unstaged] = state.files[0].sections;
 
     expect(state.files[0]).toMatchObject({
@@ -1481,7 +1498,7 @@ test('readWorkingTreeState keeps rename metadata and the renamed index baseline'
     expect(unstaged.patch).toContain('-two');
     expect(unstaged.patch).toContain('+changed');
 
-    const patchOnlyState = await readWorkingTreeState(repo, { eagerContents: false });
+    const patchOnlyState = await readWorkingTreeState(host, repo, { eagerContents: false });
     expect(patchOnlyState.files[0].sections[0].patch).toContain('rename from old.txt');
     expect(patchOnlyState.files[0].sections[1].patch).toContain('+changed');
   });
@@ -1495,7 +1512,7 @@ test('readWorkingTreeState reports staged and unstaged deletions', async () => {
     await git(repo, ['rm', 'staged-delete.txt']);
     await rm(join(repo, 'unstaged-delete.txt'));
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const stagedDelete = state.files.find((file) => file.path === 'staged-delete.txt');
     const unstagedDelete = state.files.find((file) => file.path === 'unstaged-delete.txt');
 
@@ -1520,7 +1537,7 @@ test('readWorkingTreeState reports untracked text and binary files', async () =>
     await writeRepoFile(repo, 'notes/new.txt', 'untracked\n');
     await writeRepoFile(repo, 'raw.bin', Uint8Array.from([0, 1, 2, 3]));
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const textFile = state.files.find((file) => file.path === 'notes/new.txt');
     const binaryFile = state.files.find((file) => file.path === 'raw.bin');
 
@@ -1547,7 +1564,7 @@ test('readWorkingTreeState defers large untracked text files and loads them on d
     const contents = `${'large line\n'.repeat(100_000)}end\n`;
     await writeRepoFile(repo, 'large.txt', contents);
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const file = state.files.find((candidate) => candidate.path === 'large.txt');
     const section = file?.sections[0];
 
@@ -1556,7 +1573,7 @@ test('readWorkingTreeState defers large untracked text files and loads them on d
     expect(section?.newFile).toBeUndefined();
     expect(section?.patch).toBe('');
 
-    const loadedSection = await readDiffSectionContent(repo, {
+    const loadedSection = await readDiffSectionContent(host, repo, {
       force: true,
       kind: 'unstaged',
       path: 'large.txt',
@@ -1574,7 +1591,7 @@ test('readWorkingTreeState summarizes extremely large untracked files', async ()
     await commitAll(repo, 'initial commit');
     await writeRepoFile(repo, 'huge.txt', 'x'.repeat(2 * 1024 * 1024 + 1));
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const section = state.files.find((file) => file.path === 'huge.txt')?.sections[0];
 
     expect(section?.loadState).toBe('too-large');
@@ -1592,7 +1609,7 @@ test('readWorkingTreeState collapses generated untracked directories', async () 
     await writeRepoFile(repo, 'packages/app/node_modules/pkg/index.js', 'module.exports = 2;\n');
     await writeRepoFile(repo, 'src/new.ts', 'export const value = 1;\n');
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const paths = state.files.map((file) => file.path);
     const nodeModules = state.files.find((file) => file.path === 'node_modules');
     const nestedNodeModules = state.files.find((file) => file.path === 'packages/app/node_modules');
@@ -1614,7 +1631,7 @@ test('readWorkingTreeState marks modified binary files as binary sections', asyn
     await commitAll(repo, 'initial commit');
     await writeRepoFile(repo, 'raw.bin', Uint8Array.from([0, 9, 2, 3]));
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
 
     expect(state.files).toHaveLength(1);
     expect(state.files[0].path).toBe('raw.bin');
@@ -1635,7 +1652,7 @@ test('readWorkingTreeState reads changed symlinks as link text', async () => {
     await rm(join(repo, 'link.txt'));
     await symlink('target-v2.txt', join(repo, 'link.txt'));
 
-    const state = await readWorkingTreeState(repo);
+    const state = await readWorkingTreeState(host, repo);
     const link = state.files.find((file) => file.path === 'link.txt');
 
     expect(link?.status).toBe('modified');
@@ -1653,9 +1670,9 @@ test('readRepositoryChangeSignature changes for unstaged content edits', async (
     await commitAll(repo, 'initial commit');
     await writeRepoFile(repo, 'file.txt', 'two changed\n');
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await writeRepoFile(repo, 'file.txt', 'three\n');
-    const after = await readRepositoryChangeSignature(repo);
+    const after = await readRepositoryChangeSignature(host, repo);
 
     expect(before.root).toBe(repo);
     expect(after.signature).not.toBe(before.signature);
@@ -1668,11 +1685,11 @@ test('readRepositoryChangeSignature ignores staging and unstaging tracked change
     await commitAll(repo, 'initial commit');
     await writeRepoFile(repo, 'file.txt', 'two changed\n');
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await git(repo, ['add', 'file.txt']);
-    const staged = await readRepositoryChangeSignature(repo);
+    const staged = await readRepositoryChangeSignature(host, repo);
     await git(repo, ['reset', 'HEAD', '--', 'file.txt']);
-    const unstaged = await readRepositoryChangeSignature(repo);
+    const unstaged = await readRepositoryChangeSignature(host, repo);
 
     expect(staged.signature).toBe(before.signature);
     expect(unstaged.signature).toBe(before.signature);
@@ -1683,9 +1700,9 @@ test('readRepositoryChangeSignature changes for untracked content edits', async 
   await withRepo(async (repo) => {
     await writeRepoFile(repo, 'file.txt', 'one\n');
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await writeRepoFile(repo, 'file.txt', 'two changed\n');
-    const after = await readRepositoryChangeSignature(repo);
+    const after = await readRepositoryChangeSignature(host, repo);
 
     expect(after.signature).not.toBe(before.signature);
   });
@@ -1695,9 +1712,9 @@ test('readRepositoryChangeSignature changes for edits inside untracked directori
   await withRepo(async (repo) => {
     await writeRepoFile(repo, 'nested/file.txt', 'one\n');
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await writeRepoFile(repo, 'nested/file.txt', 'two changed\n');
-    const after = await readRepositoryChangeSignature(repo);
+    const after = await readRepositoryChangeSignature(host, repo);
 
     expect(after.signature).not.toBe(before.signature);
   });
@@ -1709,9 +1726,9 @@ test('readWorkingTreeState changes binary fingerprints when binary contents chan
     await commitAll(repo, 'initial commit');
     await writeRepoFile(repo, 'raw.bin', Uint8Array.from([0, 9, 2, 3]));
 
-    const before = await readWorkingTreeState(repo);
+    const before = await readWorkingTreeState(host, repo);
     await writeRepoFile(repo, 'raw.bin', Uint8Array.from([0, 8, 2, 3]));
-    const after = await readWorkingTreeState(repo);
+    const after = await readWorkingTreeState(host, repo);
 
     expect(after.files[0].fingerprint).not.toBe(before.files[0].fingerprint);
   });
@@ -1721,11 +1738,11 @@ test('readRepositoryChangeSignature ignores staging and unstaging untracked file
   await withRepo(async (repo) => {
     await writeRepoFile(repo, 'file.txt', 'one\n');
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await git(repo, ['add', 'file.txt']);
-    const staged = await readRepositoryChangeSignature(repo);
+    const staged = await readRepositoryChangeSignature(host, repo);
     await git(repo, ['reset', 'HEAD', '--', 'file.txt']);
-    const unstaged = await readRepositoryChangeSignature(repo);
+    const unstaged = await readRepositoryChangeSignature(host, repo);
 
     expect(staged.signature).toBe(before.signature);
     expect(unstaged.signature).toBe(before.signature);
@@ -1739,11 +1756,11 @@ test('readRepositoryChangeSignature ignores staging and unstaging renamed files'
     await git(repo, ['mv', 'old.txt', 'new.txt']);
     await git(repo, ['reset', 'HEAD', '--', 'old.txt', 'new.txt']);
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await git(repo, ['add', '--all']);
-    const staged = await readRepositoryChangeSignature(repo);
+    const staged = await readRepositoryChangeSignature(host, repo);
     await git(repo, ['reset', 'HEAD', '--', 'old.txt', 'new.txt']);
-    const unstaged = await readRepositoryChangeSignature(repo);
+    const unstaged = await readRepositoryChangeSignature(host, repo);
 
     expect(staged.signature).toBe(before.signature);
     expect(unstaged.signature).toBe(before.signature);
@@ -1756,9 +1773,9 @@ test('readRepositoryChangeSignature changes when a commit is made', async () => 
     await commitAll(repo, 'initial commit');
     await writeRepoFile(repo, 'file.txt', 'two changed\n');
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await commitAll(repo, 'second commit');
-    const after = await readRepositoryChangeSignature(repo);
+    const after = await readRepositoryChangeSignature(host, repo);
 
     expect(after.signature).not.toBe(before.signature);
   });
@@ -1769,9 +1786,9 @@ test('readRepositoryChangeSignature changes when switching branches at the same 
     await writeRepoFile(repo, 'file.txt', 'one\n');
     await commitAll(repo, 'initial commit');
 
-    const before = await readRepositoryChangeSignature(repo);
+    const before = await readRepositoryChangeSignature(host, repo);
     await git(repo, ['checkout', '-b', 'same-commit']);
-    const after = await readRepositoryChangeSignature(repo);
+    const after = await readRepositoryChangeSignature(host, repo);
 
     expect(after.signature).not.toBe(before.signature);
   });
@@ -1787,7 +1804,7 @@ test('readRepositoryState reads commit diffs from short hashes', async () => {
     const commit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
     const shortCommit = commit.slice(0, 8);
 
-    const state = await readRepositoryState(repo, {
+    const state = await readRepositoryState(host, repo, {
       ref: shortCommit,
       type: 'commit',
     });
@@ -1817,7 +1834,7 @@ test('readRepositoryState reads merge commits against the first parent', async (
     await git(repo, ['merge', '--no-ff', 'feature', '-m', 'merge feature']);
 
     const mergeCommit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
-    const state = await readRepositoryState(repo, {
+    const state = await readRepositoryState(host, repo, {
       ref: mergeCommit,
       type: 'commit',
     });
@@ -1854,7 +1871,7 @@ test('reads commit diffs for many changed files', async () => {
     await commitAll(repo, 'large history commit');
     const commit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
 
-    const state = await readRepositoryState(repo, {
+    const state = await readRepositoryState(host, repo, {
       ref: commit,
       type: 'commit',
     });
@@ -1870,7 +1887,7 @@ test('readRepositoryState summarizes committed files over the manual text limit'
     await writeRepoFile(repo, 'huge.txt', 'x'.repeat(2 * 1024 * 1024 + 1));
     await commitAll(repo, 'large commit');
 
-    const state = await readRepositoryState(repo, {
+    const state = await readRepositoryState(host, repo, {
       ref: 'HEAD',
       type: 'commit',
     });
@@ -1892,7 +1909,7 @@ test('readRepositoryState defers medium committed files and loads them on demand
     await commitAll(repo, 'large commit');
     const commit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
 
-    const state = await readRepositoryState(repo, {
+    const state = await readRepositoryState(host, repo, {
       ref: commit,
       type: 'commit',
     });
@@ -1903,7 +1920,7 @@ test('readRepositoryState defers medium committed files and loads them on demand
     expect(section?.newFile).toBeUndefined();
     expect(section?.patch).toBe('');
 
-    const loadedSection = await readDiffSectionContent(repo, {
+    const loadedSection = await readDiffSectionContent(host, repo, {
       force: true,
       kind: 'commit',
       path: 'large.txt',
@@ -1921,7 +1938,7 @@ test('readRepositoryState defers medium committed files and loads them on demand
 
 test('readRepositoryState rejects non-repository launch paths', async () => {
   await using directory = await createTemporaryDirectory('codiff-not-a-repo-');
-  await expect(readRepositoryState(directory.path)).rejects.toThrow(/not a git repository/i);
+  await expect(readRepositoryState(host, directory.path)).rejects.toThrow(/not a git repository/i);
 });
 
 test('readRepositoryState builds a diff for a base...head range', () =>
@@ -1938,7 +1955,7 @@ test('readRepositoryState builds a diff for a base...head range', () =>
     await writeRepoFile(repo, 'base-only.txt', 'base only\n');
     await commitAll(repo, 'base-only');
 
-    const state = await readRepositoryState(repo, {
+    const state = await readRepositoryState(host, repo, {
       base: 'base',
       head: 'head',
       symmetric: true,

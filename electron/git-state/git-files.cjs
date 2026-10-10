@@ -10,6 +10,8 @@ const {
   gitBufferWithInput,
 } = require('./common.cjs');
 
+/** @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost */
+
 /** @param {ReadonlyArray<string>} values @param {number} size */
 const chunk = (values, size) => {
   /** @type {Array<Array<string>>} */
@@ -21,11 +23,12 @@ const chunk = (values, size) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} ref
  * @param {ReadonlyArray<string>} paths
  */
-const readTreeEntries = async (repoRoot, ref, paths) => {
+const readTreeEntries = async (host, repoRoot, ref, paths) => {
   /** @type {Map<string, {object: string; type: string}>} */
   const entries = new Map();
   const uniquePaths = [...new Set(paths)];
@@ -35,7 +38,7 @@ const readTreeEntries = async (repoRoot, ref, paths) => {
       continue;
     }
 
-    const raw = await git(repoRoot, [
+    const raw = await git(host, repoRoot, [
       'ls-tree',
       '-rz',
       ref,
@@ -64,10 +67,11 @@ const readTreeEntries = async (repoRoot, ref, paths) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {ReadonlyArray<string>} objects
  */
-const readObjectSizes = async (repoRoot, objects) => {
+const readObjectSizes = async (host, repoRoot, objects) => {
   /** @type {Map<string, {size: number; type: string}>} */
   const sizes = new Map();
   const uniqueObjects = [...new Set(objects)];
@@ -77,6 +81,7 @@ const readObjectSizes = async (repoRoot, objects) => {
 
   const output = (
     await gitBufferWithInput(
+      host,
       repoRoot,
       ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'],
       `${uniqueObjects.join('\n')}\n`,
@@ -101,10 +106,11 @@ const readObjectSizes = async (repoRoot, objects) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {ReadonlyArray<{object: string; size: number}>} objects
  */
-const readObjectContents = async (repoRoot, objects) => {
+const readObjectContents = async (host, repoRoot, objects) => {
   /** @type {Map<string, Buffer>} */
   const contents = new Map();
   /** @type {Array<{object: string; size: number}>} */
@@ -117,6 +123,7 @@ const readObjectContents = async (repoRoot, objects) => {
     }
 
     const output = await gitBufferWithInput(
+      host,
       repoRoot,
       ['cat-file', '--batch'],
       `${batch.map((item) => item.object).join('\n')}\n`,
@@ -195,16 +202,18 @@ const createEmptyFileContent = (path, ref, refScoped = false) => ({
 /**
  * Read many files from one Git tree with a bounded number of Git processes.
  *
+ * @param {RepositoryHost} host
  * @param {string} repoRoot
  * @param {string} ref
  * @param {ReadonlyArray<string>} paths
  * @param {{force?: boolean; refScopedEmptyCacheKey?: boolean}} [options]
  * @returns {Promise<Map<string, import('./common.cjs').FileContentResult>>}
  */
-const readGitFiles = async (repoRoot, ref, paths, options = {}) => {
+const readGitFiles = async (host, repoRoot, ref, paths, options = {}) => {
   const limit = options.force ? MANUAL_TEXT_FILE_LIMIT : EAGER_TEXT_FILE_LIMIT;
-  const entries = await readTreeEntries(repoRoot, ref, paths);
+  const entries = await readTreeEntries(host, repoRoot, ref, paths);
   const sizes = await readObjectSizes(
+    host,
     repoRoot,
     [...entries.values()].filter((entry) => entry.type === 'blob').map((entry) => entry.object),
   );
@@ -218,7 +227,7 @@ const readGitFiles = async (repoRoot, ref, paths, options = {}) => {
         : null,
     )
     .filter(Boolean);
-  const contents = await readObjectContents(repoRoot, readableObjects);
+  const contents = await readObjectContents(host, repoRoot, readableObjects);
   /** @type {Map<string, import('./common.cjs').FileContentResult>} */
   const files = new Map();
 

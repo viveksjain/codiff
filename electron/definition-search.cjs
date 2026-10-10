@@ -4,6 +4,8 @@ const { spawn } = require('node:child_process');
 const { dirname, extname } = require('node:path');
 const { gitOrEmpty, validateRepositoryPath } = require('./git-state/common.cjs');
 
+/** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
+
 /** @typedef {import('../core/types.ts').DefinitionCandidate} DefinitionCandidate */
 /** @typedef {import('../core/types.ts').DefinitionSearchRequest} DefinitionSearchRequest */
 /** @typedef {import('../core/types.ts').DefinitionSearchResult} DefinitionSearchResult */
@@ -172,12 +174,14 @@ const createAbortError = () => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoPath
  * @param {ReadonlyArray<string>} args
  * @param {{maxMatches?: number; maxOutputBytes?: number; signal?: AbortSignal; spawnProcess?: typeof spawn; timeoutMs?: number}} [options]
  * @returns {Promise<string>}
  */
 const runBoundedGitGrep = (
+  host,
   repoPath,
   args,
   {
@@ -285,8 +289,8 @@ const runBoundedGitGrep = (
     });
   });
 
-/** @param {DefinitionSearchRequest} request @param {string} repoPath */
-const resolveSearchRevision = async (request, repoPath) => {
+/** @param {RepositoryHost} host @param {DefinitionSearchRequest} request @param {string} repoPath */
+const resolveSearchRevision = async (host, request, repoPath) => {
   const { kind, side, source } = request;
   if (kind === 'staged')
     return side === 'additions'
@@ -326,19 +330,20 @@ const resolveSearchRevision = async (request, repoPath) => {
   if (!head) return { cached: false, revision: null };
   if (side === 'additions') return { cached: false, revision: head };
   if (mergeBase && base) {
-    const resolved = (await gitOrEmpty(repoPath, ['merge-base', base, head])).trim();
+    const resolved = (await gitOrEmpty(host, repoPath, ['merge-base', base, head])).trim();
     return { cached: false, revision: resolved || base };
   }
   return { cached: false, revision: base || `${head}^` };
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} repoPath
  * @param {DefinitionSearchRequest} request
  * @param {{signal?: AbortSignal}} [options]
  * @returns {Promise<DefinitionSearchResult>}
  */
-const findDefinitions = async (repoPath, request, options = {}) => {
+const findDefinitions = async (host, repoPath, request, options = {}) => {
   try {
     if (!identifierPattern.test(request.identifier) || request.identifier.length > 256) {
       return { reason: 'Select a valid identifier.', status: 'unavailable' };
@@ -347,7 +352,7 @@ const findDefinitions = async (repoPath, request, options = {}) => {
     const pathspecs = getPathspecs(currentPath);
     if (pathspecs.length === 0)
       return { candidates: [], identifier: request.identifier, status: 'ready' };
-    const snapshot = await resolveSearchRevision(request, repoPath);
+    const snapshot = await resolveSearchRevision(host, request, repoPath);
     const args = [
       'grep',
       '--no-recurse-submodules',
@@ -363,7 +368,7 @@ const findDefinitions = async (repoPath, request, options = {}) => {
     else if (snapshot.untracked) args.push('--untracked');
     if (snapshot.revision) args.push(snapshot.revision);
     args.push('--', ...pathspecs);
-    const output = await runBoundedGitGrep(repoPath, args, options);
+    const output = await runBoundedGitGrep(host, repoPath, args, options);
     const currentDirectory = dirname(currentPath);
     const candidates = parseGrepOutput(output, snapshot.revision)
       .filter((match) => containsIdentifier(request.identifier, match.line))
@@ -418,15 +423,16 @@ const createDefinitionSearchCoordinator = (searchDefinitions = findDefinitions) 
     },
     /**
      * @param {number} key
+     * @param {RepositoryHost} host
      * @param {string} repoPath
      * @param {DefinitionSearchRequest} request
      */
-    find: async (key, repoPath, request) => {
+    find: async (key, host, repoPath, request) => {
       active.get(key)?.abort();
       const controller = new AbortController();
       active.set(key, controller);
       try {
-        return await searchDefinitions(repoPath, request, { signal: controller.signal });
+        return await searchDefinitions(host, repoPath, request, { signal: controller.signal });
       } finally {
         if (active.get(key) === controller) {
           active.delete(key);

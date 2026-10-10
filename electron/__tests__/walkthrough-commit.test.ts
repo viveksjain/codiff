@@ -12,10 +12,16 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { createWalkthroughCommit } = require('../walkthrough-commit.cjs') as {
   createWalkthroughCommit: (
+    host: RepositoryHost,
     repoPath: string,
     request: { body?: string; paths?: ReadonlyArray<string>; subject?: string },
     onOutput?: (chunk: string) => void,
@@ -41,7 +47,7 @@ const withRepo = async (testBody: (repoPath: string) => Promise<void>) => {
 };
 
 test('rejects a commit with no subject before touching git', async () => {
-  const result = await createWalkthroughCommit('/repo', {
+  const result = await createWalkthroughCommit(host, '/repo', {
     paths: ['src/App.tsx'],
     subject: '   ',
   });
@@ -49,12 +55,12 @@ test('rejects a commit with no subject before touching git', async () => {
 });
 
 test('rejects a commit with no selected files', async () => {
-  const result = await createWalkthroughCommit('/repo', { paths: [], subject: 'Fix it' });
+  const result = await createWalkthroughCommit(host, '/repo', { paths: [], subject: 'Fix it' });
   expect(result.status).toBe('failed');
 });
 
 test('rejects a path that escapes the repository', async () => {
-  const result = await createWalkthroughCommit('/repo', {
+  const result = await createWalkthroughCommit(host, '/repo', {
     paths: ['../../etc/passwd'],
     subject: 'Fix it',
   });
@@ -72,7 +78,7 @@ test('commits only selected files and leaves unrelated staged files alone', asyn
     await writeFile(join(repoPath, 'other.txt'), 'after\n');
     await git(repoPath, ['add', 'other.txt']);
 
-    const result = await createWalkthroughCommit(repoPath, {
+    const result = await createWalkthroughCommit(host, repoPath, {
       body: 'Body line',
       paths: ['selected.txt'],
       subject: 'Update selected',
@@ -112,6 +118,7 @@ test('streams hook output and returns stripped failure text', async () => {
 
     const output: Array<string> = [];
     const result = await createWalkthroughCommit(
+      host,
       repoPath,
       {
         paths: ['example.txt'],

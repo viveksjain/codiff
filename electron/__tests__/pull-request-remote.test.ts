@@ -7,11 +7,17 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { expect, test } from 'vite-plus/test';
 import { getGitTestEnvironment, removeGitTestDirectory } from '../../core/__tests__/helpers/git.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 
 const { selectPullRequestRemote } = require('../git-state/pull-request.cjs') as {
   selectPullRequestRemote: (
+    host: RepositoryHost,
     repoRoot: string,
     pullRequest: {
       number: number;
@@ -69,7 +75,7 @@ test('matches GitHub organization SSH certificate remotes without probing them',
     await git(repo, ['remote', 'add', 'origin', 'org-12345@github.com:acme/widgets.git']);
 
     await expect(
-      selectPullRequestRemote(repo, pullRequest, '0123456789abcdef0123456789abcdef01234567'),
+      selectPullRequestRemote(host, repo, pullRequest, '0123456789abcdef0123456789abcdef01234567'),
     ).resolves.toEqual({
       direction: 'fetch',
       name: 'origin',
@@ -91,7 +97,7 @@ test('reads the configured GitHub URL before insteadOf rewrites hide its host', 
     await git(repo, ['config', 'url.git@github-work:.insteadOf', 'git@github.com:']);
 
     await expect(
-      selectPullRequestRemote(repo, pullRequest, '0123456789abcdef0123456789abcdef01234567'),
+      selectPullRequestRemote(host, repo, pullRequest, '0123456789abcdef0123456789abcdef01234567'),
     ).resolves.toMatchObject({ name: 'origin' });
   } finally {
     await removeGitTestDirectory(directory);
@@ -113,7 +119,7 @@ test('uses Git to verify a pull request through an opaque remote alias', async (
     await git(repo, ['remote', 'add', 'origin', 'git@github-work:acme/widgets.git']);
     await configureAlias(repo, 'git@github-work:acme/', remotes);
 
-    await expect(selectPullRequestRemote(repo, pullRequest, headSha)).resolves.toMatchObject({
+    await expect(selectPullRequestRemote(host, repo, pullRequest, headSha)).resolves.toMatchObject({
       name: 'origin',
     });
   } finally {
@@ -143,7 +149,7 @@ test('skips a mismatching origin alias and selects the remote with the exact PR 
     await configureAlias(repo, 'git@origin-work:acme/', originRemotes);
     await configureAlias(repo, 'git@upstream-work:acme/', upstreamRemotes);
 
-    await expect(selectPullRequestRemote(repo, pullRequest, headSha)).resolves.toMatchObject({
+    await expect(selectPullRequestRemote(host, repo, pullRequest, headSha)).resolves.toMatchObject({
       name: 'upstream',
     });
   } finally {
@@ -173,7 +179,7 @@ test('rejects opaque remotes that do not match both the repository path and PR h
     await configureAlias(repo, 'git@wrong-head:acme/', wrongHeadRemotes);
     await configureAlias(repo, 'git@wrong-repo:acme/', wrongRepoRemotes);
 
-    await expect(selectPullRequestRemote(repo, pullRequest, headSha)).rejects.toThrow(
+    await expect(selectPullRequestRemote(host, repo, pullRequest, headSha)).rejects.toThrow(
       'Pull request acme/widgets does not match a GitHub remote in this repository.',
     );
   } finally {

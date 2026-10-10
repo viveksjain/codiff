@@ -3,6 +3,7 @@
 const { gitOrEmpty } = require('./git-state/common.cjs');
 
 /**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {{ kind?: string; type?: string }} WalkthroughSource
  * @typedef {{ generatedAt?: unknown; source?: WalkthroughSource; chapters?: unknown; support?: unknown }} WalkthroughInput
  */
@@ -97,10 +98,11 @@ const isWorkingTreeWalkthrough = (input) => {
  * Returns a human-readable reason, or null when nothing more specific than the
  * caller's default can be determined.
  *
+ * @param {RepositoryHost} host
  * @param {{ repositoryRoot: string; input: WalkthroughInput; hasFiles: boolean }} params
  * @returns {Promise<string | null>}
  */
-const diagnoseWalkthroughMismatch = async ({ repositoryRoot, input, hasFiles }) => {
+const diagnoseWalkthroughMismatch = async (host, { repositoryRoot, input, hasFiles }) => {
   // With files present, the mismatch is about anchors, not a vanished diff; the
   // caller's existing detail message is more appropriate there.
   if (hasFiles || !isWorkingTreeWalkthrough(input)) {
@@ -114,7 +116,7 @@ const diagnoseWalkthroughMismatch = async ({ repositoryRoot, input, hasFiles }) 
 
   // The newest commit touching any anchored path. Empty when those paths have
   // never been committed (e.g. untracked files that were since discarded).
-  const log = await gitOrEmpty(repositoryRoot, [
+  const log = await gitOrEmpty(host, repositoryRoot, [
     'log',
     '-n',
     '1',

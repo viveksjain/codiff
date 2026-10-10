@@ -6,14 +6,22 @@ import { promisify } from 'node:util';
 import { expect, test } from 'vite-plus/test';
 import { getGitTestEnvironment } from '../../core/__tests__/helpers/git.ts';
 import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { diagnoseWalkthroughMismatch } = require('../walkthrough-diagnosis.cjs') as {
-  diagnoseWalkthroughMismatch: (params: {
-    hasFiles: boolean;
-    input: unknown;
-    repositoryRoot: string;
-  }) => Promise<string | null>;
+  diagnoseWalkthroughMismatch: (
+    host: RepositoryHost,
+    params: {
+      hasFiles: boolean;
+      input: unknown;
+      repositoryRoot: string;
+    },
+  ) => Promise<string | null>;
 };
 
 const execFileAsync = promisify(execFile);
@@ -45,7 +53,7 @@ test('reports changes committed after the walkthrough was authored', async () =>
   await git(directory.path, ['add', 'feature.ts']);
   await git(directory.path, ['commit', '-m', 'Add the feature']);
 
-  const reason = await diagnoseWalkthroughMismatch({
+  const reason = await diagnoseWalkthroughMismatch(host, {
     hasFiles: false,
     // Authored well before the commit above, so it counts as committed-after.
     input: walkthroughFor('feature.ts', { generatedAt: '2000-01-01T00:00:00.000Z' }),
@@ -63,7 +71,7 @@ test('reports v4 hunk-id changes committed after the walkthrough was authored', 
   await git(directory.path, ['add', 'feature.ts']);
   await git(directory.path, ['commit', '-m', 'Add the v4 feature']);
 
-  const reason = await diagnoseWalkthroughMismatch({
+  const reason = await diagnoseWalkthroughMismatch(host, {
     hasFiles: false,
     input: v4WalkthroughFor('feature.ts', { generatedAt: '2000-01-01T00:00:00.000Z' }),
     repositoryRoot: directory.path,
@@ -80,7 +88,7 @@ test('treats a commit that predates authoring as reverted, not committed', async
   await git(directory.path, ['add', 'feature.ts']);
   await git(directory.path, ['commit', '-m', 'Old commit']);
 
-  const reason = await diagnoseWalkthroughMismatch({
+  const reason = await diagnoseWalkthroughMismatch(host, {
     hasFiles: false,
     // Authored far in the future relative to the only commit touching the file.
     input: walkthroughFor('feature.ts', { generatedAt: '2999-01-01T00:00:00.000Z' }),
@@ -96,7 +104,7 @@ test('reports never-committed paths as reverted or discarded', async () => {
   await git(directory.path, ['init']);
   await git(directory.path, ['commit', '--allow-empty', '-m', 'initial']);
 
-  const reason = await diagnoseWalkthroughMismatch({
+  const reason = await diagnoseWalkthroughMismatch(host, {
     hasFiles: false,
     input: walkthroughFor('untracked.ts'),
     repositoryRoot: directory.path,
@@ -109,7 +117,7 @@ test('defers to the caller when the diff still has files', async () => {
   await using directory = await createTemporaryDirectory('codiff-diagnosis-');
   await git(directory.path, ['init']);
   expect(
-    await diagnoseWalkthroughMismatch({
+    await diagnoseWalkthroughMismatch(host, {
       hasFiles: true,
       input: walkthroughFor('feature.ts'),
       repositoryRoot: directory.path,

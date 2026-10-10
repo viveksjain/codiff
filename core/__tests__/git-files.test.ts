@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, expect, test } from 'vite-plus/test';
+import type { RepositoryHost } from '../../electron/host/repository-host.cjs';
 import { removeGitTestDirectory } from './helpers/git.ts';
 import { createTemporaryEnvironment } from './helpers/resources.ts';
 
@@ -25,6 +26,7 @@ type FileContentResult = {
 
 type GitFilesModule = {
   readGitFiles: (
+    host: RepositoryHost,
     repoRoot: string,
     ref: string,
     paths: ReadonlyArray<string>,
@@ -34,6 +36,10 @@ type GitFilesModule = {
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../../electron/host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { readGitFiles } = require('../../electron/git-state/git-files.cjs') as GitFilesModule;
 const batchCases = [
   { fileCount: 20, maximumProcesses: 6 },
@@ -186,8 +192,8 @@ test('batched Git file reads preserve text, binary, rename, missing, and size be
     'literal-:(name).txt',
   ];
   const [oldFiles, newFiles] = await Promise.all([
-    readGitFiles(repo, base, oldPaths, { refScopedEmptyCacheKey: true }),
-    readGitFiles(repo, head, newPaths, { refScopedEmptyCacheKey: true }),
+    readGitFiles(host, repo, base, oldPaths, { refScopedEmptyCacheKey: true }),
+    readGitFiles(host, repo, head, newPaths, { refScopedEmptyCacheKey: true }),
   ]);
 
   expect(oldFiles.get('modified.txt')?.file?.contents).toBe('before\n');
@@ -237,8 +243,8 @@ test.each(batchCases)(
       (_, index) => `src/file-${index.toString().padStart(3, '0')}.ts`,
     );
     const [oldFiles, newFiles] = await Promise.all([
-      readGitFiles(repo, base, paths, { refScopedEmptyCacheKey: true }),
-      readGitFiles(repo, head, paths, { refScopedEmptyCacheKey: true }),
+      readGitFiles(host, repo, base, paths, { refScopedEmptyCacheKey: true }),
+      readGitFiles(host, repo, head, paths, { refScopedEmptyCacheKey: true }),
     ]);
 
     expect(oldFiles).toHaveLength(fileCount);

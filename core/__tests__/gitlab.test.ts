@@ -4,9 +4,14 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vite-plus/test';
+import type { RepositoryHost } from '../../electron/host/repository-host.cjs';
 import { createTemporaryDirectory, createTemporaryEnvironment } from './helpers/resources.ts';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../../electron/host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 type GitLabPosition = Record<string, unknown> & {
   line_range?: {
     end: Record<string, unknown>;
@@ -36,6 +41,7 @@ const {
   ) => Record<string, unknown> | null;
   parseGitLabMergeRequestUrl: (url: string) => Record<string, unknown>;
   submitMergeRequestComment: (
+    host: RepositoryHost,
     launchPath: string,
     request: {
       comment: Record<string, unknown>;
@@ -43,6 +49,7 @@ const {
     },
   ) => Promise<Record<string, unknown>>;
   submitMergeRequestReview: (
+    host: RepositoryHost,
     launchPath: string,
     request: {
       body?: string;
@@ -335,7 +342,7 @@ describe('GitLab merge requests', () => {
         url: 'https://gitlab.example.com/group/project/-/merge_requests/23',
       };
 
-      await submitMergeRequestReview(repo, {
+      await submitMergeRequestReview(host, repo, {
         body: 'Looks good.',
         comments: [
           {
@@ -348,13 +355,13 @@ describe('GitLab merge requests', () => {
         event: 'APPROVE',
         source,
       });
-      await submitMergeRequestReview(repo, {
+      await submitMergeRequestReview(host, repo, {
         comments: [],
         event: 'REQUEST_CHANGES',
         source,
       });
       await expect(
-        submitMergeRequestReview(repo, {
+        submitMergeRequestReview(host, repo, {
           comments: [],
           event: 'COMMENT',
           source,
@@ -392,7 +399,7 @@ describe('GitLab merge requests', () => {
   test('preserves submitted metadata when GitLab discussion replies omit positions', async () => {
     await withFakeGitLab(async (repo, readCalls) => {
       await expect(
-        submitMergeRequestComment(repo, {
+        submitMergeRequestComment(host, repo, {
           comment: {
             anchor: 'file',
             body: 'Reply in the existing discussion.',
@@ -467,7 +474,7 @@ printf '%s' '{}'
       SHELL: fakeShell,
     });
 
-    await submitMergeRequestReview(repo, {
+    await submitMergeRequestReview(host, repo, {
       comments: [],
       event: 'REQUEST_CHANGES',
       source: {
@@ -518,7 +525,7 @@ printf '%s' '{}'
       SHELL: fakeShell,
     });
 
-    await submitMergeRequestReview(repo, {
+    await submitMergeRequestReview(host, repo, {
       comments: [],
       event: 'REQUEST_CHANGES',
       source: {

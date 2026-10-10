@@ -5,8 +5,13 @@ import { expect, test, vi } from 'vite-plus/test';
 import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
 import type { DefinitionSearchRequest, DefinitionSearchResult } from '../../core/types.ts';
 import { createDefinitionNavigationRepository } from '../../examples/definition-navigation/create-repository.mjs';
+import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const {
   classifyDefinition,
   createDefinitionSearchCoordinator,
@@ -23,11 +28,13 @@ const {
     cancel: (key: number) => void;
     find: (
       key: number,
+      host: RepositoryHost,
       repositoryPath: string,
       request: DefinitionSearchRequest,
     ) => Promise<DefinitionSearchResult>;
   };
   findDefinitions: (
+    host: RepositoryHost,
     repositoryPath: string,
     request: DefinitionSearchRequest,
   ) => Promise<DefinitionSearchResult>;
@@ -36,6 +43,7 @@ const {
     revision: string | null,
   ) => Array<{ line: string; lineNumber: number; path: string }>;
   runBoundedGitGrep: (
+    host: RepositoryHost,
     repositoryPath: string,
     args: ReadonlyArray<string>,
     options?: {
@@ -61,7 +69,7 @@ test('finds a likely definition in the deterministic example repository', async 
   await using directory = await createTemporaryDirectory('codiff-definitions-');
   createDefinitionNavigationRepository(directory.path);
 
-  const result = await findDefinitions(directory.path, request);
+  const result = await findDefinitions(host, directory.path, request);
 
   expect(result).toEqual({
     candidates: [
@@ -83,7 +91,7 @@ test('marks historical snapshot candidates as unsafe for editor fallback', async
   await using directory = await createTemporaryDirectory('codiff-definitions-history-');
   createDefinitionNavigationRepository(directory.path);
 
-  const result = await findDefinitions(directory.path, {
+  const result = await findDefinitions(host, directory.path, {
     ...request,
     kind: 'commit',
     source: { ref: 'HEAD', type: 'commit' },
@@ -130,7 +138,7 @@ test.each([
 });
 
 test('rejects non-identifiers before searching', async () => {
-  const result = await findDefinitions('/does/not/matter', {
+  const result = await findDefinitions(host, '/does/not/matter', {
     identifier: 'not an identifier',
     kind: 'unstaged',
     lineNumber: 1,
@@ -156,7 +164,7 @@ const createFakeGitProcess = () => {
 test('stops git grep after the global result limit', async () => {
   const child = createFakeGitProcess();
   const kill = vi.spyOn(child, 'kill');
-  const output = runBoundedGitGrep('/repo', ['grep'], {
+  const output = runBoundedGitGrep(host, '/repo', ['grep'], {
     maxMatches: 2,
     maxOutputBytes: 1024,
     spawnProcess: (() => child) as unknown as typeof import('node:child_process').spawn,
@@ -175,7 +183,7 @@ test('stops git grep after the global result limit', async () => {
 test('stops git grep at the global output byte limit', async () => {
   const child = createFakeGitProcess();
   const kill = vi.spyOn(child, 'kill');
-  const output = runBoundedGitGrep('/repo', ['grep'], {
+  const output = runBoundedGitGrep(host, '/repo', ['grep'], {
     maxMatches: 100,
     maxOutputBytes: 32,
     spawnProcess: (() => child) as unknown as typeof import('node:child_process').spawn,
@@ -190,7 +198,7 @@ test('stops git grep at the global output byte limit', async () => {
 test('kills git grep when the search times out', async () => {
   const child = createFakeGitProcess();
   const kill = vi.spyOn(child, 'kill');
-  const output = runBoundedGitGrep('/repo', ['grep'], {
+  const output = runBoundedGitGrep(host, '/repo', ['grep'], {
     spawnProcess: (() => child) as unknown as typeof import('node:child_process').spawn,
     timeoutMs: 1,
   });
@@ -206,6 +214,7 @@ test('coalesces repeated searches by cancelling the previous process signal', as
   }> = [];
   const searchDefinitions = vi.fn(
     (
+      _host: RepositoryHost,
       _repositoryPath: string,
       _request: DefinitionSearchRequest,
       options: { signal?: AbortSignal } = {},
@@ -215,8 +224,8 @@ test('coalesces repeated searches by cancelling the previous process signal', as
       }),
   );
   const coordinator = createDefinitionSearchCoordinator(searchDefinitions);
-  const first = coordinator.find(1, '/repo', request);
-  const second = coordinator.find(1, '/repo', request);
+  const first = coordinator.find(1, host, '/repo', request);
+  const second = coordinator.find(1, host, '/repo', request);
 
   expect(pending[0]?.signal.aborted).toBe(true);
   pending[0]?.resolve({ reason: 'Cancelled.', status: 'unavailable' });

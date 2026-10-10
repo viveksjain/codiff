@@ -5,14 +5,23 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, test } from 'vite-plus/test';
+import type { RepositoryHost } from '../../electron/host/repository-host.cjs';
 import type { RepositoryState, ReviewSource } from '../types.ts';
 
 type GitStateModule = {
-  readRepositoryState: (launchPath: string, source?: ReviewSource) => Promise<RepositoryState>;
+  readRepositoryState: (
+    host: RepositoryHost,
+    launchPath: string,
+    source?: ReviewSource,
+  ) => Promise<RepositoryState>;
 };
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../../electron/host/local-host.cjs') as {
+  createLocalHost: () => RepositoryHost;
+};
+const host = createLocalHost();
 const { readRepositoryState } = require('../../electron/git-state.cjs') as GitStateModule;
 
 const FILE_COUNT = 160;
@@ -83,7 +92,7 @@ describe('commit diff generation duration', () => {
 
   test(`readRepositoryState for ${FILE_COUNT} changed files`, async ({ bench }) => {
     await bench('readRepositoryState', async () => {
-      const state = await readRepositoryState(repo, {
+      const state = await readRepositoryState(host, repo, {
         ref: commit,
         type: 'commit',
       });

@@ -27,6 +27,8 @@ const {
   shareWalkthroughFile,
 } = require('../electron/headless-walkthrough-share.cjs');
 const { sharePlanFile } = require('../electron/headless-plan-share.cjs');
+const { createLocalHost } = require('../electron/host/local-host.cjs');
+const localHost = createLocalHost();
 
 // The renderer is the built dist/ by default. When Codiff's own Vite dev server
 // is running, use it instead so source edits hot-reload without a rebuild. The
@@ -225,7 +227,7 @@ const run = async () => {
               ? piSessionId
               : codexSessionId;
       try {
-        const url = await sharePlanFile({
+        const url = await sharePlanFile(localHost, {
           agent: agentBackend ?? undefined,
           codiffVersion: packageJson.version,
           forcePublic,
@@ -262,11 +264,11 @@ const run = async () => {
         source,
       };
       const url = walkthroughFilePath
-        ? await shareWalkthroughFile({
+        ? await shareWalkthroughFile(localHost, {
             ...commonOptions,
             walkthroughFile: walkthroughFilePath,
           })
-        : await generateAndShareWalkthrough({
+        : await generateAndShareWalkthrough(localHost, {
             ...commonOptions,
             claudeSessionId,
             codexSessionId,
