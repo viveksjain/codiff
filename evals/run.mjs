@@ -18,12 +18,14 @@ const require = createRequire(import.meta.url);
 const { getAgent } = require('../electron/agent.cjs');
 const { readConfig } = require('../electron/config.cjs');
 const { readRepositoryState } = require('../electron/git-state.cjs');
+const { createLocalHost } = require('../electron/host/local-host.cjs');
 const {
   buildNarrativeWalkthroughPrompt,
   readNarrativeWalkthrough,
   resolveNarrativeWalkthroughModel,
 } = require('../electron/narrative-walkthrough.cjs');
 
+const localHost = createLocalHost();
 const args = process.argv.slice(2);
 const readOption = (name, fallback) => {
   const index = args.indexOf(name);
@@ -79,7 +81,7 @@ for (const evalCase of cases) {
     await writeJson(join(attemptDir, 'case.json'), evalCase);
 
     const stateStarted = nowMs();
-    const state = await readRepositoryState(root, {
+    const state = await readRepositoryState(localHost, root, {
       ref: evalCase.commit,
       type: 'commit',
     });
