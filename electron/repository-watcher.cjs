@@ -1,6 +1,5 @@
 // @ts-check
 
-const { promises: fs } = require('node:fs');
 const { join, sep } = require('node:path');
 const { getFingerprint, git } = require('./git-state/common.cjs');
 
@@ -82,25 +81,18 @@ const parseRepositoryWatcherStatus = (raw) => {
 const readRepositoryWatcherPathState = async (host, repoRoot, path, exact) => {
   try {
     const absolutePath = join(repoRoot, path);
-    const stat = await fs.lstat(absolutePath);
-    const metadata = `${path}\0${
-      stat.isDirectory()
-        ? 'directory'
-        : stat.isSymbolicLink()
-          ? 'symlink'
-          : stat.isFile()
-            ? 'file'
-            : 'other'
-    }\0${stat.mode}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.ino}`;
+    const stat = await host.lstat(absolutePath);
+    const metadata = `${path}\0${stat.type}\0${stat.mode}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.ino}`;
     if (!exact) {
       return { metadata };
     }
 
-    const version = stat.isSymbolicLink()
-      ? getFingerprint(await fs.readlink(absolutePath))
-      : stat.isFile()
-        ? getFingerprint(await fs.readFile(absolutePath))
-        : undefined;
+    const version =
+      stat.type === 'symlink'
+        ? getFingerprint(await host.readlink(absolutePath))
+        : stat.type === 'file'
+          ? getFingerprint(await host.readFile(absolutePath))
+          : undefined;
     return { metadata, version };
   } catch {
     return { metadata: `${path}\0missing` };

@@ -307,7 +307,7 @@ const getStatusItemForPath = async (host, repoRoot, path) => {
 
   const stat = await readFileStat(host, repoRoot, path);
   return {
-    directory: Boolean(stat?.isDirectory()),
+    directory: stat?.type === 'directory',
     path,
     staged: false,
     status: 'untracked',

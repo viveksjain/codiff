@@ -14,6 +14,7 @@ import type {
   ReviewSource,
 } from '../types.ts';
 import { getGitTestEnvironmentForSubprocess, withGitTestEnvironment } from './helpers/git.ts';
+import { createRecordingHost } from './helpers/recording-host.ts';
 import { createTemporaryDirectory, createTemporaryEnvironment } from './helpers/resources.ts';
 
 type StatusEntry = {
@@ -1968,3 +1969,25 @@ test('readRepositoryState builds a diff for a base...head range', () =>
     expect(added?.status).toBe('added');
     expect(added?.sections[0]?.patch).toContain('new file');
   }));
+
+test('readWorkingTreeState reads working-tree files only through the host', async () => {
+  await withGitTestEnvironment(async () => {
+    await using directory = await createTemporaryDirectory('codiff-host-reads-');
+    const repo = await realpath(directory.path);
+    await git(repo, ['init']);
+    await writeRepoFile(repo, 'tracked.txt', 'one\n');
+    await commitAll(repo, 'Initial commit.');
+    await writeRepoFile(repo, 'tracked.txt', 'two\n');
+    await writeRepoFile(repo, 'untracked.txt', 'new\n');
+
+    const { calls, host: recordingHost } = createRecordingHost(host);
+    const state = await readWorkingTreeState(recordingHost, repo);
+
+    expect(state.files.map((file) => file.path)).toEqual(['tracked.txt', 'untracked.txt']);
+    const readPaths = calls
+      .filter(({ method }) => ['lstat', 'lstatMany', 'readFile', 'readFiles'].includes(method))
+      .flatMap(({ args }) => (Array.isArray(args[0]) ? args[0] : [args[0]]));
+    expect(readPaths).toContain(join(repo, 'untracked.txt'));
+    expect(readPaths).toContain(join(repo, 'tracked.txt'));
+  });
+});

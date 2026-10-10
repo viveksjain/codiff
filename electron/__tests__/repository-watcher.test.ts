@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { expect, test } from 'vite-plus/test';
 import { getGitTestEnvironment } from '../../core/__tests__/helpers/git.ts';
+import { createRecordingHost } from '../../core/__tests__/helpers/recording-host.ts';
 import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
@@ -484,4 +485,29 @@ test('preserves literal backslashes in POSIX repository paths', async () => {
   expect(Object.keys(before.pathSignatures)).toEqual([path]);
   expect(Object.keys(after.pathSignatures)).toEqual([path]);
   expect(after.signature).toBe(before.signature);
+});
+
+const createDirtyRepository = async (directory: { path: string }, paths: ReadonlyArray<string>) => {
+  const repo = await realpath(directory.path);
+  await git(repo, ['init']);
+  for (const path of paths) {
+    await writeFile(join(repo, path), 'one\n');
+  }
+  await git(repo, ['add', '.']);
+  await git(repo, ['commit', '-m', 'Initial commit.']);
+  for (const path of paths) {
+    await writeFile(join(repo, path), 'two\n');
+  }
+  return repo;
+};
+
+test('readRepositoryWatcherSnapshot stats dirty paths through the host', async () => {
+  await using directory = await createTemporaryDirectory('codiff-watcher-host-');
+  const repo = await createDirtyRepository(directory, ['a.txt']);
+  const { calls, host: recordingHost } = createRecordingHost(host);
+  await readRepositoryWatcherSnapshot(recordingHost, repo, ['a.txt']);
+  const statted = calls
+    .filter(({ method }) => method === 'lstat' || method === 'lstatMany')
+    .flatMap(({ args }) => (Array.isArray(args[0]) ? args[0] : [args[0]]));
+  expect(statted).toContain(join(repo, 'a.txt'));
 });

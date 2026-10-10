@@ -1,10 +1,10 @@
 // @ts-check
 
-const { promises: fs } = require('node:fs');
 const { createHash } = require('node:crypto');
 const { isAbsolute, join, normalize, sep } = require('node:path');
 
 /**
+ * @typedef {import('../host/repository-host.cjs').HostStat} HostStat
  * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageRevision} DiffImageRevision
@@ -276,10 +276,10 @@ const validateRepositoryPath = (path) => {
   return normalized;
 };
 
-/** @param {RepositoryHost} host @param {string} repoRoot @param {string} path */
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} path @returns {Promise<HostStat | undefined>} */
 const readFileStat = async (host, repoRoot, path) => {
   try {
-    return await fs.lstat(join(repoRoot, path));
+    return await host.lstat(join(repoRoot, path));
   } catch {
     return undefined;
   }
@@ -366,7 +366,7 @@ const readWorkingTreeImageFile = async (host, repoRoot, path) => {
   }
 
   const stat = await readFileStat(host, repoRoot, path);
-  if (!stat || !stat.isFile()) {
+  if (!stat || stat.type !== 'file') {
     return undefined;
   }
 
@@ -374,7 +374,7 @@ const readWorkingTreeImageFile = async (host, repoRoot, path) => {
     throw new Error(`Image is ${formatBytes(stat.size)}, so Codiff skipped rendering it.`);
   }
 
-  return bufferToImageRevision(path, await fs.readFile(join(repoRoot, path)));
+  return bufferToImageRevision(path, await host.readFile(join(repoRoot, path)));
 };
 
 /**
@@ -483,7 +483,7 @@ const readWorkingTreeFile = async (host, repoRoot, path, options = {}) => {
       throw new Error('File is missing.');
     }
 
-    if (stat.isDirectory()) {
+    if (stat.type === 'directory') {
       return {
         binary: false,
         loadState: 'directory',
@@ -493,8 +493,8 @@ const readWorkingTreeFile = async (host, repoRoot, path, options = {}) => {
       };
     }
 
-    if (stat.isSymbolicLink()) {
-      const contents = await fs.readlink(join(repoRoot, path));
+    if (stat.type === 'symlink') {
+      const contents = await host.readlink(join(repoRoot, path));
       const size = Buffer.byteLength(contents);
 
       if (size > limit) {
@@ -524,7 +524,7 @@ const readWorkingTreeFile = async (host, repoRoot, path, options = {}) => {
       };
     }
 
-    if (!stat.isFile()) {
+    if (stat.type !== 'file') {
       return {
         binary: false,
         loadState: 'error',
@@ -552,7 +552,7 @@ const readWorkingTreeFile = async (host, repoRoot, path, options = {}) => {
       };
     }
 
-    const buffer = await fs.readFile(join(repoRoot, path));
+    const buffer = await host.readFile(join(repoRoot, path));
     return bufferToTextFile(path, buffer, `worktree:${path}:${buffer.length}`);
   } catch {
     return {
