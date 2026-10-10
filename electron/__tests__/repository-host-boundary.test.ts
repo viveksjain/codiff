@@ -25,6 +25,13 @@ const forbiddenModules = [
   'node:os',
   './pty.cjs',
   '../pty.cjs',
+  'child_process',
+  'fs',
+  'fs/promises',
+  'os',
+  'node-pty',
+  './host/local-host.cjs',
+  '../host/local-host.cjs',
 ];
 
 // PR/MR review runs the local `gh`/`glab` CLIs and is not supported for remote
