@@ -2091,3 +2091,27 @@ Phases 2-5 of the spec each get their own plan once this one lands, because thei
 3. Entry points (CLI remote targets and terminal master setup, host-qualified identity keys, Open Remote Repository dialog, title indicator, disconnected banner).
 4. Remote walkthroughs (`readdir`, `readFileTail`, `getEnvironment`, `resolveCommand`; agent runners and session-context readers through the host).
 5. Docs and benchmarks.
+
+### Carried forward from the Phase 1 final review
+
+Phase 2 (`SshHost`):
+
+- Narrow `spawn`/`spawnPty` in `electron/host/repository-host.cjs` from Node's `ChildProcessWithoutNullStreams` and node-pty's `IPty` to host-neutral `HostProcess`/`HostPty` types. Callers only use `stdin`, `stdout`, `stderr`, `on('close'|'error')`, `kill()`, `onData` and `onExit`.
+- Extend the contract suite to pin:
+  - one error-message shape for failed commands, so `SshHost` reports the logical argv rather than the ssh argv; users see these as commit failure reasons
+  - sub-second `mtimeMs` from `lstat`/`lstatMany`; the watcher detects edits to already-dirty files only through stat metadata
+  - empty `lstatMany`/`readFiles` calls short-circuiting without a round trip (the watcher calls them on every poll)
+  - whether `writeFile({exclusive})` durability (`fsync`) is part of the contract
+  - the base environment `env` merges over (the ssh session's or the captured login environment)
+- Document that `lstatMany` maps every failure to `null`.
+- Make the temp-directory `rm` in `walkthrough-commit.cjs` best-effort so a cleanup failure cannot turn a successful commit into "failed".
+- Add a timeout so a hung `git` cannot stall the launch queue in `main.cjs`.
+
+Phase 3 (entry points):
+
+- `electron/markdown-document.cjs` still reads, writes and watches repository Markdown on the local disk. Thread `host` through it, polling instead of `fs.watch`, or hide it for remote windows. Then add it to the host-boundary guard.
+- Report launch failures: `enqueueWindowLaunch` swallows errors, so a throw in `createWindow` no longer shows Electron's error dialog.
+- Make a missing `windowRepositories` entry an error for remote windows instead of silently falling back to the local host.
+- Guard `window-all-closed` → `app.quit()` against a launch that is still queued.
+- Test host-and-root watcher keying once a second host id exists. Rename `subscriberRoots` to `subscriberKeys`.
+- Remove the unused `codiff:getRelativePath` IPC handler.
