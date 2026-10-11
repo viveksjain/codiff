@@ -52,6 +52,17 @@ const countMasters = async (controlDirectory: string) => {
   }
 };
 
+// A master that was just told to exit can take a moment to go away.
+const waitForMasterCount = async (controlDirectory: string, expected: number, timeoutMs = 3000) => {
+  const deadline = Date.now() + timeoutMs;
+  let count = await countMasters(controlDirectory);
+  while (count !== expected && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    count = await countMasters(controlDirectory);
+  }
+  return count;
+};
+
 const createFakeConnection = (outputs: ReadonlyArray<string>): FakeConnection => {
   const queue = [...outputs];
   return {
@@ -142,33 +153,41 @@ describe.skipIf(!findSshd())('SshHost connection failures', () => {
     }
   });
 
-  test('operations survive a lost master and the master comes back', async () => {
+  test('an operation after a lost master fails at once and the master comes back', async () => {
     await using sshd = await startTestSshd();
     const options = {
       alias: sshd.alias,
       controlDirectory: sshd.controlDirectory,
       sshConfigPath: sshd.sshConfigPath,
     };
-    const host = await connectSshHost({ ...options, masterCheckIntervalMs: 0 });
+    const host = await connectSshHost(options);
     try {
+      // This first operation runs the periodic master check, so the failure
+      // below is the only thing that restores the master.
+      expect((await host.exec('printf', ['before'])).toString('utf8')).toBe('before');
       const connection = createSshConnection(options);
       await connection.exitMaster();
       expect(await connection.check()).toBe(false);
 
-      expect((await host.exec('printf', ['still here'])).toString('utf8')).toBe('still here');
+      const started = Date.now();
+      await expect(host.exec('printf', ['lost'])).rejects.toMatchObject({
+        message: 'Lost connection to codiff-test.',
+        name: 'HostDisconnectedError',
+      });
+      expect(Date.now() - started).toBeLessThan(2000);
 
       const deadline = Date.now() + 10_000;
       while (!(await connection.check())) {
         if (Date.now() > deadline) {
           throw new Error('The master did not come back.');
         }
-        await host.exec('true', []);
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
+      expect((await host.exec('printf', ['back'])).toString('utf8')).toBe('back');
     } finally {
       await host.close();
     }
-    expect(await countMasters(sshd.controlDirectory)).toBe(0);
+    expect(await waitForMasterCount(sshd.controlDirectory, 0)).toBe(0);
   });
 
   test('a stopped server is a lost connection', async () => {

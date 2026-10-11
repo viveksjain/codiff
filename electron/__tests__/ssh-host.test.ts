@@ -626,7 +626,7 @@ describe.skipIf(!findSshd())('SshHost batching', () => {
       controlDirectory: sshd.controlDirectory,
       // Only client sessions run remote commands; master checks and starts don't count.
       spawnProcess: ((command: string, args: ReadonlyArray<string>, options: object) => {
-        if (args.includes('ControlMaster=auto')) {
+        if (args.includes('ControlMaster=no')) {
           spawned.push(args.at(-1) ?? '');
         }
         return spawn(command, [...args], options);

@@ -1,6 +1,6 @@
 // @ts-check
 
-const { execFile, spawn } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const { mkdirSync, readFileSync, rmSync } = require('node:fs');
 const { connect } = require('node:net');
 const { homedir } = require('node:os');
@@ -27,16 +27,16 @@ const { classifySshFailure, HostUnreachableError } = require('./host-errors.cjs'
 // would lose the error.
 const ALIAS_PATTERN = /^(?!-)(?!.*@-)[\w.@%+-]+$/;
 
-/** @param {string} value */
-const escapeRegExp = (value) => value.replaceAll(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-
 const getDefaultControlDirectory = () => join(homedir(), '.codiff', 'ssh');
 
 /**
  * One multiplexed connection to an ssh destination. The master runs in the
- * background (`ControlPersist=yes`); every other invocation is a client with
- * `ControlMaster=auto`, so if the master is gone a client connects on its own
- * instead of failing. `BatchMode=yes` keeps every invocation from prompting.
+ * background (`ControlPersist=yes`) and is the only invocation that connects
+ * or reads the user's proxy settings. Every other invocation is a client that
+ * only talks to the master: with no master, ssh falls back to connecting
+ * itself, and the command-line `ProxyCommand=false` (which overrides any
+ * configured `ProxyCommand` or `ProxyJump`) makes that fail at once with exit
+ * 255. `BatchMode=yes` keeps every invocation from prompting.
  *
  * @param {SshConnectionOptions} options
  */
@@ -69,7 +69,15 @@ const createSshConnection = ({
     '-o',
     'LogLevel=ERROR',
   ];
-  const clientArgs = [...baseArgs, '-o', 'ControlMaster=auto', '-o', 'ControlPersist=no'];
+  const clientArgs = [
+    ...baseArgs,
+    '-o',
+    'ControlMaster=no',
+    '-o',
+    'ControlPersist=no',
+    '-o',
+    'ProxyCommand=false',
+  ];
 
   /**
    * @param {ReadonlyArray<string>} args
@@ -109,45 +117,7 @@ const createSshConnection = ({
       child.stdin.end(input);
     });
 
-  // `-O check` prints `Master running (pid=N)` for whoever owns the socket.
-  const checkMaster = async () => {
-    const result = await runSsh([...baseArgs, '-O', 'check', '--', alias]);
-    const pid = /pid=(\d+)/.exec(result.stderr)?.[1];
-    return { alive: result.code === 0, pid: pid ? Number(pid) : null };
-  };
-
-  const check = async () => (await checkMaster()).alive;
-
-  // The persistent masters this connection started all carry its log path.
-  /** @returns {Promise<Array<number>>} */
-  const listMasterPids = () =>
-    new Promise((resolve) => {
-      execFile(
-        'pgrep',
-        ['-f', '--', `-E ${escapeRegExp(masterLogPath)} .*ControlPersist=yes`],
-        (error, stdout) => resolve(error ? [] : stdout.split('\n').filter(Boolean).map(Number)),
-      );
-    });
-
-  /** @param {ReadonlyArray<number>} pids */
-  const terminateProcesses = (pids) => {
-    for (const pid of pids) {
-      try {
-        process.kill(pid, 'SIGTERM');
-      } catch {
-        // Already gone.
-      }
-    }
-  };
-
-  // A client with ControlMaster=auto that starts while the master is missing
-  // becomes a temporary master and can claim the socket first. ssh then runs
-  // the persistent master without multiplexing, where nothing can reach it and
-  // nothing would ever stop it. Only the process that owns the socket stays.
-  const stopUnreachableMasters = async () => {
-    const { pid } = await checkMaster();
-    terminateProcesses((await listMasterPids()).filter((masterPid) => masterPid !== pid));
-  };
+  const check = async () => (await runSsh([...baseArgs, '-O', 'check', '--', alias])).code === 0;
 
   /** @param {string} path */
   const isSocketStale = (path) =>
@@ -180,15 +150,17 @@ const createSshConnection = ({
 
   // `ssh -f` forks a master that keeps any inherited output pipes open, so the
   // master gets no pipes and writes its errors to a log file (`-E`) instead.
-  // Starts from different connection instances for the same alias are not
-  // coordinated; Phase 3 keeps one connection per alias.
+  // Starts from different Codiff instances for the same alias and control
+  // directory are not coordinated. A start that loses the socket logs "already
+  // exists, disabling multiplexing" and stays connected on its own; the check
+  // after the start passes because the winner answers it.
   const startMaster = async () => {
     if (!(await check())) {
       // A killed master leaves its socket behind. ssh would then log "already
       // exists, disabling multiplexing" and still exit 0 with a lone `ssh -N`.
       const controlPath = await getControlPath();
-      // A client may have claimed the socket since the check, so only remove
-      // one that nothing listens on.
+      // Another master may have claimed the socket since the check, so only
+      // remove one that nothing listens on.
       if (controlPath && (await isSocketStale(controlPath))) {
         rmSync(controlPath, { force: true });
       }
@@ -235,7 +207,6 @@ const createSshConnection = ({
     if (outcome.code !== 0) {
       throw classifySshFailure(alias, readMasterLog(), { connected: false });
     }
-    await stopUnreachableMasters();
     if (!(await check())) {
       throw classifySshFailure(
         alias,
@@ -262,7 +233,6 @@ const createSshConnection = ({
 
   const exitMaster = async () => {
     await runSsh([...baseArgs, '-O', 'exit', '--', alias]);
-    terminateProcesses(await listMasterPids());
   };
 
   /** @param {string} remoteCommand @param {{input?: string | Buffer}} [options] */

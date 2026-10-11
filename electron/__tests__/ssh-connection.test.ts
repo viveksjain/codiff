@@ -54,6 +54,21 @@ const pgrepMasters = async (controlDirectory: string) => {
   }
 };
 
+// A master that was just told to exit or killed can take a moment to go away.
+const waitForMasters = async (
+  controlDirectory: string,
+  matches: (masters: Array<string>) => boolean,
+  timeoutMs = 3000,
+) => {
+  const deadline = Date.now() + timeoutMs;
+  let masters = await pgrepMasters(controlDirectory);
+  while (!matches(masters) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    masters = await pgrepMasters(controlDirectory);
+  }
+  return masters;
+};
+
 test('rejects destinations that ssh would parse as options', () => {
   expect(() =>
     createSshConnection({ alias: '-oProxyCommand=evil', controlDirectory: '/tmp' }),
@@ -178,7 +193,9 @@ describe.skipIf(!findSshd())('ssh connection', () => {
     const { stderr } = await execFileAsync('ssh', checkArgs);
     const pid = Number(/pid=(\d+)/.exec(stderr)?.[1]);
     expect(pid).toBeGreaterThan(0);
-    expect(await pgrepMasters(sshd.controlDirectory)).toHaveLength(1);
+    expect(
+      await waitForMasters(sshd.controlDirectory, (masters) => masters.length === 1),
+    ).toHaveLength(1);
 
     process.kill(pid, 'SIGKILL');
     for (let attempt = 0; attempt < 100 && (await connection.check()); attempt++) {
@@ -191,34 +208,41 @@ describe.skipIf(!findSshd())('ssh connection', () => {
     const after = await execFileAsync('ssh', checkArgs);
     const newPid = Number(/pid=(\d+)/.exec(after.stderr)?.[1]);
     expect(newPid).not.toBe(pid);
-    const masters = await pgrepMasters(sshd.controlDirectory);
+    const masters = await waitForMasters(
+      sshd.controlDirectory,
+      (current) => current.length === 1 && current[0] === String(newPid),
+    );
     expect(masters).toEqual([String(newPid)]);
 
     await connection.exitMaster();
     expect(await connection.check()).toBe(false);
-    expect(await pgrepMasters(sshd.controlDirectory)).toHaveLength(0);
+    expect(
+      await waitForMasters(sshd.controlDirectory, (current) => current.length === 0),
+    ).toHaveLength(0);
   });
 
-  test('a master that loses the socket to a temporary master is stopped', async () => {
+  test('without a master, a client fails at once and never connects on its own', async () => {
     await using sshd = await startTestSshd();
     const connection = createSshConnection({
       alias: sshd.alias,
       controlDirectory: sshd.controlDirectory,
       sshConfigPath: sshd.sshConfigPath,
     });
-    // With no master, this client becomes a temporary one and owns the socket.
-    const client = connection.run('sleep 3');
-    for (let attempt = 0; attempt < 200 && !(await connection.check()); attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    expect(await connection.check()).toBe(true);
-
-    await connection.startMaster();
-    expect(await pgrepMasters(sshd.controlDirectory)).toHaveLength(0);
-    expect(await connection.check()).toBe(true);
-
-    await connection.exitMaster();
-    await client;
+    expect(await connection.check()).toBe(false);
+    // sshd logs every accepted login and every dropped pre-auth connection, so
+    // an unchanged log means the client never reached the server.
+    const logBefore = sshd.getLog();
+    const started = Date.now();
+    const result = await connection.run('echo connected');
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(result.code).toBe(255);
+    expect(result.stdout.toString('utf8')).toBe('');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(sshd.getLog().match(/Accepted publickey/g) ?? []).toEqual(
+      logBefore.match(/Accepted publickey/g) ?? [],
+    );
+    expect(sshd.getLog()).toBe(logBefore);
+    expect(await connection.check()).toBe(false);
   });
 
   test('ensureMaster starts a master once for concurrent callers', async () => {

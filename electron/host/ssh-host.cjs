@@ -367,9 +367,9 @@ const createSshHost = ({
   /** @type {Set<NodeJS.Timeout>} */
   const killTimers = new Set();
 
-  // A client whose master vanished connects on its own (ControlMaster=auto);
-  // this restores a shared master in the background. `close` waits for it, so
-  // a restore cannot leave a master running after the host is closed.
+  // Clients never connect on their own, so a lost master fails operations until
+  // this restores it in the background. `close` waits for it, so a restore
+  // cannot leave a master running after the host is closed.
   const restoreMaster = () => {
     if (closed || restoringMaster) {
       return;
