@@ -1,6 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { existsSync } from 'node:fs';
+import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:net';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vite-plus/test';
 import { findSshd, startTestSshd } from './helpers/test-sshd.ts';
@@ -17,7 +21,7 @@ type SshConnection = {
 };
 
 const require = createRequire(import.meta.url);
-const { createSshConnection } = require('../host/ssh-connection.cjs') as {
+const { createSshConnection, isSocketStale } = require('../host/ssh-connection.cjs') as {
   createSshConnection: (options: {
     alias: string;
     controlDirectory?: string;
@@ -26,6 +30,7 @@ const { createSshConnection } = require('../host/ssh-connection.cjs') as {
     sshCommand?: string;
     sshConfigPath?: string;
   }) => SshConnection;
+  isSocketStale: (path: string, timeoutMs?: number) => Promise<boolean>;
 };
 
 const execFileAsync = promisify(execFile);
@@ -116,6 +121,41 @@ test('a master start that never finishes times out and is killed', async () => {
     name: 'HostUnreachableError',
   });
   expect(killed).toBe(true);
+});
+
+test('only a socket that nothing listens on is stale', async () => {
+  const directory = await mkdtemp('/tmp/cdf-sock-');
+  try {
+    const path = join(directory, 'socket');
+    expect(await isSocketStale(path)).toBe(true);
+
+    const server = createServer((socket) => socket.destroy());
+    server.listen(path);
+    await once(server, 'listening');
+    try {
+      expect(await isSocketStale(path)).toBe(false);
+      // Any error other than "refused" or "missing" is not proof of staleness.
+      await chmod(directory, 0o000);
+      try {
+        expect(await isSocketStale(path)).toBe(false);
+      } finally {
+        await chmod(directory, 0o700);
+      }
+    } finally {
+      server.close();
+      await once(server, 'close');
+    }
+
+    // A process that exits without closing its server leaves the socket behind.
+    await execFileAsync(process.execPath, [
+      '-e',
+      `require('node:net').createServer().listen(${JSON.stringify(path)}, () => process.exit(0))`,
+    ]);
+    expect(existsSync(path)).toBe(true);
+    expect(await isSocketStale(path)).toBe(true);
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
 });
 
 describe.skipIf(!findSshd())('ssh connection', () => {

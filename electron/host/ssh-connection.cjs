@@ -30,6 +30,31 @@ const ALIAS_PATTERN = /^(?!-)(?!.*@-)[\w.@%+-]+$/;
 const getDefaultControlDirectory = () => join(homedir(), '.codiff', 'ssh');
 
 /**
+ * A control socket is stale only when nothing listens on it or it is gone.
+ * Any other error, or no answer in time, leaves it alone, since it may still
+ * belong to a live master.
+ *
+ * @param {string} path
+ * @param {number} [timeoutMs]
+ * @returns {Promise<boolean>}
+ */
+const isSocketStale = (path, timeoutMs = 1500) =>
+  new Promise((resolve) => {
+    const socket = connect(path);
+    /** @param {boolean} stale */
+    const finish = (stale) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(stale);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    socket.once('connect', () => finish(false));
+    socket.once('error', (/** @type {NodeJS.ErrnoException} */ error) =>
+      finish(error.code === 'ECONNREFUSED' || error.code === 'ENOENT'),
+    );
+  });
+
+/**
  * One multiplexed connection to an ssh destination. The master runs in the
  * background (`ControlPersist=yes`) and is the only invocation that connects
  * or reads the user's proxy settings. Every other invocation is a client that
@@ -118,17 +143,6 @@ const createSshConnection = ({
     });
 
   const check = async () => (await runSsh([...baseArgs, '-O', 'check', '--', alias])).code === 0;
-
-  /** @param {string} path */
-  const isSocketStale = (path) =>
-    new Promise((resolve) => {
-      const socket = connect(path);
-      socket.once('connect', () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.once('error', () => resolve(true));
-    });
 
   const readMasterLog = () => {
     try {
@@ -249,4 +263,4 @@ const createSshConnection = ({
   return { alias, check, ensureMaster, exitMaster, run, spawnClient, startMaster };
 };
 
-module.exports = { createSshConnection, getDefaultControlDirectory };
+module.exports = { createSshConnection, getDefaultControlDirectory, isSocketStale };
