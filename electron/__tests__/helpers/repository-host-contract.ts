@@ -176,4 +176,81 @@ export const defineRepositoryHostContract = (
     await expect(host.lstat(temporary)).rejects.toThrow();
     await host.rm(join(root, 'never-existed'), { force: true });
   });
+
+  test(`${name}: exec without input reports the command and its stderr`, async () => {
+    await using fixture = await createFixture();
+    const failure = fixture.host.exec('/bin/sh', ['-c', 'echo boom >&2; exit 3']);
+    await expect(failure).rejects.toThrow(/^Command failed: \/bin\/sh -c echo boom >&2; exit 3\n/);
+    await expect(failure).rejects.toThrow('boom');
+  });
+
+  test(`${name}: lstat reports sub-second modification times`, async () => {
+    await using fixture = await createFixture();
+    const path = join(fixture.root, 'fresh.txt');
+    await fixture.host.writeFile(path, 'x');
+    const stat = await fixture.host.lstat(path);
+    // A whole-second mtime would hide same-second edits from the repository watcher.
+    expect(stat.mtimeMs % 1000).not.toBe(0);
+  });
+
+  test(`${name}: empty batches resolve without work`, async () => {
+    await using fixture = await createFixture();
+    expect(await fixture.host.lstatMany([])).toEqual([]);
+    expect(await fixture.host.readFiles([])).toEqual([]);
+  });
+
+  test(`${name}: file names with shell metacharacters round-trip`, async () => {
+    await using fixture = await createFixture();
+    const { host, root } = fixture;
+    const names = [
+      `it's a "file".txt`,
+      'dollar $(id) `id` $HOME.txt',
+      'back\\slash \\b.txt',
+      'glob *?[a].txt',
+      '-leading-dash.txt',
+      'ünïcødé 🙂.txt',
+    ];
+    for (const [index, name] of names.entries()) {
+      const path = join(root, name);
+      await host.writeFile(path, `content ${index}`);
+      expect((await host.readFile(path)).toString('utf8')).toBe(`content ${index}`);
+      expect((await host.lstat(path)).type).toBe('file');
+    }
+    const paths = names.map((name) => join(root, name));
+    expect((await host.lstatMany(paths)).map((stat) => stat?.type)).toEqual(
+      names.map(() => 'file'),
+    );
+    expect(
+      (await host.readFiles(paths)).map((value) =>
+        Buffer.isBuffer(value) ? value.toString('utf8') : value,
+      ),
+    ).toEqual(names.map((_, index) => `content ${index}`));
+    await host.rename(paths[0], join(root, `renamed 'again'.txt`));
+    expect((await host.readFile(join(root, `renamed 'again'.txt`))).toString('utf8')).toBe(
+      'content 0',
+    );
+    const output = await host.exec('/bin/sh', ['-c', 'printf "%s" "$1"', 'sh', names[1]], {
+      cwd: root,
+    });
+    expect(output.toString('utf8')).toBe(names[1]);
+  });
+
+  test(`${name}: batched reads stay aligned around a newline in a file name`, async () => {
+    await using fixture = await createFixture();
+    const { host, root } = fixture;
+    const paths = [
+      join(root, 'before.txt'),
+      join(root, 'line\nbreak.txt'),
+      join(root, 'after.txt'),
+    ];
+    for (const [index, path] of paths.entries()) {
+      await host.writeFile(path, `value ${index}\n`);
+    }
+    const stats = await host.lstatMany([paths[0], join(root, 'missing'), paths[1], paths[2]]);
+    expect(stats.map((stat) => stat?.size ?? null)).toEqual([8, null, 8, 8]);
+    const contents = await host.readFiles(paths);
+    expect(
+      contents.map((value) => (Buffer.isBuffer(value) ? value.toString('utf8') : 'ERR')),
+    ).toEqual(['value 0\n', 'value 1\n', 'value 2\n']);
+  });
 };

@@ -48,7 +48,7 @@ const normalizeTerminalOutput = (text) =>
  */
 const gitStreaming = (host, repoPath, args, onOutput) =>
   new Promise((resolve, reject) => {
-    /** @type {import('node-pty').IPty} */
+    /** @type {import('./host/repository-host.cjs').HostPty} */
     let child;
     try {
       child = host.spawnPty('git', ['-C', repoPath, ...args], {
