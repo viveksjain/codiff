@@ -4,13 +4,14 @@ const { spawn } = require('node:child_process');
 const { mkdirSync, readFileSync, rmSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { join } = require('node:path');
-const { classifySshFailure } = require('./host-errors.cjs');
+const { classifySshFailure, HostUnreachableError } = require('./host-errors.cjs');
 
 /**
  * @typedef {{
  *   alias: string;
  *   controlDirectory?: string;
  *   getLocalEnvironment?: () => NodeJS.ProcessEnv;
+ *   masterStartTimeoutMs?: number;
  *   spawnProcess?: typeof spawn;
  *   sshCommand?: string;
  *   sshConfigPath?: string;
@@ -20,8 +21,10 @@ const { classifySshFailure } = require('./host-errors.cjs');
  */
 
 // A destination exactly as typed after `ssh`: an alias from ~/.ssh/config or
-// user@host. A leading `-` would be parsed as an option.
-const ALIAS_PATTERN = /^(?!-)[\w.@%+-]+$/;
+// user@host. A leading `-` would be parsed as an option, and ssh rejects a
+// hostname starting with `-` (as in `a@-b`) before it opens the `-E` log, which
+// would lose the error.
+const ALIAS_PATTERN = /^(?!-)(?!.*@-)[\w.@%+-]+$/;
 
 const getDefaultControlDirectory = () => join(homedir(), '.codiff', 'ssh');
 
@@ -37,6 +40,7 @@ const createSshConnection = ({
   alias,
   controlDirectory = getDefaultControlDirectory(),
   getLocalEnvironment = () => process.env,
+  masterStartTimeoutMs = 30_000,
   spawnProcess = spawn,
   sshCommand = 'ssh',
   sshConfigPath,
@@ -101,7 +105,7 @@ const createSshConnection = ({
       child.stdin.end(input);
     });
 
-  const check = async () => (await runSsh([...baseArgs, '-O', 'check', alias])).code === 0;
+  const check = async () => (await runSsh([...baseArgs, '-O', 'check', '--', alias])).code === 0;
 
   const readMasterLog = () => {
     try {
@@ -111,12 +115,32 @@ const createSshConnection = ({
     }
   };
 
+  // ssh expands `%C` itself, so ask it for the exact socket path.
+  const getControlPath = async () => {
+    const { stdout } = await runSsh([...baseArgs, '-G', '--', alias]);
+    const line = stdout
+      .toString('utf8')
+      .split('\n')
+      .find((entry) => entry.startsWith('controlpath '));
+    return line ? line.slice('controlpath '.length).trim() : null;
+  };
+
   // `ssh -f` forks a master that keeps any inherited output pipes open, so the
   // master gets no pipes and writes its errors to a log file (`-E`) instead.
+  // Starts from different connection instances for the same alias are not
+  // coordinated; Phase 3 keeps one connection per alias.
   const startMaster = async () => {
+    if (!(await check())) {
+      // A killed master leaves its socket behind. ssh would then log "already
+      // exists, disabling multiplexing" and still exit 0 with a lone `ssh -N`.
+      const controlPath = await getControlPath();
+      if (controlPath) {
+        rmSync(controlPath, { force: true });
+      }
+    }
     rmSync(masterLogPath, { force: true });
-    /** @type {number | null} */
-    const code = await new Promise((resolve) => {
+    /** @type {{code?: number | null; error?: string; timedOut?: boolean}} */
+    const outcome = await new Promise((resolve) => {
       const child = spawnProcess(
         sshCommand,
         [
@@ -129,15 +153,39 @@ const createSshConnection = ({
           'ControlPersist=yes',
           '-f',
           '-N',
+          '--',
           alias,
         ],
         { env: getLocalEnvironment(), stdio: 'ignore' },
       );
-      child.on('error', () => resolve(null));
-      child.on('exit', resolve);
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve({ timedOut: true });
+      }, masterStartTimeoutMs);
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        resolve({ error: error.message });
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        resolve({ code });
+      });
     });
-    if (code !== 0) {
+    if (outcome.timedOut) {
+      throw new HostUnreachableError(alias, `Timed out connecting to ${alias}.`);
+    }
+    if (outcome.error) {
+      throw classifySshFailure(alias, outcome.error, { connected: false });
+    }
+    if (outcome.code !== 0) {
       throw classifySshFailure(alias, readMasterLog(), { connected: false });
+    }
+    if (!(await check())) {
+      throw classifySshFailure(
+        alias,
+        readMasterLog() || 'The SSH master connection did not start.',
+        { connected: false },
+      );
     }
   };
 
@@ -157,16 +205,16 @@ const createSshConnection = ({
   };
 
   const exitMaster = async () => {
-    await runSsh([...baseArgs, '-O', 'exit', alias]);
+    await runSsh([...baseArgs, '-O', 'exit', '--', alias]);
   };
 
   /** @param {string} remoteCommand @param {{input?: string | Buffer}} [options] */
   const run = (remoteCommand, options) =>
-    runSsh([...clientArgs, '-T', alias, remoteCommand], options);
+    runSsh([...clientArgs, '-T', '--', alias, remoteCommand], options);
 
   /** @param {string} remoteCommand @param {{tty?: boolean}} [options] */
   const spawnClient = (remoteCommand, { tty = false } = {}) =>
-    spawnProcess(sshCommand, [...clientArgs, tty ? '-tt' : '-T', alias, remoteCommand], {
+    spawnProcess(sshCommand, [...clientArgs, tty ? '-tt' : '-T', '--', alias, remoteCommand], {
       env: getLocalEnvironment(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
