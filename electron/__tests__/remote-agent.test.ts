@@ -69,15 +69,16 @@ test('remote OpenCode reports text progress across split UTF-8 events before clo
   let beforeClose: unknown[] = [];
   let beforeText = 0;
   const { transport } = createCommandTransport(({ process, stdin, close }) => {
+    const stdout = process.stdout as PassThrough;
     stdin.on('finish', () => {
-      process.stdout?.write('startup noise\n' + JSON.stringify({ type: 'step_start' }) + '\n');
+      stdout.write('startup noise\n' + JSON.stringify({ type: 'step_start' }) + '\n');
       const output = Buffer.from(
         JSON.stringify({ type: 'text', part: { id: 'one', text: '{"reply":"héllo"}' } }) + '\n',
       );
       const split = output.indexOf(Buffer.from('é')) + 1;
-      process.stdout?.write(output.subarray(0, split));
+      stdout.write(output.subarray(0, split));
       beforeText = progress.mock.calls.length;
-      process.stdout?.write(output.subarray(split));
+      stdout.write(output.subarray(split));
       beforeClose = progress.mock.calls.map(([phase]) => phase);
       close();
     });

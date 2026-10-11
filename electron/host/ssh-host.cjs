@@ -212,6 +212,29 @@ const buildLstatManyScript = (paths, statFlavor) => {
   ].join('\n');
 };
 
+// Optional one-process acceleration; hosts without Perl retain the POSIX path.
+// Each opened file owns its size/frame. Shrinking files are zero-padded and
+// growing files are bounded, so subsequent frames stay aligned.
+const BATCH_READ_PERL = String.raw`
+use strict;
+binmode STDOUT;
+for my $path (@ARGV) {
+  my $file;
+  if (!-f $path || !open($file, '<:raw', $path) || !-f $file) { print "ERR\n"; next; }
+  my $remaining = -s $file;
+  if (!defined $remaining) { print "ERR\n"; close $file; next; }
+  print "OK $remaining\n";
+  while ($remaining > 0) {
+    my $want = $remaining < 65536 ? $remaining : 65536;
+    my $count = read($file, my $chunk, $want);
+    if (!defined $count || $count == 0) { $chunk = "\0" x $want; $count = $want; }
+    print $chunk;
+    $remaining -= $count;
+  }
+  close $file;
+}
+`;
+
 /**
  * Prints `OK <size>` and exactly that many bytes, or `ERR`, per path, in order.
  *
@@ -220,6 +243,7 @@ const buildLstatManyScript = (paths, statFlavor) => {
 const buildReadFilesScript = (paths) =>
   [
     setPositionalArgs(paths),
+    `if command -v perl >/dev/null 2>&1; then exec perl -e ${quotePosix(BATCH_READ_PERL)} -- "$@"; fi`,
     'for p do',
     '  if [ -f "$p" ] && [ -r "$p" ] && n=$(wc -c < "$p"); then',
     "    n=$(printf '%s' \"$n\" | tr -d ' ')",
@@ -984,29 +1008,39 @@ const createSshHost = ({
   /** @type {RepositoryHost['lstatMany']} */
   const lstatMany = async (paths) => {
     assertOpen();
-    /** @type {Array<HostStat | null>} */
-    const results = [];
-    for (const chunk of chunkByScriptSize(paths.map(assertAbsolute))) {
-      const output = await run(
-        'lstat',
-        `${chunk.length} paths`,
-        buildLstatManyScript(chunk, statFlavor),
-      );
-      results.push(...parseStatLines(output, chunk.length));
-    }
-    return results;
+    const chunks = chunkByScriptSize(paths.map(assertAbsolute));
+    return (
+      await Promise.all(
+        chunks.map(async (chunk) => {
+          const output = await run(
+            'lstat',
+            `${chunk.length} paths`,
+            buildLstatManyScript(chunk, statFlavor),
+          );
+          return parseStatLines(output, chunk.length);
+        }),
+      )
+    ).flat();
   };
 
   /** @type {RepositoryHost['readFiles']} */
   const readFiles = async (paths) => {
     assertOpen();
-    /** @type {Array<Buffer | Error>} */
-    const results = [];
-    for (const chunk of chunkByScriptSize(paths.map(assertAbsolute))) {
-      const output = await run('readFile', `${chunk.length} paths`, buildReadFilesScript(chunk));
-      results.push(...parseReadFilesOutput(output, chunk));
-    }
-    return results;
+    const chunks = chunkByScriptSize(paths.map(assertAbsolute));
+    // run() uses the host's shared channel limiter, so parallel batches remain
+    // bounded alongside Git, agents and terminal sessions. Promise.all keeps order.
+    return (
+      await Promise.all(
+        chunks.map(async (chunk) => {
+          const output = await run(
+            'readFile',
+            `${chunk.length} paths`,
+            buildReadFilesScript(chunk),
+          );
+          return parseReadFilesOutput(output, chunk);
+        }),
+      )
+    ).flat();
   };
 
   /** @param {Buffer} output */

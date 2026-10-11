@@ -5,8 +5,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, test } from 'vite-plus/test';
+import {
+  findSshd,
+  startTestSshd,
+  type TestSshd,
+} from '../../electron/__tests__/helpers/test-sshd.ts';
 import type { RepositoryHost } from '../../electron/host/repository-host.cjs';
 import type { RepositoryState, ReviewSource } from '../types.ts';
+import { getGitTestEnvironmentForSubprocess } from './helpers/git.ts';
 
 type GitStateModule = {
   readRepositoryState: (
@@ -32,6 +38,7 @@ let repo = '';
 const git = async (repository: string, args: ReadonlyArray<string>) => {
   const { stdout } = await execFileAsync('git', ['-C', repository, ...args], {
     encoding: 'utf8',
+    env: getGitTestEnvironmentForSubprocess(),
     maxBuffer: 1024 * 1024 * 64,
   });
   return stdout;
@@ -102,4 +109,79 @@ describe('commit diff generation duration', () => {
       }
     }).run();
   });
+});
+
+const readUntrackedState = async (repositoryHost: RepositoryHost, repository: string) => {
+  const state = await readRepositoryState(repositoryHost, repository);
+  if (state.files.length !== 1000 || state.files.some((file) => file.status !== 'untracked')) {
+    throw new Error('Expected exactly1000 untracked files.');
+  }
+};
+
+describe.skipIf(!findSshd())('1000 untracked files status over local and SSH hosts', () => {
+  let repository = '';
+  let sshd: TestSshd | undefined;
+  let sshHost: (RepositoryHost & { close: () => Promise<void> }) | undefined;
+  beforeAll(async () => {
+    repository = await realpath(await mkdtemp(join(tmpdir(), 'codiff-untracked-bench-')));
+    await git(repository, ['init']);
+    await writeRepoFile(repository, 'tracked.txt', 'baseline\n');
+    await commitAll(repository, 'baseline');
+    await Promise.all(
+      Array.from({ length: 1000 }, (_, index) =>
+        writeRepoFile(
+          repository,
+          `untracked/file-${index.toString().padStart(4, '0')}.txt`,
+          `${index}\n`,
+        ),
+      ),
+    );
+    sshd = await startTestSshd();
+    const { connectSshHost } = require('../../electron/host/ssh-host.cjs');
+    sshHost = await connectSshHost({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+  });
+  afterAll(async () => {
+    try {
+      await sshHost?.close();
+    } finally {
+      try {
+        await sshd?.stop();
+      } finally {
+        if (repository) {
+          await rm(repository, { force: true, recursive: true });
+        }
+      }
+    }
+  });
+  test('compare equivalent warmed repository status reads', async ({ bench }) => {
+    if (!sshHost) {
+      throw new Error('SSH fixture did not initialize.');
+    }
+    const remote = sshHost;
+    await readUntrackedState(host, repository);
+    await readUntrackedState(remote, repository);
+    const results = await bench.compare(
+      bench('LocalHost:1000 untracked files', () => readUntrackedState(host, repository)),
+      bench('SshHost(localhost):1000 untracked files', () =>
+        readUntrackedState(remote, repository)),
+      { iterations: 5, time: 0, warmupIterations: 1, warmupTime: 0 },
+    );
+    const local = results.get('LocalHost:1000 untracked files').latency.p50;
+    const ssh = results.get('SshHost(localhost):1000 untracked files').latency.p50;
+    const summary = JSON.stringify({
+      fixture: '1000-untracked-files',
+      localMedianMs: local,
+      ratio: ssh / local,
+      sshMedianMs: ssh,
+      targetRatio: 2,
+    });
+    const summaryPath = join(process.cwd(), '.superpowers/benchmarks/ssh-status.json');
+    await mkdir(dirname(summaryPath), { recursive: true });
+    await writeFile(summaryPath, summary + '\n');
+    process.stdout.write(summary + '\n');
+  }, 120_000);
 });
