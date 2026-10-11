@@ -224,6 +224,8 @@ describe.skipIf(!findSshd())('SshHost commands', () => {
     ).rejects.toMatchObject({ name: 'RemoteShellNoiseError' });
     expect(masterStarted).toBe(true);
     expect(await connection.check()).toBe(false);
+    // The exited master can take a moment to go away.
+    await waitUntil(() => !listMasters().includes(sshd.controlDirectory)).catch(() => {});
     expect(listMasters()).not.toContain(sshd.controlDirectory);
   });
 
