@@ -182,3 +182,26 @@ async function pressKey(key: string, { shiftKey = false } = {}) {
     );
   });
 }
+
+test('remote action and folder follow visual keyboard order', async () => {
+  await using view = await renderReact(
+    <OpenReviewSourceMenu onOpen={() => {}} onOpenFolder={() => {}} onOpenRemote={() => {}} />,
+  );
+  await click(getTrigger(view.container));
+  const items = getMenuItems();
+  expect(items.map((item) => item.textContent)).toEqual([
+    'Open PR',
+    'Open Branch',
+    'Open Commit',
+    'Open Remote Repository',
+    'Open Folder',
+  ]);
+  for (const item of items.slice(1)) {
+    await pressKey('ArrowDown');
+    expect(document.activeElement).toBe(item);
+  }
+  await pressKey('Home');
+  expect(document.activeElement).toBe(items[0]);
+  await pressKey('End');
+  expect(document.activeElement).toBe(items.at(-1));
+});

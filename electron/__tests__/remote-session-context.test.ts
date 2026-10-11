@@ -10,7 +10,7 @@ for (const [backend, name, override, subdir] of [
   test(`${backend} session context belongs to its host even for the same session ID`, async () => {
     const reader = require(`../${backend}-session-context.cjs`)[`read${name}SessionContext`];
     for (const label of ['first', 'second']) {
-      const root = `/remote/${label}/config space`;
+      const root = '/remote/shared/config space';
       const file = `${root}/${subdir}/${sessionId}.jsonl`;
       const record =
         backend === 'codex'
@@ -31,7 +31,7 @@ for (const [backend, name, override, subdir] of [
       const host = {
         id: `ssh://${label}`,
         label,
-        getEnvironment: async () => ({ HOME: `/remote/${label}`, [override]: root }),
+        getEnvironment: async () => ({ HOME: '/remote/shared', [override]: root }),
         readdir: async (path: string) => {
           expect(path).toBe(`${root}/${subdir}`);
           return [{ name: `${sessionId}.jsonl`, type: 'file' }];

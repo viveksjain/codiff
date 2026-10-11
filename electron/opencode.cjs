@@ -355,6 +355,23 @@ const runOpenCode = async (
         /** @type {Error | null} */
         let stdinError = null;
         let stdout = '';
+        let progressLine = '';
+        /** @param {string} line */
+        const reportProgress = (line) => {
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            return;
+          }
+          if (
+            event?.type === 'text' &&
+            typeof event.part?.text === 'string' &&
+            event.part.text.trim()
+          ) {
+            options.onProgress?.('response-received');
+          }
+        };
         let finished = false;
 
         const commandTransport = resolveAgentCommandTransport(
@@ -393,8 +410,17 @@ const runOpenCode = async (
           }
         }, timeoutMs);
 
+        child.stdout.setEncoding('utf8');
         child.stdout.on('data', (chunk) => {
-          stdout += chunk.toString();
+          stdout += chunk;
+          if (options.onProgress) {
+            progressLine += chunk;
+            let newline;
+            while ((newline = progressLine.indexOf('\n')) !== -1) {
+              reportProgress(progressLine.slice(0, newline));
+              progressLine = progressLine.slice(newline + 1);
+            }
+          }
         });
         child.stderr.on('data', (chunk) => {
           stderr += chunk.toString();
@@ -408,6 +434,7 @@ const runOpenCode = async (
           reject(getOpenCodeLaunchError(error));
         });
         child.on('close', (code, signal) => {
+          if (progressLine && options.onProgress) reportProgress(progressLine);
           if (finished) {
             return;
           }

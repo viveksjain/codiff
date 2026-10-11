@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { PassThrough } from 'node:stream';
-import { expect, test } from 'vite-plus/test';
-const { getAgentForHost } = createRequire(import.meta.url)('../agent.cjs');
+import { expect, test, vi } from 'vite-plus/test';
+const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs');
+const { getAgentForHost } = require('../agent.cjs');
 test('missing configured remote backend names its command and host without fallback', async () => {
   const resolved: Array<string> = [];
   const host = {
@@ -59,4 +61,45 @@ test('remote runs use only their environment and cwd through host spawn', async 
     command: '/remote/bin/claude',
     options: { cwd: '/remote/repo', env: environment },
   });
+});
+
+test('remote OpenCode reports text progress across split UTF-8 events before close', async () => {
+  const { createCommandTransport } = await import('./helpers/command-transport.ts');
+  const progress = vi.fn();
+  let beforeClose: unknown[] = [];
+  let beforeText = 0;
+  const { transport } = createCommandTransport(({ process, stdin, close }) => {
+    stdin.on('finish', () => {
+      process.stdout?.write('startup noise\n' + JSON.stringify({ type: 'step_start' }) + '\n');
+      const output = Buffer.from(
+        JSON.stringify({ type: 'text', part: { id: 'one', text: '{"reply":"héllo"}' } }) + '\n',
+      );
+      const split = output.indexOf(Buffer.from('é')) + 1;
+      process.stdout?.write(output.subarray(0, split));
+      beforeText = progress.mock.calls.length;
+      process.stdout?.write(output.subarray(split));
+      beforeClose = progress.mock.calls.map(([phase]) => phase);
+      close();
+    });
+  });
+  const host = {
+    ...createLocalHost(),
+    id: 'ssh://remote',
+    label: 'remote',
+    getEnvironment: async () => ({ HOME: '/remote', PATH: '/bin' }),
+    resolveCommand: async () => '/bin/opencode',
+    spawn: (_command: string, args: ReadonlyArray<string>, options: unknown) =>
+      transport.spawn(transport.command, args, options as Parameters<typeof transport.spawn>[2]),
+  };
+  const output = await getAgentForHost(host, 'opencode').run(
+    '/remote/repo',
+    'prompt',
+    {},
+    undefined,
+    undefined,
+    { onProgress: progress },
+  );
+  expect(beforeText).toBe(0);
+  expect(beforeClose).toEqual(['response-received']);
+  expect(output).toBe('{"reply":"héllo"}');
 });

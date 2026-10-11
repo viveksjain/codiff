@@ -201,7 +201,7 @@ export function OpenReviewSourceMenu({
                     onOpenRemote();
                   }}
                   ref={(element) => {
-                    itemRefs.current[actions.length + 1] = element;
+                    itemRefs.current[actions.length] = element;
                   }}
                   role="menuitem"
                   tabIndex={-1}
@@ -219,7 +219,7 @@ export function OpenReviewSourceMenu({
                   onOpenFolder();
                 }}
                 ref={(element) => {
-                  itemRefs.current[actions.length] = element;
+                  itemRefs.current[actions.length + (onOpenRemote ? 1 : 0)] = element;
                 }}
                 role="menuitem"
                 tabIndex={-1}
