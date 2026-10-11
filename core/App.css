@@ -4620,3 +4620,34 @@ diffs-container .review-comment-thread {
   background: var(--app-bg);
   font-size: 12px;
 }
+
+.review-top-bar-remote-host {
+  color: var(--text);
+  flex-shrink: 0;
+  font-weight: 600;
+  white-space: pre;
+}
+
+.open-remote-recents {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.open-remote-recents > span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 12px;
+}
+
+.open-remote-recents button {
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repository-connection-banner {
+  max-width: min(700px, calc(100vw - 180px));
+}

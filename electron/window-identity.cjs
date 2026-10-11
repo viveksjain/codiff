@@ -2,6 +2,7 @@
 
 const { realpathSync } = require('node:fs');
 const { dirname, resolve } = require('node:path');
+const { getRepositoryKey } = require('./host/repository-identity.cjs');
 const { git } = require('./git-state/common.cjs');
 const { parseReviewUrl } = require('./review-source.cjs');
 
@@ -213,7 +214,7 @@ const getWindowIdentity = async (host, repositoryPath, launchOptions = {}) => {
     : await getSourceKey(host, repositoryRoot, launchOptions.source);
   return sourceKey
     ? {
-        key: `${repositoryRoot}\0${sourceKey}`,
+        key: `${getRepositoryKey(host.id, repositoryRoot)}\0${sourceKey}`,
         repositoryRoot,
         sourceKey,
       }
@@ -234,7 +235,7 @@ const getWindowIdentityForRepositoryState = async (host, state) => {
   const sourceKey = getResolvedSourceKey(state.source);
   return sourceKey
     ? {
-        key: `${repositoryRoot}\0${sourceKey}`,
+        key: `${getRepositoryKey(host.id, repositoryRoot)}\0${sourceKey}`,
         repositoryRoot,
         sourceKey,
       }

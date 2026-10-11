@@ -13,9 +13,11 @@ import type {
 
 type UseAppCommandsOptions = {
   changeSidebarMode: (mode: SidebarMode) => void;
+  disconnected?: boolean;
   focusFileFilter: () => void;
   getReviewCommandTarget: () => ReviewCommandTarget | null;
   onOpenDiffSearch: () => void;
+  onOpenRemoteRepository?: () => void;
   onOpenReviewSource: (kind: OpenReviewSourceKind) => void;
   onOpenSelectedFile: () => void;
   onRefreshRepository: () => void;
@@ -23,6 +25,7 @@ type UseAppCommandsOptions = {
   onToggleViewed: (file: ChangedFile, isViewed: boolean, reviewIdentity: ReviewIdentity) => void;
   onToggleWordWrap: () => void;
   preferencesRef: RefObject<CodiffPreferences>;
+  remote?: boolean;
   reviewCommentsRef: RefObject<ReadonlyArray<ReviewComment>>;
   stateRef: RefObject<RepositoryState | null>;
   viewedRef: RefObject<Record<string, string>>;
@@ -30,9 +33,11 @@ type UseAppCommandsOptions = {
 
 export function useAppCommands({
   changeSidebarMode,
+  disconnected = false,
   focusFileFilter,
   getReviewCommandTarget,
   onOpenDiffSearch,
+  onOpenRemoteRepository,
   onOpenReviewSource,
   onOpenSelectedFile,
   onRefreshRepository,
@@ -40,6 +45,7 @@ export function useAppCommands({
   onToggleViewed,
   onToggleWordWrap,
   preferencesRef,
+  remote = false,
   reviewCommentsRef,
   stateRef,
   viewedRef,
@@ -50,6 +56,15 @@ export function useAppCommands({
   useEffect(() => {
     const registry = registryRef.current;
     const unregisterFns = [
+      ...(onOpenRemoteRepository
+        ? [
+            registry.register({
+              execute: onOpenRemoteRepository,
+              id: 'open-remote-repository',
+              title: 'Open Remote Repository',
+            }),
+          ]
+        : []),
       registry.register({
         execute: focusFileFilter,
         id: 'file-filter',
@@ -229,7 +244,12 @@ export function useAppCommands({
         title: 'Refresh Changes',
       }),
     ];
-    setCommands(registry.commands);
+    const unavailable = new Set([
+      ...(remote ? ['open-pull-request', 'open-file', 'sidebar-walkthrough'] : []),
+      ...(disconnected ? ['reload'] : []),
+    ]);
+    const availableCommands = registry.commands.filter((command) => !unavailable.has(command.id));
+    setCommands(availableCommands);
 
     return () => {
       for (const unregister of unregisterFns) {
@@ -237,6 +257,9 @@ export function useAppCommands({
       }
     };
   }, [
+    remote,
+    disconnected,
+    onOpenRemoteRepository,
     changeSidebarMode,
     focusFileFilter,
     getReviewCommandTarget,

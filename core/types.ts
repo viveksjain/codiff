@@ -238,6 +238,15 @@ export type RepositoryHistory = {
   root: string;
 };
 
+export type RepositoryHostInfo = {
+  id: string;
+  label: string;
+  recentTargets: ReadonlyArray<string>;
+  remote: boolean;
+  state: 'connected' | 'disconnected' | 'closed';
+  target?: string;
+};
+
 export type RepositoryState = {
   branch: string | null;
   codeQualityFindings?: ReadonlyArray<PullRequestCodeQualityFinding>;
@@ -245,6 +254,8 @@ export type RepositoryState = {
   files: ReadonlyArray<ChangedFile>;
   generalComments?: ReadonlyArray<PullRequestGeneralCommentThread>;
   generatedAt: number;
+  hostId?: string;
+  hostLabel?: string;
   launchPath: string;
   reviewComments?: ReadonlyArray<PullRequestExistingReviewComment>;
   root: string;

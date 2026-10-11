@@ -475,25 +475,33 @@ const createSshHost = ({
   // Clients never connect on their own, so a lost master fails operations until
   // this restores it in the background. `close` waits for it, so a restore
   // cannot leave a master running after the host is closed.
-  const restoreMaster = () => {
-    if (closed || restoringMaster) {
-      return;
+  const ensureMaster = () => {
+    assertOpen();
+    if (restoringMaster) {
+      return restoringMaster;
     }
-    restoringMaster = connection
-      .ensureMaster()
+    restoringMaster = Promise.resolve()
+      .then(() => connection.ensureMaster())
       .then(() => {
         if (!closed) {
           setState('connected');
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (!closed) {
           setState('disconnected');
         }
+        throw error;
       })
       .finally(() => {
         restoringMaster = null;
       });
+    return restoringMaster;
+  };
+  const restoreMaster = () => {
+    if (!closed) {
+      void ensureMaster().catch(() => {});
+    }
   };
 
   const keepMasterAlive = () => {
@@ -596,6 +604,13 @@ const createSshHost = ({
           (typeof signal === 'number' && (!Number.isInteger(signal) || signal < 0 || signal > 64))
         ) {
           throw new Error(`Invalid signal: ${signal}`);
+        }
+        if (signal === 0) {
+          if (pid == null) {
+            return false;
+          }
+          killRemote(pid, 0);
+          return true;
         }
         killed = true;
         killSignal = signal;
@@ -777,16 +792,18 @@ const createSshHost = ({
       stdout: child.stdout,
     });
     Object.defineProperty(hostProcess, 'killed', { get: () => killed });
-    /** @type {Array<Buffer>} */
-    const diagnostics = [];
-    stderr.on('data', (chunk) => diagnostics.push(chunk));
+    let diagnostics = '';
+    stderr.on(
+      'data',
+      (chunk) => (diagnostics = (diagnostics + chunk.toString()).slice(-64 * 1024)),
+    );
     // Emit 'close' only after the filtered stderr has received everything.
     const emitClose = () => {
       if (exitCode !== undefined && stderrFinished) {
         const code = exitCode;
         void getConnectionError({
           code,
-          stderr: Buffer.concat(diagnostics).toString(),
+          stderr: diagnostics,
           stdout: Buffer.alloc(0),
         })
           .then((error) => {
@@ -866,15 +883,17 @@ const createSshHost = ({
       outputEnded = true;
       emitExit();
     });
-    /** @type {Array<Buffer>} */
-    const diagnostics = [];
-    child.stderr.on('data', (chunk) => diagnostics.push(chunk));
+    let diagnostics = '';
+    child.stderr.on(
+      'data',
+      (chunk) => (diagnostics = (diagnostics + chunk.toString()).slice(-64 * 1024)),
+    );
     child.stdin.on('error', () => {});
     child.on('close', (code) => {
       remote.exit();
       void getConnectionError({
         code,
-        stderr: Buffer.concat(diagnostics).toString(),
+        stderr: diagnostics,
         stdout: Buffer.alloc(0),
       }).finally(() => {
         exitCode = code;
@@ -1018,11 +1037,11 @@ const createSshHost = ({
         closing.abort();
         const active = [...processes];
         for (const remote of active) {
-          remote.kill();
+          remote.kill('SIGKILL');
         }
         await Promise.all(active.map((remote) => remote.done));
         await Promise.all(kills);
-        await restoringMaster;
+        await restoringMaster?.catch(() => {});
         await connection.exitMaster();
       })();
       return closePromise;
@@ -1036,18 +1055,7 @@ const createSshHost = ({
     },
     reconnect: async () => {
       assertOpen();
-      await restoringMaster;
-      try {
-        await connection.ensureMaster();
-        if (!closed) {
-          setState('connected');
-        }
-      } catch (error) {
-        if (!closed) {
-          setState('disconnected');
-        }
-        throw error;
-      }
+      await ensureMaster();
       assertOpen();
     },
     exec,

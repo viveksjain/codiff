@@ -25,6 +25,7 @@ import { WalkthroughProgress } from './walkthrough/WalkthroughProgress.tsx';
 
 export function Sidebar({
   branchSource,
+  commitDisabled = false,
   commitFiles,
   commitViewOpen,
   currentSource,
@@ -54,6 +55,7 @@ export function Sidebar({
   walkthroughProgress,
 }: {
   branchSource: Extract<ReviewSource, { type: 'branch-diff' }> | null;
+  commitDisabled?: boolean;
   commitFiles: ReadonlyArray<ChangedFile>;
   commitViewOpen: boolean;
   currentSource: ReviewSource;
@@ -196,6 +198,7 @@ export function Sidebar({
             <Button
               aria-label={commitViewOpen ? 'Show file tree' : 'Open commit view'}
               className="sidebar-commit-button"
+              disabled={commitDisabled}
               onClick={onToggleCommitView}
               type="button"
             >

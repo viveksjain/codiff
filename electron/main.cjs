@@ -1,7 +1,7 @@
 // @ts-check
 
 const { existsSync, readFileSync, writeFileSync } = require('node:fs');
-const { basename, dirname, join, relative, resolve } = require('node:path');
+const { dirname, join, resolve } = require('node:path');
 const { pathToFileURL } = require('node:url');
 const {
   app,
@@ -33,6 +33,7 @@ const { readCodexModels } = require('./codex-models.cjs');
 const { normalizeClaudeModel } = require('./claude.cjs');
 const { normalizeOpenCodeModel, renderOpenCodeCommand } = require('./opencode.cjs');
 const { createWalkthroughCommit } = require('./walkthrough-commit.cjs');
+const { registerHostShutdown } = require('./main/host-shutdown.cjs');
 const { readKeyboardLayout, watchKeyboardLayout } = require('./keyboard-layout.cjs');
 const { diagnoseWalkthroughMismatch } = require('./walkthrough-diagnosis.cjs');
 const { readCommitMessageReply } = require('./walkthrough-commit-message.cjs');
@@ -83,6 +84,12 @@ const { createSkillInstaller } = require('./main/agent-skill.cjs');
 const { createWindowLaunchQueue } = require('./main/window-launch-queue.cjs');
 const { createEditorOpener } = require('./main/editor.cjs');
 const { createDefinitionSearchCoordinator } = require('./definition-search.cjs');
+const { createHostRegistry } = require('./host/host-registry.cjs');
+const {
+  formatRemoteRepositoryTarget,
+  parseRepositoryTarget,
+} = require('./host/repository-target.cjs');
+const { resolveRepositoryLaunch } = require('./main/repository-launch.cjs');
 const { createLocalHost } = require('./host/local-host.cjs');
 const { createWindowRepositories } = require('./window-repositories.cjs');
 const { createTerminalHelper } = require('./main/terminal-helper.cjs');
@@ -142,7 +149,10 @@ const windowIdentities = new Map();
 /** @type {Map<number, number>} */
 const windowIdentityGenerations = new Map();
 const localHost = createLocalHost();
-const windowRepositories = createWindowRepositories({ getLaunchPath, localHost });
+const windowRepositories = createWindowRepositories();
+const hostRegistry = createHostRegistry({ localHost });
+/** @type {Map<number, {release: () => Promise<void>; unsubscribe: () => void; target: import('./host/repository-target.cjs').RemoteRepositoryTarget}>} */
+const windowRemoteLeases = new Map();
 /** @type {Map<number, CodiffLaunchOptions>} */
 const windowLaunchOptions = new Map();
 /** @type {Map<number, Promise<RepositoryState>>} */
@@ -200,10 +210,15 @@ const refreshInstalledAgentFiles = () => {
 const getActiveAgent = () => getAgent(config.settings.agentBackend);
 
 /** @param {RepositoryHost} host @param {string} repositoryPath @param {ReviewSource} [source] */
-const readRepositoryStateWithConfig = (host, repositoryPath, source) =>
-  readRepositoryState(host, repositoryPath, source, {
+const readRepositoryStateWithConfig = async (host, repositoryPath, source) => {
+  if (host.id !== 'local' && source?.type === 'pull-request') {
+    throw new Error('PR/MR reviews are unavailable for remote repositories.');
+  }
+  const state = await readRepositoryState(host, repositoryPath, source, {
     showWhitespace: config.settings.showWhitespace,
   });
+  return host.id === 'local' ? state : { ...state, hostId: host.id, hostLabel: host.label };
+};
 
 /** @param {RepositoryHost} host @param {string} repositoryPath @param {CodiffLaunchOptions} launchOptions */
 const readInitialRepositoryStateWithConfig = (host, repositoryPath, launchOptions) =>
@@ -249,10 +264,46 @@ const getWindowRepository = (webContentsId) => {
 };
 
 /** @param {number} webContentsId */
-const getMarkdownDocumentContext = (webContentsId) => ({
-  planFile: windowLaunchOptions.get(webContentsId)?.planFile,
-  repositoryRoot: getWindowRepository(webContentsId).repositoryPath,
-});
+const getMarkdownDocumentContext = (webContentsId) => {
+  assertLocalWindow(webContentsId, 'Markdown editing');
+  return {
+    planFile: windowLaunchOptions.get(webContentsId)?.planFile,
+    repositoryRoot: getWindowRepository(webContentsId).repositoryPath,
+  };
+};
+
+/** @param {number} id @param {string} action */
+const assertLocalWindow = (id, action) => {
+  if (getWindowRepository(id).host.id !== 'local') {
+    throw new Error(`${action} is unavailable for remote repositories.`);
+  }
+};
+/** @param {number} id */
+const assertConnectedWindow = (id) => {
+  const { host } = getWindowRepository(id);
+  if (
+    host.id !== 'local' &&
+    /** @type {import('./host/ssh-host.cjs').SshHost} */ (host).getConnectionState() !== 'connected'
+  ) {
+    throw new Error(`Lost connection to ${host.label}. Reconnect to continue.`);
+  }
+};
+/** @param {number} id @returns {import('../core/types.ts').RepositoryHostInfo} */
+const getRepositoryHostInfo = (id) => {
+  const { host } = getWindowRepository(id);
+  const target = windowRemoteLeases.get(id)?.target;
+  return {
+    id: host.id,
+    label: host.label,
+    remote: host.id !== 'local',
+    state:
+      host.id === 'local'
+        ? 'connected'
+        : /** @type {import('./host/ssh-host.cjs').SshHost} */ (host).getConnectionState(),
+    ...(target ? { target: formatRemoteRepositoryTarget(target) } : {}),
+    recentTargets: config.settings.recentRemoteRepositories ?? [],
+  };
+};
 
 /** @param {number} webContentsId @param {RepositoryState} state */
 const storeResolvedRepositoryState = async (webContentsId, state) => {
@@ -574,10 +625,10 @@ const openRepositoryFolder = async (browserWindow) => {
     : await dialog.showOpenDialog(options);
 
   if (!result.canceled && result.filePaths[0]) {
-    void focusOrCreateWindow(localHost, result.filePaths[0], {
+    void openRepositoryTarget(result.filePaths[0], {
       repositoryPathProvided: true,
       walkthrough: false,
-    });
+    }).catch(reportLaunchError);
   }
 };
 
@@ -650,6 +701,10 @@ const requestOpenReviewSource = (browserWindow, kind) => {
     browserWindow.webContents.send('codiff:openReviewSource', kind);
   }
 };
+const isFocusedWindowLocal = () => {
+  const window = BrowserWindow.getFocusedWindow();
+  return !window || getWindowRepository(window.webContents.id).host.id === 'local';
+};
 /** @returns {import('electron').Menu} */
 const buildApplicationMenu = () =>
   Menu.buildFromTemplate(
@@ -671,6 +726,7 @@ const buildApplicationMenu = () =>
                   click: (_menuItem, browserWindow) =>
                     requestOpenReviewSource(browserWindow, 'pull-request'),
                   label: 'Open PR',
+                  visible: isFocusedWindowLocal(),
                 },
                 {
                   click: (_menuItem, browserWindow) =>
@@ -760,6 +816,28 @@ const buildApplicationMenu = () =>
             click: (_menuItem, browserWindow) => openRepositoryFolder(browserWindow),
             label: 'Open Folder...',
           },
+          ...(process.platform === 'win32'
+            ? []
+            : [
+                {
+                  label: 'Open Remote Repository...',
+                  click:
+                    /** @type {NonNullable<import('electron').MenuItemConstructorOptions['click']>} */ (
+                      (_menuItem, browserWindow) => {
+                        const window = browserWindow ?? BrowserWindow.getFocusedWindow();
+                        if (window instanceof BrowserWindow) {
+                          window.webContents.send('codiff:openRemoteRepositoryRequest');
+                        } else {
+                          void openRepositoryTarget(getLaunchPath(), getLaunchOptions())
+                            .then((created) =>
+                              created?.webContents.send('codiff:openRemoteRepositoryRequest'),
+                            )
+                            .catch(reportLaunchError);
+                        }
+                      }
+                    ),
+                },
+              ]),
           { type: 'separator' },
           process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' },
         ],
@@ -1132,6 +1210,12 @@ const createWindow = (host, repositoryPath, launchOptions, identity) => {
     windowIdentityGenerations.delete(webContentsId);
     windowInitialRepositoryStates.delete(webContentsId);
     walkthroughProgressGenerations.delete(webContentsId);
+    const remoteLease = windowRemoteLeases.get(webContentsId);
+    windowRemoteLeases.delete(webContentsId);
+    remoteLease?.unsubscribe();
+    if (remoteLease) {
+      void remoteLease.release().catch(reportLaunchError);
+    }
     windowRepositories.delete(webContentsId);
     windowLaunchOptions.delete(webContentsId);
   });
@@ -1179,6 +1263,8 @@ const createWindow = (host, repositoryPath, launchOptions, identity) => {
   } else {
     window.loadURL(pathToFileURL(join(root, 'dist/index.html')).toString());
   }
+  window.on('focus', () => Menu.setApplicationMenu(buildApplicationMenu()));
+  return window;
 };
 
 /** @param {import('electron').BrowserWindow} window */
@@ -1325,16 +1411,61 @@ const focusOrCreateWindowNow = async (host, repositoryPath, launchOptions) => {
   return createWindow(host, repositoryPath, launchOptions, identity);
 };
 
-/**
- * @param {RepositoryHost} host
- * @param {string} repositoryPath
- * @param {CodiffLaunchOptions} [launchOptions]
- */
-const focusOrCreateWindow = (
-  host,
-  repositoryPath,
+/** @param {unknown} error */
+const reportLaunchError = (error) => {
+  void dialog.showMessageBox({
+    type: 'error',
+    message: 'Could not open repository',
+    detail: error instanceof Error ? error.message : String(error),
+  });
+};
+
+/** @param {string} path @param {CodiffLaunchOptions} [launchOptions] */
+const openRepositoryTarget = (
+  path,
   launchOptions = { repositoryPathProvided: true, walkthrough: false },
-) => enqueueWindowLaunch(() => focusOrCreateWindowNow(host, repositoryPath, launchOptions));
+) =>
+  enqueueWindowLaunch(async () => {
+    const launch = await resolveRepositoryLaunch(
+      { registry: hostRegistry, localHost },
+      path,
+      launchOptions,
+    );
+    try {
+      const window = await focusOrCreateWindowNow(
+        launch.host,
+        launch.repositoryPath,
+        launch.launchOptions,
+      );
+      if (
+        launch.target &&
+        window &&
+        !window.isDestroyed() &&
+        !windowRemoteLeases.has(window.webContents.id)
+      ) {
+        const host = /** @type {import('./host/ssh-host.cjs').SshHost} */ (launch.host);
+        const id = window.webContents.id;
+        const unsubscribe = host.onConnectionState(() => {
+          if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+            window.webContents.send('codiff:repositoryHostChanged', getRepositoryHostInfo(id));
+          }
+        });
+        windowRemoteLeases.set(id, { release: launch.release, unsubscribe, target: launch.target });
+        const target = formatRemoteRepositoryTarget(launch.target);
+        config.settings.recentRemoteRepositories = [
+          target,
+          ...(config.settings.recentRemoteRepositories ?? []).filter((value) => value !== target),
+        ].slice(0, 10);
+        writeConfig(config);
+      } else {
+        await launch.release();
+      }
+      return window;
+    } catch (error) {
+      await launch.release();
+      throw error;
+    }
+  });
 
 const INITIAL_UPDATE_CHECK_DELAY_MS = 10 * 1000;
 const UPDATE_CHECK_TIMER_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -1426,14 +1557,12 @@ if (squirrelStartup || !lock) {
     const data = /** @type {SingleInstanceAdditionalData} */ (additionalData || {});
     const launchOptions =
       data.launchOptions || getCommandLineLaunchOptions(commandLine, workingDirectory);
-    const launchPath = resolve(
-      data.repositoryPath || getCommandLineRepositoryPath(commandLine) || workingDirectory,
-    );
-    void focusOrCreateWindow(
-      localHost,
+    const launchPath =
+      data.repositoryPath || getCommandLineRepositoryPath(commandLine) || workingDirectory;
+    void openRepositoryTarget(
       getInitialRepositoryPath(launchPath, launchOptions, config.settings.lastRepositoryPath),
       launchOptions,
-    );
+    ).catch(reportLaunchError);
     if (launchOptions.applyUpdate) {
       void updater?.applyLatest().catch(() => {});
     }
@@ -1470,11 +1599,10 @@ if (squirrelStartup || !lock) {
     setInterval(runScheduledUpdateCheck, UPDATE_CHECK_TIMER_INTERVAL_MS);
 
     const launchOptions = getLaunchOptions();
-    void focusOrCreateWindow(
-      localHost,
+    void openRepositoryTarget(
       getInitialRepositoryPath(getLaunchPath(), launchOptions, config.settings.lastRepositoryPath),
       launchOptions,
-    );
+    ).catch(reportLaunchError);
     if (launchOptions.applyUpdate) {
       void updater?.applyLatest().catch(() => {});
     }
@@ -1504,27 +1632,26 @@ if (squirrelStartup || !lock) {
   });
 
   app.on('will-quit', () => codexModelDiscoveryAbort.abort());
+  registerHostShutdown(app, hostRegistry, reportLaunchError);
 
   app.on('activate', () => {
-    // Check for open windows only once earlier launches have created theirs.
-    void enqueueWindowLaunch(async () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        const launchOptions = getLaunchOptions();
-        await focusOrCreateWindowNow(
-          localHost,
-          getInitialRepositoryPath(
-            getLaunchPath(),
-            launchOptions,
-            config.settings.lastRepositoryPath,
-          ),
+    if (BrowserWindow.getAllWindows().length === 0 && !windowLaunchQueue.hasPending()) {
+      const launchOptions = getLaunchOptions();
+      void openRepositoryTarget(
+        getInitialRepositoryPath(
+          getLaunchPath(),
           launchOptions,
-        );
-      }
-    });
+          config.settings.lastRepositoryPath,
+        ),
+        launchOptions,
+      ).catch(reportLaunchError);
+    }
   });
 
   app.on('window-all-closed', () => {
-    app.quit();
+    if (!windowLaunchQueue.hasPending()) {
+      app.quit();
+    }
   });
 
   app.on('before-quit', (event) => {
@@ -1583,12 +1710,15 @@ ipcMain.handle('codiff:getRepositoryState', async (event, source) => {
     ? await initialState
     : await readRepositoryStateWithConfig(host, repositoryPath, source || launchOptions?.source);
   await storeResolvedRepositoryState(event.sender.id, state);
-  rememberLastRepositoryPath(state.root);
+  if (host.id === 'local') {
+    rememberLastRepositoryPath(state.root);
+  }
   void resetRepositoryWatcher(host, event.sender.id, state.root);
   return state;
 });
 
 ipcMain.handle('codiff:resolvePullRequestUrl', (event, value) => {
+  assertLocalWindow(event.sender.id, 'PR/MR review');
   const input = typeof value === 'string' ? value.trim() : '';
   const parsedUrl = parseReviewUrl(input);
   if (parsedUrl) {
@@ -1620,6 +1750,7 @@ ipcMain.handle('codiff:getRepositoryFile', (event, path) => {
 });
 
 ipcMain.handle('codiff:saveRepositoryFile', async (event, request) => {
+  assertConnectedWindow(event.sender.id);
   const { host, repositoryPath: root } = getWindowRepository(event.sender.id);
   const current = await readRepositoryFile(host, root, request.path);
   const selfWrite = beginRepositorySelfWrite(event.sender.id, current.path);
@@ -1726,6 +1857,7 @@ ipcMain.handle('codiff:installTerminalHelper', async (event) => {
 });
 
 ipcMain.handle('codiff:getNarrativeWalkthrough', async (event, source, options) => {
+  assertLocalWindow(event.sender.id, 'getNarrativeWalkthrough');
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const progressGeneration = (walkthroughProgressGenerations.get(event.sender.id) || 0) + 1;
   walkthroughProgressGenerations.set(event.sender.id, progressGeneration);
@@ -1922,6 +2054,7 @@ ipcMain.handle('codiff:getFeatureFlags', async (event) => {
 });
 
 ipcMain.handle('codiff:askReviewAssistant', async (event, request) => {
+  assertLocalWindow(event.sender.id, 'askReviewAssistant');
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const state = await readRepositoryStateWithConfig(
@@ -1934,6 +2067,7 @@ ipcMain.handle('codiff:askReviewAssistant', async (event, request) => {
 });
 
 ipcMain.handle('codiff:createWalkthroughCommit', async (event, request) => {
+  assertConnectedWindow(event.sender.id);
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const result = await createWalkthroughCommit(host, repositoryPath, request, (chunk) => {
     if (!event.sender.isDestroyed()) {
@@ -1947,6 +2081,7 @@ ipcMain.handle('codiff:createWalkthroughCommit', async (event, request) => {
 });
 
 ipcMain.handle('codiff:updateWalkthroughCommitMessage', async (event, request) => {
+  assertLocalWindow(event.sender.id, 'updateWalkthroughCommitMessage');
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const state = await readRepositoryStateWithConfig(
@@ -1959,17 +2094,22 @@ ipcMain.handle('codiff:updateWalkthroughCommitMessage', async (event, request) =
 });
 
 ipcMain.handle('codiff:submitPullRequestComment', async (event, request) => {
+  assertLocalWindow(event.sender.id, 'submitPullRequestComment');
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   return submitPullRequestComment(host, repositoryPath, request);
 });
 
 ipcMain.handle('codiff:submitPullRequestReview', async (event, request) => {
+  assertLocalWindow(event.sender.id, 'submitPullRequestReview');
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   return submitPullRequestReview(host, repositoryPath, request);
 });
 
 ipcMain.handle('codiff:getDiffSectionContent', async (event, request) => {
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  if (host.id !== 'local' && request?.source?.type === 'pull-request') {
+    throw new Error('PR/MR reviews are unavailable for remote repositories.');
+  }
   return readDiffSectionContent(host, repositoryPath, {
     ...request,
     showWhitespace: request?.showWhitespace ?? config.settings.showWhitespace,
@@ -1978,11 +2118,17 @@ ipcMain.handle('codiff:getDiffSectionContent', async (event, request) => {
 
 ipcMain.handle('codiff:getDiffImageContent', async (event, request) => {
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  if (host.id !== 'local' && request?.source?.type === 'pull-request') {
+    throw new Error('PR/MR reviews are unavailable for remote repositories.');
+  }
   return readDiffImageContent(host, repositoryPath, request);
 });
 
 ipcMain.handle('codiff:getRepositoryHistory', async (event, limit, source) => {
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
+  if (host.id !== 'local' && source?.type === 'pull-request') {
+    throw new Error('PR/MR reviews are unavailable for remote repositories.');
+  }
   return listRepositoryHistory(host, repositoryPath, limit, source);
 });
 
@@ -2043,6 +2189,7 @@ ipcMain.handle('codiff:findDefinitions', (event, request) => {
 });
 
 ipcMain.handle('codiff:openFile', async (event, filePath, lineNumber) => {
+  assertLocalWindow(event.sender.id, 'Open in Editor');
   const { repositoryPath: repositoryRoot } = getWindowRepository(event.sender.id);
   const repositoryFilePath = validateRepositoryPath(filePath);
   const absolutePath = resolve(repositoryRoot, repositoryFilePath);
@@ -2058,6 +2205,7 @@ ipcMain.handle('codiff:openFile', async (event, filePath, lineNumber) => {
 });
 
 ipcMain.handle('codiff:showInFolder', (event, filePath) => {
+  assertLocalWindow(event.sender.id, 'Show in Folder');
   const { repositoryPath: repositoryRoot } = getWindowRepository(event.sender.id);
   const repositoryFilePath = validateRepositoryPath(filePath);
   const absolutePath = resolve(repositoryRoot, repositoryFilePath);
@@ -2069,6 +2217,17 @@ ipcMain.handle('codiff:showInFolder', (event, filePath) => {
   }
 });
 
-ipcMain.handle('codiff:getRelativePath', (event, filePath) =>
-  relative(getWindowRepository(event.sender.id).repositoryPath, filePath),
-);
+ipcMain.handle('codiff:getRepositoryHost', (event) => getRepositoryHostInfo(event.sender.id));
+ipcMain.handle('codiff:openRemoteRepository', async (_event, target) => {
+  if (typeof target !== 'string' || !parseRepositoryTarget(target)) {
+    throw new Error('Enter an SSH repository such as devbox:~/src/app.');
+  }
+  await openRepositoryTarget(target);
+});
+ipcMain.handle('codiff:reconnectRepositoryHost', async (event) => {
+  const { host } = getWindowRepository(event.sender.id);
+  if (host.id !== 'local') {
+    await /** @type {import('./host/ssh-host.cjs').SshHost} */ (host).reconnect();
+  }
+  return getRepositoryHostInfo(event.sender.id);
+});

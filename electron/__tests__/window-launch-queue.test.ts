@@ -7,7 +7,7 @@ const { createWindowLaunchQueue } = require('../main/window-launch-queue.cjs') a
     clearTimeoutImpl?: (timer: unknown) => void;
     setTimeoutImpl?: (callback: () => void, delay: number) => unknown;
     timeoutMs?: number;
-  }) => { enqueue: <T>(launch: () => Promise<T>) => Promise<T> };
+  }) => { hasPending: () => boolean; enqueue: <T>(launch: () => Promise<T>) => Promise<T> };
 };
 
 const deferred = <T>() => {
@@ -75,4 +75,25 @@ test('a hung launch stops blocking the queue after the timeout', async () => {
   expect(timers.map(({ delay }) => delay)).toEqual([15_000]);
   timers[0].callback();
   expect(await second).toBe('second');
+});
+
+test('keeps pending launches alive beyond queue timeouts and clears after settlement', async () => {
+  const first = deferred<string>();
+  let timeout: () => void = () => {};
+  const queue = createWindowLaunchQueue({
+    setTimeoutImpl: (callback, delay) => {
+      expect(delay).toBe(60_000);
+      timeout = callback;
+      return 1;
+    },
+    clearTimeoutImpl: () => {},
+  });
+  const launched = queue.enqueue(() => first.promise);
+  expect(queue.hasPending()).toBe(true);
+  await flush();
+  timeout();
+  expect(queue.hasPending()).toBe(true);
+  first.resolve('done');
+  await launched;
+  expect(queue.hasPending()).toBe(false);
 });

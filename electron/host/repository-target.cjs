@@ -53,7 +53,7 @@ const parseRepositoryTarget = (value, { exists = existsSync } = {}) => {
     alias = `${url.username ? `${decodeURIComponent(url.username)}@` : ''}${hostname}`;
     port = url.port ? Number(url.port) : undefined;
     path = decodeURIComponent(url.pathname);
-    if (path.startsWith('/~/')) {
+    if (path === '/~' || path.startsWith('/~/')) {
       path = path.slice(1);
     }
   } else {

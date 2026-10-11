@@ -318,3 +318,19 @@ test('changes compare to the edit baseline across auto-save and undoing back to 
     expect.objectContaining({ baseVersion: 'version-1', content: originalContent }),
   );
 });
+
+test('disconnect pauses autosave without losing the draft and reconnect allows saving', async () => {
+  const store = createCodeEditingStore();
+  const entry = store.start(session)!;
+  store.setWritable(false);
+  entry.setDraft('unsaved remote draft\n');
+  await vi.advanceTimersByTimeAsync(CODE_AUTOSAVE_DELAY + 1);
+  expect(window.codiff.saveRepositoryFile).not.toHaveBeenCalled();
+  expect(entry.draftRef.current).toBe('unsaved remote draft\n');
+  expect(await entry.flush()).toBe(false);
+  store.setWritable(true);
+  await vi.advanceTimersByTimeAsync(CODE_AUTOSAVE_DELAY + 1);
+  expect(window.codiff.saveRepositoryFile).toHaveBeenCalledWith(
+    expect.objectContaining({ content: 'unsaved remote draft\n' }),
+  );
+});

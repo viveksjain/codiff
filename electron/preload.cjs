@@ -111,6 +111,22 @@ const codiff = {
     ipcRenderer.on('codiff:windowFullScreenChanged', listener);
     return () => ipcRenderer.removeListener('codiff:windowFullScreenChanged', listener);
   },
+  getRepositoryHost: () => ipcRenderer.invoke('codiff:getRepositoryHost'),
+  openRemoteRepository: (target) => ipcRenderer.invoke('codiff:openRemoteRepository', target),
+  reconnectRepositoryHost: () => ipcRenderer.invoke('codiff:reconnectRepositoryHost'),
+  onRepositoryHostChanged: (callback) => {
+    const listener = (
+      /** @type {Electron.IpcRendererEvent} */ _event,
+      /** @type {import('../core/types.ts').RepositoryHostInfo} */ info,
+    ) => callback(info);
+    ipcRenderer.on('codiff:repositoryHostChanged', listener);
+    return () => ipcRenderer.removeListener('codiff:repositoryHostChanged', listener);
+  },
+  onOpenRemoteRepositoryRequest: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('codiff:openRemoteRepositoryRequest', listener);
+    return () => ipcRenderer.removeListener('codiff:openRemoteRepositoryRequest', listener);
+  },
   onRepositoryChanged: (callback) => {
     /** @param {Electron.IpcRendererEvent} _event @param {{root: string}} change */
     const listener = (_event, change) => callback(change);

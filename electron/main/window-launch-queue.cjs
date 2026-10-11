@@ -15,18 +15,23 @@
 const createWindowLaunchQueue = ({
   clearTimeoutImpl = clearTimeout,
   setTimeoutImpl = setTimeout,
-  timeoutMs = 15_000,
+  timeoutMs = 60_000,
 } = {}) => {
   /** @type {Promise<void>} */
   let tail = Promise.resolve();
+  let pending = 0;
   return {
+    hasPending: () => pending > 0,
     /**
      * @template T
      * @param {() => Promise<T>} launch
      * @returns {Promise<T>}
      */
     enqueue: (launch) => {
-      const result = tail.then(launch);
+      pending += 1;
+      const result = tail.then(launch).finally(() => {
+        pending -= 1;
+      });
       tail = tail.then(
         () =>
           new Promise((resolve) => {

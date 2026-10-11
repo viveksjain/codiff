@@ -1,6 +1,6 @@
 # SSH Remote Phase 3 Entry Points Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Open SSH repositories from the terminal and app, preserve host identity, and show connection state with a reconnect action.
 
@@ -36,10 +36,10 @@
 
 **Interfaces:** Connection options add `port?: number`, asynchronous `getLocalEnvironment`, and `interactive?: boolean`. SSH host adds `getConnectionState(): 'connected' | 'disconnected' | 'closed'`, `onConnectionState(listener): () => void`, `reconnect(): Promise<void>`.
 
-- [ ] Add failing tests for explicit port, async environment, shared interactive master options, close rejection/process cleanup, reconnect notification, spawn exit 255 and unsupported stat.
-- [ ] Run those tests and record RED.
-- [ ] Apply one shared session limiter to exec, spawn and PTY; reserve a bounded cancellation channel. Keep slots until children close even when the caller aborts. Close cancels queued and active work before exiting the master; reject work after close. Preserve ChildProcess kill signal/killed semantics. Detect GNU/BSD stat using the actual required format.
-- [ ] Run SSH contract/failure/connection suites, TypeScript gate, check and build; record GREEN and commit explicit paths.
+- [x] Add failing tests for explicit port, async environment, shared interactive master options, close rejection/process cleanup, reconnect notification, spawn exit 255 and unsupported stat.
+- [x] Run those tests and record RED.
+- [x] Apply one shared session limiter to exec, spawn and PTY; reserve a bounded cancellation channel. Keep slots until children close even when the caller aborts. Close cancels queued and active work before exiting the master; reject work after close. Preserve ChildProcess kill signal/killed semantics. Detect GNU/BSD stat using the actual required format.
+- [x] Run SSH contract/failure/connection suites, TypeScript gate, check and build; record GREEN and commit explicit paths.
 
 ### Task 2: Parse and resolve remote repository targets
 
@@ -47,10 +47,10 @@
 
 **Interfaces:** `parseRepositoryTarget(value, {exists?})` returns `{alias, port?, path, hostId}` or null. `resolveRemoteRepository(host, path)` expands only `~`/`~/` using remote HOME, rejects other relative paths, resolves Git toplevel through host. `resolveRemoteSource(host, repositoryPath, {candidate?, range?})` classifies refs asynchronously. CLI handoff uses `CODIFF_REMOTE_TARGET` plus resolved `CODIFF_REPOSITORY_PATH` and existing source fields.
 
-- [ ] Add failing tests for SCP/URI/user/port, local colon precedence, malformed URL/option injection, remote HOME with spaces, remote branch/commit/range classification.
-- [ ] Run focused tests and record RED.
-- [ ] Recognize remote targets before local ref/path classification; preserve local parsing. Connect interactively in the CLI with shared master setup, then resolve paths/refs. Reject remote PR/plan and Phase 4 agent workflows before local access. Handoff the canonical target and resolved path. App CLI parsing preserves remote targets without `path.resolve` or local Git probes.
-- [ ] Run target/argument/command-line/SSH tests, check and build; commit explicit paths.
+- [x] Add failing tests for SCP/URI/user/port, local colon precedence, malformed URL/option injection, remote HOME with spaces, remote branch/commit/range classification.
+- [x] Run focused tests and record RED.
+- [x] Recognize remote targets before local ref/path classification; preserve local parsing. Connect interactively in the CLI with shared master setup, then resolve paths/refs. Reject remote PR/plan and Phase 4 agent workflows before local access. Handoff the canonical target and resolved path. App CLI parsing preserves remote targets without `path.resolve` or local Git probes.
+- [x] Run target/argument/command-line/SSH tests, check and build; commit explicit paths.
 
 ### Task 3: Own shared remote hosts
 
@@ -58,10 +58,10 @@
 
 **Interfaces:** `createHostRegistry({localHost, connect?, getLocalEnvironment?})` supplies `acquire(target): Promise<{host, release(): Promise<void>}>` and `close(): Promise<void>`. Acquisition is single-flight; refcounts include pending opens. Last release closes the host. Close rejects new acquisition and drains pending connections.
 
-- [ ] Add failing tests for concurrent opens, distinct ports, failed connect retry, last release, quit during connect and environment precedence.
-- [ ] Run focused tests and record RED.
-- [ ] Implement registry with async login environment merged under current process environment; share only identical destination/port identities.
-- [ ] Run registry tests, check and build; commit explicit paths.
+- [x] Add failing tests for concurrent opens, distinct ports, failed connect retry, last release, quit during connect and environment precedence.
+- [x] Run focused tests and record RED.
+- [x] Implement registry with async login environment merged under current process environment; share only identical destination/port identities.
+- [x] Run registry tests, check and build; commit explicit paths.
 
 ### Task 4: Wire host identity and app launch lifecycle
 
@@ -69,10 +69,10 @@
 
 **Interfaces:** Host-qualified keys preserve local bytes. Each window owns a registry lease and remote target metadata. IPC exposes repository host info and reconnect; missing window context throws. Launch queues report failures and allow enough time for the 30-second master setup.
 
-- [ ] Add failing tests for local/remote/two-host identity, strict missing context, launch pending state/timeout, and host-qualified persisted state.
-- [ ] Run focused tests and record RED.
-- [ ] Route startup, single-instance handoff and remote dialog opens through registry; resolve remote roots before window creation. Release on reuse, failed opens and close. Close registry at quit; prevent pending launches from triggering early quit. Key watcher/cache/review state by host; retain local last path and remote recents separately. Guard local-only IPC operations for remotes.
-- [ ] Run affected tests plus repository-over-SSH suites, TypeScript gate, check and build; commit explicit paths.
+- [x] Add failing tests for local/remote/two-host identity, strict missing context, launch pending state/timeout, and host-qualified persisted state.
+- [x] Run focused tests and record RED.
+- [x] Route startup, single-instance handoff and remote dialog opens through registry; resolve remote roots before window creation. Release on reuse, failed opens and close. Close registry at quit; prevent pending launches from triggering early quit. Key watcher/cache/review state by host; retain local last path and remote recents separately. Guard local-only IPC operations for remotes.
+- [x] Run affected tests plus repository-over-SSH suites, TypeScript gate, check and build; commit explicit paths.
 
 ### Task 5: Add remote UI and reconnect behavior
 
@@ -80,12 +80,23 @@
 
 **Interfaces:** API provides `getRepositoryHost`, `openRemoteRepository`, `reconnectRepositoryHost`, `onRepositoryHostChanged`, `onOpenRemoteRepositoryRequest`. Host info carries id, label, target, state and recent targets.
 
-- [ ] Add focused UI tests where the existing component harness supports them; pin remote capabilities and state keys in unit tests.
-- [ ] Add File menu command, one-field dialog (`devbox:~/src/app`) and recents, host title indicator, lost-connection banner and reconnect action. Keep loaded diffs; disable remote writes/commit/refresh/walkthrough while disconnected. Hide PR/MR/editor/folder and unsupported local-file workflows.
-- [ ] Run affected tests, check and build; commit explicit paths.
+- [x] Add focused UI tests where the existing component harness supports them; pin remote capabilities and state keys in unit tests.
+- [x] Add File menu command, one-field dialog (`devbox:~/src/app`) and recents, host title indicator, lost-connection banner and reconnect action. Keep loaded diffs; disable remote writes/commit/refresh/walkthrough while disconnected. Hide PR/MR/editor/folder and unsupported local-file workflows.
+- [x] Run affected tests, check and build; commit explicit paths.
 
 ### Task 6: Review and verify Phase 3
 
-- [ ] Request one fresh whole-phase code review under the native execution skill; resolve material findings and record deferrals.
-- [ ] Run full `vp test`, repository-over-SSH suites, TypeScript baseline gate, `vp check --fix`, then `vpr build`. Record results and commit remaining changes.
-- [ ] Update the progress ledger with completion and concrete Phase 4 next steps. Do not push or dispatch CI; Ubuntu validation remains deferred by the user.
+- [x] Request one fresh whole-phase code review under the native execution skill; resolve material findings and record deferrals.
+- [x] Run full `vp test`, repository-over-SSH suites, TypeScript baseline gate, `vp check --fix`, then `vpr build`. Record results and commit remaining changes.
+- [x] Update the progress ledger with completion and concrete Phase 4 next steps. Do not push or dispatch CI; Ubuntu validation remains deferred by the user.
+
+## Local completion evidence
+
+- Foundations committed as `5493ce1`; app identity, UI and reviewed lifecycle fixes completed locally. No push or CI dispatch.
+- Fresh whole-phase review: three Important findings fixed with regressions (reconnect racing close, canceled quit closing hosts, failed CLI handoff leaking a master); no Critical findings.
+- Full suite: 1,361 passed, 1 skipped; two unchanged baseline failures (bounded Git process count 16 vs 14 and fish source-flag completion).
+- SSH host suites: 117/117 passed. Nine repository suites over SSH: 163 passed, with only the same bounded-process baseline failure.
+- TypeScript baseline gate: 281 errors vs 282, no per-file increase. `vp check --fix` and `vpr build` passed; built files refreshed.
+- Built renderer visually checked with a mocked preload: remote title, preserved nonempty diff while disconnected, reconnect, remote dialog/recents and submission. Only preview favicon 404 in console.
+- Deferred minor: remote/folder source-menu keyboard ordering differs from visual ordering.
+- Next: Phase 4 remote environment capture, command resolution, runners/session readers and per-host agent behavior; then Phase 5 docs and benchmark/manual checklist. Ubuntu CI remains deferred by the no-push instruction.

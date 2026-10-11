@@ -4,6 +4,7 @@ import { expect, test } from 'vite-plus/test';
 const require = createRequire(import.meta.url);
 type WindowRepositoryState = {
   root: string;
+  hostLabel?: string;
   source:
     | { type: 'working-tree' }
     | { ref: string; type: 'branch-working-tree' }
@@ -80,4 +81,14 @@ test('restores the repository title after the renderer loads', async () => {
   await restoreRepositoryWindowTitleAfterLoad(target, Promise.resolve(state));
 
   expect(title).toBe('MyCoolRepo · Codiff');
+});
+
+test('remote titles identify the host and repository path', () => {
+  expect(
+    getRepositoryWindowTitle({
+      root: '/srv/app',
+      hostLabel: 'devbox',
+      source: { type: 'working-tree' },
+    }),
+  ).toBe('devbox: /srv/app · Codiff');
 });

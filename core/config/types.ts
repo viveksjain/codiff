@@ -17,6 +17,7 @@ export type CodiffSettings = {
   openAIReasoningEffort: string;
   opencodeModel: string;
   piModel: string;
+  recentRemoteRepositories?: ReadonlyArray<string>;
   reviewCommentsPrefix: string;
   showOutdated: boolean;
   showWhitespace: boolean;

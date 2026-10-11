@@ -345,3 +345,19 @@ test('window identity matching requires exact identity matches', () => {
     null,
   );
 });
+
+test('qualifies remote window identities while preserving local keys', async () => {
+  await using directory = await createTemporaryDirectory('codiff-host-window-identity-');
+  await initRepository(directory.path);
+  const local = await getWindowIdentity({ ...host, id: 'local' }, directory.path);
+  const first = await getWindowIdentity({ ...host, id: 'ssh://first' }, directory.path);
+  const second = await getWindowIdentity({ ...host, id: 'ssh://second' }, directory.path);
+  expect(local?.key).toBe(`${local?.repositoryRoot}\0working-tree`);
+  expect(first?.key).toBe(`ssh://first\0${local?.key}`);
+  expect(second?.key).toBe(`ssh://second\0${local?.key}`);
+  const stateIdentity = await getWindowIdentityForRepositoryState(
+    { ...host, id: 'ssh://first' },
+    { root: local!.repositoryRoot, source: { type: 'working-tree' } },
+  );
+  expect(stateIdentity?.key).toBe(first?.key);
+});

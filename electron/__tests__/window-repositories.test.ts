@@ -19,19 +19,11 @@ const { createWindowRepositories } = require('../window-repositories.cjs') as {
 const localHost = { id: 'local', label: '' } as RepositoryHost;
 const otherHost = { id: 'other', label: 'other' } as RepositoryHost;
 
-test('falls back to the local host and the current launch path', () => {
-  let launchPath = '/first';
-  const repositories = createWindowRepositories({ getLaunchPath: () => launchPath, localHost });
-  expect(repositories.get(1)).toEqual({ host: localHost, repositoryPath: '/first' });
-  launchPath = '/second';
-  expect(repositories.get(1).repositoryPath).toBe('/second');
-});
-
-test('returns the stored host and path for a window until it is deleted', () => {
-  const repositories = createWindowRepositories({ getLaunchPath: () => '/launch', localHost });
+test('missing window context fails instead of falling back to local execution', () => {
+  const repositories = createWindowRepositories({ getLaunchPath: () => '/local', localHost });
+  expect(() => repositories.get(1)).toThrow(/context/);
   repositories.set(7, { host: otherHost, repositoryPath: '/srv/app' });
   expect(repositories.get(7)).toEqual({ host: otherHost, repositoryPath: '/srv/app' });
-  expect(repositories.get(8)).toEqual({ host: localHost, repositoryPath: '/launch' });
   repositories.delete(7);
-  expect(repositories.get(7)).toEqual({ host: localHost, repositoryPath: '/launch' });
+  expect(() => repositories.get(7)).toThrow(/context/);
 });

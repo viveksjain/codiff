@@ -881,6 +881,7 @@ const getNarrativeWalkthroughCacheKey = (
     .update(
       JSON.stringify({
         agent: agent.id,
+        ...(state.hostId ? { hostId: state.hostId } : {}),
         diff: state.files.map((file) => ({
           fingerprint: file.fingerprint,
           oldPath: file.oldPath,

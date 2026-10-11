@@ -339,6 +339,7 @@ function MessageDraft({
 
 export function CommitView({
   branch,
+  disabled = false,
   draft,
   model,
   onCommit,
@@ -346,11 +347,12 @@ export function CommitView({
   onUpdateMessage,
 }: {
   branch: string | null;
+  disabled?: boolean;
   draft: CommitDraftState;
   model: CommitModel;
   onCommit: CommitHandler;
   onCommitOutput?: CommitOutputSubscriber;
-  onUpdateMessage: CommitMessageHandler;
+  onUpdateMessage?: CommitMessageHandler;
 }) {
   const selected = draft.commitSelected;
   const selectedFiles = model.files.filter((file) => selected.has(file.path));
@@ -372,15 +374,17 @@ export function CommitView({
 
   const committed = result?.status === 'committed';
   const canCommit =
+    !disabled &&
     status === 'idle' &&
     !committed &&
     !updating &&
     selectedFiles.length > 0 &&
     subject.trim().length > 0;
-  const canUpdate = !allSelected && selectedFiles.length > 0 && !committed;
+  const canUpdate =
+    !disabled && !!onUpdateMessage && !allSelected && selectedFiles.length > 0 && !committed;
 
   const updateMessage = async () => {
-    if (!canUpdate || updating) {
+    if (!canUpdate || updating || !onUpdateMessage) {
       return;
     }
     setUpdating(true);

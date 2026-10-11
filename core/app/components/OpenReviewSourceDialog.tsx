@@ -3,7 +3,7 @@ import type { OpenReviewSourceKind } from '../../types.ts';
 import { Button } from './Button.tsx';
 
 const dialogCopy: Record<
-  OpenReviewSourceKind,
+  OpenReviewSourceKind | 'remote',
   { description: string; label: string; placeholder: string; title: string }
 > = {
   branch: {
@@ -24,16 +24,24 @@ const dialogCopy: Record<
     placeholder: '#123 or https://github.com/owner/repo/pull/123',
     title: 'Open PR',
   },
+  remote: {
+    description: 'Open a repository using your SSH config.',
+    label: 'Repository',
+    placeholder: 'devbox:~/src/app',
+    title: 'Open Remote Repository',
+  },
 };
 
 export function OpenReviewSourceDialog({
   kind,
   onClose,
   onOpen,
+  recentTargets = [],
 }: {
-  kind: OpenReviewSourceKind;
+  kind: OpenReviewSourceKind | 'remote';
   onClose: () => void;
   onOpen: (value: string) => Promise<void>;
+  recentTargets?: ReadonlyArray<string>;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -110,6 +118,22 @@ export function OpenReviewSourceDialog({
             type="text"
             value={value}
           />
+          {recentTargets.length ? (
+            <div className="open-remote-recents">
+              <span>Recent repositories</span>
+              {recentTargets.map((target) => (
+                <button
+                  className="open-review-source-menu-item"
+                  disabled={submitting}
+                  key={target}
+                  onClick={() => setValue(target)}
+                  type="button"
+                >
+                  {target}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {error ? (
             <p className="open-review-source-error" id="open-review-source-error" role="alert">
               {error}

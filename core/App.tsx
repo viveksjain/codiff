@@ -44,6 +44,7 @@ import {
   normalizeCodeFontSizePreference,
   useDocumentAppearance,
 } from './app/hooks/useDocumentAppearance.ts';
+import { useRepositoryHost } from './app/hooks/useRepositoryHost.tsx';
 import { useResizableSidebar } from './app/hooks/useResizableSidebar.ts';
 import { useReviewFileState } from './app/hooks/useReviewState.ts';
 import { createDefaultConfig } from './config/defaults.ts';
@@ -83,6 +84,7 @@ import {
   haveReloadedFilesChanged,
   writeReloadSelection,
 } from './lib/reload-selection.ts';
+import { getRepositoryStateKey } from './lib/repository-key.ts';
 import { resolveReviewCommandTarget } from './lib/review-command-target.ts';
 import {
   buildReviewCommentsMarkdown,
@@ -205,6 +207,8 @@ export default function App() {
   const [planDocument, setPlanDocument] = useState<CodiffMarkdownDocument | null>(null);
   const [codeEditingStore] = useState(createCodeEditingStore);
   useUnsavedCodeEditsGuard(codeEditingStore);
+  const { connectionBanner, disconnected, hostInfo, openRemoteDialog, remoteDialog } =
+    useRepositoryHost(codeEditingStore);
   const [planLoadError, setPlanLoadError] = useState<string | null>(null);
   const [loadingSectionIds, setLoadingSectionIds] = useState<ReadonlySet<string>>(() => new Set());
   const [openReviewSourceKind, setOpenReviewSourceKind] = useState<OpenReviewSourceKind | null>(
@@ -235,7 +239,7 @@ export default function App() {
   const persistViewed = useCallback((nextViewed: Record<string, string>) => {
     const currentState = stateRef.current;
     if (currentState && usesViewedFileState(currentState.source)) {
-      writeViewed(currentState.root, nextViewed);
+      writeViewed(getRepositoryStateKey(currentState), nextViewed);
     }
   }, []);
   const {
@@ -748,7 +752,7 @@ export default function App() {
       setWalkthroughLoading(false);
 
       const nextViewed = usesViewedFileState(orderedState.source)
-        ? readViewed(orderedState.root)
+        ? readViewed(getRepositoryStateKey(orderedState))
         : {};
       // Reopen the commit view after a reload, but only while it would still be
       // openable (same conditions as openCommitView); e.g. once the commit
@@ -1067,7 +1071,7 @@ export default function App() {
               ? selectedPathRef.current
               : (orderedState.files[0]?.path ?? null);
           const nextViewed = usesViewedFileState(orderedState.source)
-            ? readViewed(orderedState.root)
+            ? readViewed(getRepositoryStateKey(orderedState))
             : {};
           const walkthroughNeedsRefresh = haveChangedFiles(currentState.files, orderedState.files);
 
@@ -1303,7 +1307,7 @@ export default function App() {
   // re-renders the files whose fingerprints actually moved.
   const refreshRepository = useCallback(() => {
     const previousState = stateRef.current;
-    if (!previousState || pendingSource) {
+    if (!previousState || pendingSource || disconnected) {
       return;
     }
 
@@ -1368,6 +1372,7 @@ export default function App() {
       });
   }, [
     bumpItemVersion,
+    disconnected,
     historyLimit,
     mainModeRef,
     pendingSource,
@@ -1432,7 +1437,9 @@ export default function App() {
           const session = sourceSessionsRef.current.get(getSourceKey(orderedState.source));
           const nextViewed =
             session?.viewed ??
-            (usesViewedFileState(orderedState.source) ? readViewed(orderedState.root) : {});
+            (usesViewedFileState(orderedState.source)
+              ? readViewed(getRepositoryStateKey(orderedState))
+              : {});
           const nextSelectedPath =
             session?.selectedPath &&
             orderedState.files.some((file) => file.path === session.selectedPath)
@@ -1523,9 +1530,15 @@ export default function App() {
     [selectSource],
   );
 
-  const showOpenReviewSourceDialog = useCallback((kind: OpenReviewSourceKind) => {
-    setOpenReviewSourceKind(kind);
-  }, []);
+  const showOpenReviewSourceDialog = useCallback(
+    (kind: OpenReviewSourceKind) => {
+      if (hostInfo.remote && kind === 'pull-request') {
+        return;
+      }
+      setOpenReviewSourceKind(kind);
+    },
+    [hostInfo.remote],
+  );
 
   const openRepositoryFolder = useCallback(() => {
     void window.codiff.openRepositoryFolder().catch(() => {});
@@ -1538,9 +1551,11 @@ export default function App() {
 
   const commandBarCommands = useAppCommands({
     changeSidebarMode,
+    disconnected,
     focusFileFilter,
     getReviewCommandTarget,
     onOpenDiffSearch: openDiffSearch,
+    onOpenRemoteRepository: openRemoteDialog,
     onOpenReviewSource: showOpenReviewSourceDialog,
     onOpenSelectedFile: openSelectedFile,
     onRefreshRepository: refreshRepository,
@@ -1548,6 +1563,7 @@ export default function App() {
     onToggleViewed: toggleViewed,
     onToggleWordWrap: toggleWordWrap,
     preferencesRef,
+    remote: hostInfo.remote,
     reviewCommentsRef,
     stateRef,
     viewedRef,
@@ -1633,38 +1649,46 @@ export default function App() {
       !terminalHelperStatus.installed;
 
     return (
-      <main className="empty-state">
-        <div className="empty-panel squircle">
-          {showFirstRun ? (
-            <FirstRunPanel
-              agentSkillInstalled={agentSkillStatus.installed}
-              agentSkillInstalling={agentSkillInstalling}
-              agentSkillLabel={agentSkillLabel}
-              installing={terminalHelperInstalling}
-              onInstallAgentSkill={installAgentSkill}
-              onInstallTerminalHelper={installTerminalHelper}
-            />
-          ) : (
-            <RepositoryLoadErrorPanel error={loadError} />
-          )}
-        </div>
-      </main>
+      <>
+        <main className="empty-state">
+          <div className="empty-panel squircle">
+            {showFirstRun ? (
+              <FirstRunPanel
+                agentSkillInstalled={agentSkillStatus.installed}
+                agentSkillInstalling={agentSkillInstalling}
+                agentSkillLabel={agentSkillLabel}
+                installing={terminalHelperInstalling}
+                onInstallAgentSkill={installAgentSkill}
+                onInstallTerminalHelper={installTerminalHelper}
+              />
+            ) : (
+              <RepositoryLoadErrorPanel error={loadError} />
+            )}
+          </div>
+        </main>
+        {remoteDialog}
+        {connectionBanner}
+      </>
     );
   }
 
   if (!state) {
     return (
-      <main className={`loading${launchOptions.walkthrough ? ' codex' : ' pulse'}`}>
-        {launchOptions.walkthrough ? (
-          <WalkthroughProgress
-            phase={walkthroughProgress.phase}
-            responseLabelIndex={walkthroughProgress.responseLabelIndex}
-            stageRevision={walkthroughProgress.stageRevision}
-          />
-        ) : (
-          'Thinking…'
-        )}
-      </main>
+      <>
+        <main className={`loading${launchOptions.walkthrough ? ' codex' : ' pulse'}`}>
+          {launchOptions.walkthrough ? (
+            <WalkthroughProgress
+              phase={walkthroughProgress.phase}
+              responseLabelIndex={walkthroughProgress.responseLabelIndex}
+              stageRevision={walkthroughProgress.stageRevision}
+            />
+          ) : (
+            'Thinking…'
+          )}
+        </main>
+        {remoteDialog}
+        {connectionBanner}
+      </>
     );
   }
 
@@ -1716,6 +1740,7 @@ export default function App() {
     activeSearchMatch: activeDiffSearchMatch,
     agentId: activeAgentBackend,
     agentLabel,
+    allowMarkdownEditing: !hostInfo.remote,
     codeEditingStore,
     codeQualityFindings: state.codeQualityFindings,
     collapsed,
@@ -1733,7 +1758,7 @@ export default function App() {
     itemVersionByKey,
     keymap: codiffConfig.keymap,
     loadingSectionIds,
-    onAskCodex: askCodex,
+    onAskCodex: hostInfo.remote ? undefined : askCodex,
     onCommentDraftChange: updateActiveReviewCommentDraft,
     onCreateComment: createComment,
     onDeleteComment: deleteComment,
@@ -1741,17 +1766,20 @@ export default function App() {
     onLoadImageContent: window.codiff.getDiffImageContent,
     onLoadSection: loadDiffSection,
     onLoadSectionContents: loadDiffSectionContents,
-    onOpenDefinition: (candidate: DefinitionCandidate) => {
-      void window.codiff.openFile(candidate.path, candidate.lineNumber).catch(() => {});
-    },
-    onOpenFile: openFile,
-    onRefreshMarkdown: refreshMarkdownFile,
+    onOpenDefinition: hostInfo.remote
+      ? undefined
+      : (candidate: DefinitionCandidate) => {
+          void window.codiff.openFile(candidate.path, candidate.lineNumber).catch(() => {});
+        },
+    onOpenFile: hostInfo.remote ? undefined : openFile,
+    onRefreshMarkdown: hostInfo.remote ? undefined : refreshMarkdownFile,
     onSaveCommentEdit: updateComment,
     onSelectPathFromScroll: updateSelectedPathFromScroll,
     onSubmitComment: submitPullRequestComment,
     onToggleCollapsed: toggleCollapsed,
     onToggleViewed: toggleViewed,
     onUpdateComment: updateComment,
+    repositoryConnected: !disconnected,
     searchQuery: diffSearchQuery,
     showWhitespace,
     source: state.source,
@@ -1860,11 +1888,16 @@ export default function App() {
           </>
         }
         mode={sidebarMode}
-        modes={reviewModes}
+        modes={
+          hostInfo.remote ? reviewModes.filter((mode) => mode.value !== 'walkthrough') : reviewModes
+        }
         onModeChange={changeSidebarMode}
         onToggleSidebar={toggleSidebar}
         repository={
           <span className="review-top-bar-repository review-top-bar-repository-path">
+            {hostInfo.remote ? (
+              <span className="review-top-bar-remote-host">{hostInfo.label}: </span>
+            ) : null}
             <span className="review-top-bar-repository-head">{repositoryPathParts.head}</span>
             <span className="review-top-bar-repository-tail">{repositoryPathParts.tail}</span>
           </span>
@@ -1876,6 +1909,8 @@ export default function App() {
           <OpenReviewSourceMenu
             onOpen={showOpenReviewSourceDialog}
             onOpenFolder={openRepositoryFolder}
+            onOpenRemote={openRemoteDialog}
+            remote={hostInfo.remote}
           />
         }
         toggleTitle={`${sidebarCollapsed ? 'Expand' : 'Collapse'} sidebar (${getShortcutLabel(
@@ -1883,9 +1918,11 @@ export default function App() {
           'toggleSidebar',
         )})`}
       />
+      {connectionBanner}
       <RepositoryChangeBanner
         onRefresh={refreshRepository}
         visible={
+          !disconnected &&
           localChangesDetected &&
           ((pendingSource ?? state.source).type === 'working-tree' ||
             (pendingSource ?? state.source).type === 'branch-working-tree')
@@ -1913,6 +1950,7 @@ export default function App() {
         onClose={closeCommandBar}
         visible={commandBarVisible}
       />
+      {remoteDialog}
       {openReviewSourceKind ? (
         <OpenReviewSourceDialog
           kind={openReviewSourceKind}
@@ -1937,6 +1975,7 @@ export default function App() {
                   }
                 : null
           }
+          commitDisabled={disconnected}
           commitFiles={state.files}
           commitViewOpen={showPlainCommitView}
           currentSource={pendingSource ?? state.source}
@@ -1986,11 +2025,12 @@ export default function App() {
         ) : showPlainCommitView ? (
           <CommitView
             branch={state.branch}
+            disabled={disconnected}
             draft={narrativeNavigation}
             model={plainCommitModel}
             onCommit={commitWalkthrough}
             onCommitOutput={subscribeToCommitOutput}
-            onUpdateMessage={updateWalkthroughCommitMessage}
+            onUpdateMessage={hostInfo.remote ? undefined : updateWalkthroughCommitMessage}
           />
         ) : showNarrativeWalkthrough && narrativeWalkthrough ? (
           <NarrativeWalkthroughView

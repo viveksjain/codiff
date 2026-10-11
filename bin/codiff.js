@@ -17,6 +17,7 @@ import {
 } from './arguments.js';
 import { completionShells, generateCompletionScript } from './completions.js';
 import { waitForPlanResult } from './plan-result.js';
+import { createRemoteHandoff } from './remote-handoff.js';
 import { runUpdateCommand } from './update-command.js';
 import { getUpdateNotice } from './update-notice.js';
 
@@ -134,6 +135,7 @@ const runCodiffUpdate = () => {
   });
 };
 
+let remoteHandoff;
 const run = async () => {
   const rawArguments = process.argv.slice(2);
   if (rawArguments.length === 1 && rawArguments[0] === 'update') {
@@ -209,28 +211,22 @@ const run = async () => {
       getLocalEnvironment: getCommandEnvironment,
     });
     const adopted = await connection.check();
-    try {
-      await connection.ensureMaster();
-      const host = await connectSshHost({ alias: target.alias, connection });
-      parsedArguments.requestedPath = await resolveRemoteRepository(host, target.path);
-      const source = await resolveRemoteSource(host, parsedArguments.requestedPath, {
-        candidate: parsedArguments.remoteSourceCandidate,
-        range: parsedArguments.range,
-      });
-      if (source?.type === 'commit') {
-        parsedArguments.commitRef = source.ref;
-      }
-      if (source?.type === 'branch-working-tree') {
-        parsedArguments.branchRef = source.ref;
-      }
-      // Leave the master alive for the app to adopt using the same destination,
-      // port, and ControlPath. The app owns its lifetime after the handoff.
-    } catch (error) {
-      if (!adopted) {
-        await connection.exitMaster().catch(() => {});
-      }
-      throw error;
+    remoteHandoff = createRemoteHandoff(connection, adopted);
+    await connection.ensureMaster();
+    const host = await connectSshHost({ alias: target.alias, connection });
+    parsedArguments.requestedPath = await resolveRemoteRepository(host, target.path);
+    const source = await resolveRemoteSource(host, parsedArguments.requestedPath, {
+      candidate: parsedArguments.remoteSourceCandidate,
+      range: parsedArguments.range,
+    });
+    if (source?.type === 'commit') {
+      parsedArguments.commitRef = source.ref;
     }
+    if (source?.type === 'branch-working-tree') {
+      parsedArguments.branchRef = source.ref;
+    }
+    // Leave the master alive for the app to adopt using the same destination,
+    // port, and ControlPath. The app owns its lifetime after the handoff.
   }
 
   const {
@@ -350,8 +346,7 @@ const run = async () => {
     process.env.ELECTRON_RENDERER_URL || (await detectDevServer(DEV_SERVER_URL)) || '';
 
   if (!rendererURL && !existsSync(resolve(root, 'dist/index.html'))) {
-    console.error('Codiff has not been built yet. Run `pnpm build` first, or start `pnpm dev`.');
-    process.exit(1);
+    throw new Error('Codiff has not been built yet. Run `pnpm build` first, or start `pnpm dev`.');
   }
 
   const planResultDirectory = planFilePath
@@ -396,11 +391,13 @@ const run = async () => {
 
   const { default: electron } = await import('electron');
 
-  const child = spawn(electron, [root], {
-    detached: true,
-    env: childEnv,
-    stdio: 'ignore',
-  });
+  const spawnElectron = () =>
+    spawn(electron, [root], {
+      detached: true,
+      env: childEnv,
+      stdio: 'ignore',
+    });
+  const child = remoteHandoff ? await remoteHandoff.launch(spawnElectron) : spawnElectron();
 
   child.unref();
   if (planResultDirectory) {
@@ -422,7 +419,9 @@ const run = async () => {
   }
 };
 
-run().catch((error) => {
-  process.stderr.write(`codiff: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+run()
+  .catch((error) => {
+    process.stderr.write(`codiff: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  })
+  .finally(() => remoteHandoff?.cleanup());

@@ -1,4 +1,5 @@
 import type { GitFileStatus, RepositoryState, ReviewSource } from '../types.ts';
+import { getRepositoryStateKey } from './repository-key.ts';
 import { getSourceKey } from './source.ts';
 
 const reloadSelectionStorageKey = 'codiff.reloadSelection.v3';
@@ -102,7 +103,8 @@ const isReloadSelection = (value: unknown): value is ReloadSelection =>
   isReviewSource(value.source);
 
 const getMatchingSelection = (selection: ReloadSelection | null, state: RepositoryState) =>
-  selection?.root === state.root && getSourceKey(selection.source) === getSourceKey(state.source)
+  selection?.root === getRepositoryStateKey(state) &&
+  getSourceKey(selection.source) === getSourceKey(state.source)
     ? selection
     : null;
 
@@ -223,7 +225,7 @@ export const writeReloadSelection = (
         })),
         historySource,
         mainMode,
-        root: state.root,
+        root: getRepositoryStateKey(state),
         selectedPath,
         source: state.source,
       } satisfies ReloadSelection),

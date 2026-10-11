@@ -22,6 +22,7 @@ import type {
   RepositoryHistory,
   RepositoryFileDocument,
   RepositoryState,
+  RepositoryHostInfo,
   ReviewAssistantRequest,
   ReviewAssistantResult,
   ReviewSource,
@@ -77,6 +78,7 @@ declare global {
       getPreferences: () => Promise<CodiffPreferences>;
       getRepositoryFile: (path: string) => Promise<RepositoryFileDocument>;
       getRepositoryHistory: (limit?: number, source?: ReviewSource) => Promise<RepositoryHistory>;
+      getRepositoryHost: () => Promise<RepositoryHostInfo>;
       getRepositoryState: (source?: ReviewSource) => Promise<RepositoryState>;
       getTerminalHelperStatus: () => Promise<TerminalHelperStatus>;
       getUpdateStatus: () => Promise<CodiffUpdateStatus>;
@@ -96,10 +98,12 @@ declare global {
             | { deleted: false; document: CodiffMarkdownDocument; id: string },
         ) => void,
       ) => () => void;
+      onOpenRemoteRepositoryRequest: (callback: () => void) => () => void;
       onOpenReviewSource: (callback: (kind: OpenReviewSourceKind) => void) => () => void;
       onPlanCloseRequested: (callback: () => void) => () => void;
       onRefreshRequest: (callback: () => void) => () => void;
       onRepositoryChanged: (callback: (change: { root: string }) => void) => () => void;
+      onRepositoryHostChanged: (callback: (info: RepositoryHostInfo) => void) => () => void;
       onUpdateStatusChanged: (callback: (status: CodiffUpdateStatus) => void) => () => void;
       onWalkthroughCommitOutput: (callback: (chunk: string) => void) => () => void;
       onWalkthroughProgress: (callback: (progress: WalkthroughProgressEvent) => void) => () => void;
@@ -107,7 +111,9 @@ declare global {
       openConfigFile: () => Promise<void>;
       openFile: (path: string, lineNumber?: number) => Promise<void>;
       openReleasePage: () => Promise<void>;
+      openRemoteRepository: (target: string) => Promise<void>;
       openRepositoryFolder: () => Promise<void>;
+      reconnectRepositoryHost: () => Promise<RepositoryHostInfo>;
       resetCodeFontSize: () => Promise<void>;
       resolvePullRequestUrl: (value: string) => Promise<string>;
       saveMarkdownDocument: (

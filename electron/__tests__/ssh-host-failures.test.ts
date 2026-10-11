@@ -127,6 +127,37 @@ test('unsupported stat implementations are rejected during connect', async () =>
   ).rejects.toThrow(/GNU or BSD stat/);
 });
 
+test('close drains an explicit reconnect before exiting its master', async () => {
+  const connection = createFakeConnection(['__codiff_shell__:/bin/bash\n', 'gnu\n']);
+  const host = await connectSshHost({ connection });
+  let finishReconnect!: () => void;
+  let markStarted!: () => void;
+  let masterRunning = false;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  connection.ensureMaster = async () => {
+    markStarted();
+    await new Promise<void>((resolve) => {
+      finishReconnect = resolve;
+    });
+    masterRunning = true;
+  };
+  connection.exitMaster = async () => {
+    masterRunning = false;
+  };
+  const reconnect = host.reconnect();
+  const rejected = expect(reconnect).rejects.toThrow(/closed/i);
+  await started;
+  const closing = host.close();
+  // Let close reach its wait for in-flight master work.
+  await new Promise((resolve) => setImmediate(resolve));
+  finishReconnect();
+  await rejected;
+  await closing;
+  expect(masterRunning).toBe(false);
+});
+
 describe.skipIf(!findSshd())('SshHost connection failures', () => {
   test('closing rejects later work and kills an active remote process', async () => {
     await using sshd = await startTestSshd();
@@ -135,7 +166,7 @@ describe.skipIf(!findSshd())('SshHost connection failures', () => {
       controlDirectory: sshd.controlDirectory,
       sshConfigPath: sshd.sshConfigPath,
     });
-    const child = host.spawn('/bin/sh', ['-c', 'echo $$; exec sleep 60']);
+    const child = host.spawn('/bin/sh', ['-c', "trap '' TERM; echo $$; exec sleep 60"]);
     const pid = await new Promise<string>((resolve) =>
       child.stdout.once('data', (data) => resolve(data.toString().trim())),
     );

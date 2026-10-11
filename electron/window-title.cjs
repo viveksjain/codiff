@@ -3,7 +3,7 @@
 const { basename } = require('node:path');
 const { parseReviewUrl } = require('./review-source.cjs');
 
-/** @typedef {Pick<import('../core/types.ts').RepositoryState, 'root' | 'source'>} WindowRepositoryState */
+/** @typedef {Pick<import('../core/types.ts').RepositoryState, 'root' | 'source' | 'hostLabel'>} WindowRepositoryState */
 /** @typedef {{isDestroyed: () => boolean, setTitle: (title: string) => void}} WindowTitleTarget */
 
 /** @param {import('../core/types.ts').ReviewSource} source */
@@ -30,7 +30,9 @@ const getPlanWindowTitle = (planFile) => getCodiffWindowTitle(basename(planFile)
 const getRepositoryWindowTitle = (state) => {
   // Use the resolved source so aliases such as HEAD and a PR URL become the view the user opened.
   const sourceTitle = getWindowSourceTitle(state.source);
-  return getCodiffWindowTitle(`${basename(state.root)}${sourceTitle ? `/${sourceTitle}` : ''}`);
+  return getCodiffWindowTitle(
+    `${state.hostLabel ? `${state.hostLabel}: ${state.root}` : basename(state.root)}${sourceTitle ? `/${sourceTitle}` : ''}`,
+  );
 };
 
 /**

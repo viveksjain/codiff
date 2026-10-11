@@ -3,10 +3,18 @@ import { expect, test } from 'vite-plus/test';
 import type { RepositoryHost } from '../host/repository-host.cjs';
 const require = createRequire(import.meta.url);
 const {
+  formatRemoteRepositoryTarget,
   parseRepositoryTarget,
   resolveRemoteRepository,
   resolveRemoteSource,
 } = require('../host/repository-target.cjs');
+
+test('canonical remote targets round trip HOME and escaped path bytes', () => {
+  for (const value of ['devbox:~', 'devbox:~/src/a b', 'ssh://me@devbox:2222/srv/a%23b%25c']) {
+    const target = parseRepositoryTarget(value, { exists: () => false });
+    expect(parseRepositoryTarget(formatRemoteRepositoryTarget(target))).toEqual(target);
+  }
+});
 
 test('remote targets preserve path bytes and destination identity', () => {
   expect(parseRepositoryTarget('devbox:~/src/app', { exists: () => false })).toEqual({

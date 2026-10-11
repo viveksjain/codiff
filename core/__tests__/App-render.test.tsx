@@ -20,6 +20,7 @@ import type {
   NarrativeWalkthrough,
   PlanReview,
   RepositoryState,
+  RepositoryHostInfo,
   ReviewSource,
   WalkthroughProgressEvent,
 } from '../types.ts';
@@ -205,6 +206,13 @@ const createCodiffMock = (overrides: Partial<Window['codiff']> = {}): Window['co
     entries: [],
     root: '/repo',
   })),
+  getRepositoryHost: vi.fn(async () => ({
+    id: 'local',
+    label: '',
+    recentTargets: [],
+    remote: false,
+    state: 'connected' as const,
+  })),
   getRepositoryState: vi.fn(async () => repositoryState),
   getTerminalHelperStatus: vi.fn(async () => ({
     command: 'codiff',
@@ -232,10 +240,12 @@ const createCodiffMock = (overrides: Partial<Window['codiff']> = {}): Window['co
   onFindInDiffs: vi.fn(() => () => {}),
   onKeyboardLayoutChanged: vi.fn(() => () => {}),
   onMarkdownDocumentChanged: vi.fn(() => () => {}),
+  onOpenRemoteRepositoryRequest: vi.fn(() => () => {}),
   onOpenReviewSource: vi.fn(() => () => {}),
   onPlanCloseRequested: vi.fn(() => () => {}),
   onRefreshRequest: vi.fn(() => () => {}),
   onRepositoryChanged: vi.fn(() => () => {}),
+  onRepositoryHostChanged: vi.fn(() => () => {}),
   onUpdateStatusChanged: vi.fn(() => () => {}),
   onWalkthroughCommitOutput: vi.fn(() => () => {}),
   onWalkthroughProgress: vi.fn(() => () => {}),
@@ -243,7 +253,15 @@ const createCodiffMock = (overrides: Partial<Window['codiff']> = {}): Window['co
   openConfigFile: vi.fn(async () => {}),
   openFile: vi.fn(async () => {}),
   openReleasePage: vi.fn(async () => {}),
+  openRemoteRepository: vi.fn(async () => {}),
   openRepositoryFolder: vi.fn(async () => {}),
+  reconnectRepositoryHost: vi.fn(async () => ({
+    id: 'local',
+    label: '',
+    recentTargets: [],
+    remote: false,
+    state: 'connected' as const,
+  })),
   resetCodeFontSize: vi.fn(async () => {}),
   resolvePullRequestUrl: vi.fn(async () => 'https://github.com/owner/repo/pull/1'),
   saveMarkdownDocument: vi.fn(async (request) => ({
@@ -3947,4 +3965,99 @@ test('commit viewed progress synchronizes tree, walkthrough, and uncovered suppo
       'false',
     ]);
   });
+});
+
+test('remote review identifies the host, keeps its diff on loss, and reconnects', async () => {
+  const info: RepositoryHostInfo = {
+    id: 'ssh://devbox',
+    label: 'devbox',
+    recentTargets: [],
+    remote: true,
+    state: 'connected',
+  };
+  let changed!: (info: RepositoryHostInfo) => void;
+  let refresh!: () => void;
+  const getState = vi.fn(async () => ({
+    ...repositoryState,
+    files: [createChangedFile('src/app.ts')],
+    hostId: info.id,
+    hostLabel: info.label,
+  }));
+  window.codiff = createCodiffMock({
+    getRepositoryHost: vi.fn(async () => info),
+    getRepositoryState: getState,
+    onRefreshRequest: vi.fn((listener) => {
+      refresh = listener;
+      return () => {};
+    }),
+    onRepositoryHostChanged: vi.fn((listener) => {
+      changed = listener;
+      return () => {};
+    }),
+    reconnectRepositoryHost: vi.fn(async () => info),
+  });
+  await using app = await renderReact(<App />);
+  await waitFor(() =>
+    expect(app.container.querySelector('.review-top-bar-remote-host')?.textContent).toContain(
+      'devbox',
+    ),
+  );
+  expect(app.container.querySelector('.codiff-open-file-button')).toBeNull();
+  expect(
+    [...app.container.querySelectorAll('button[role="tab"]')].some(
+      (button) => button.textContent === 'Walkthrough',
+    ),
+  ).toBe(false);
+  const loadedPaths = [...app.container.querySelectorAll('.codiff-file-path')].map(
+    (path) => path.textContent,
+  );
+  expect(loadedPaths).toContain('src/app.ts');
+  await act(async () => changed({ ...info, state: 'disconnected' }));
+  expect(app.container.textContent).toContain('Lost connection to devbox.');
+  expect(
+    [...app.container.querySelectorAll('.codiff-file-path')].map((path) => path.textContent),
+  ).toEqual(loadedPaths);
+  const calls = getState.mock.calls.length;
+  await act(async () => refresh());
+  expect(getState).toHaveBeenCalledTimes(calls);
+  const reconnect = [...app.container.querySelectorAll<HTMLButtonElement>('button')].find(
+    (button) => button.textContent === 'Reconnect',
+  );
+  expect(reconnect).toBeDefined();
+  await act(async () => reconnect!.click());
+  await waitFor(() =>
+    expect(app.container.textContent).not.toContain('Lost connection to devbox.'),
+  );
+  expect(window.codiff.reconnectRepositoryHost).toHaveBeenCalledOnce();
+});
+
+test('remote dialog opens from a native menu request and lists recent targets', async () => {
+  let open!: () => void;
+  window.codiff = createCodiffMock({
+    getRepositoryHost: vi.fn(async () => ({
+      id: 'local',
+      label: '',
+      recentTargets: ['ssh://devbox/srv/app'],
+      remote: false,
+      state: 'connected' as const,
+    })),
+    onOpenRemoteRepositoryRequest: vi.fn((listener) => {
+      open = listener;
+      return () => {};
+    }),
+  });
+  await using app = await renderReact(<App />);
+  await waitFor(() => expect(window.codiff.getRepositoryHost).toHaveBeenCalled());
+  await act(async () => open());
+  const input = app.container.querySelector<HTMLInputElement>(
+    'input[placeholder="devbox:~/src/app"]',
+  );
+  expect(input).not.toBeNull();
+  expect(app.container.textContent).toContain('ssh://devbox/srv/app');
+  await act(async () => setInputValue(input!, 'devbox:~/src/app'));
+  const form = app.container.querySelector('form[role="dialog"]');
+  await act(async () =>
+    form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
+  );
+  expect(window.codiff.openRemoteRepository).toHaveBeenCalledWith('devbox:~/src/app');
 });

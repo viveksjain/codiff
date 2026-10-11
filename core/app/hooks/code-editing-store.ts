@@ -19,7 +19,7 @@ export type EditSession = {
 };
 
 // Each file owns its save queue, independently of mounted review surfaces.
-const createFileEditingStore = (onChange: () => void) => {
+const createFileEditingStore = (onChange: () => void, isWritable: () => boolean) => {
   const sessionRef = { current: null as EditSession | null };
   const draftRef = { current: '' };
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -46,10 +46,15 @@ const createFileEditingStore = (onChange: () => void) => {
   };
   const scheduleSave = () => {
     clearTimer();
-    timer = setTimeout(() => void flush(), CODE_AUTOSAVE_DELAY);
+    if (isWritable()) {
+      timer = setTimeout(() => void flush(), CODE_AUTOSAVE_DELAY);
+    }
   };
   const flush = (): Promise<boolean> => {
     clearTimer();
+    if (!isWritable()) {
+      return Promise.resolve(false);
+    }
     if (pendingWrite) {
       return pendingWrite.then((saved) => (saved ? flush() : false));
     }
@@ -148,6 +153,12 @@ const createFileEditingStore = (onChange: () => void) => {
     finish,
     flush,
     getSnapshot: () => sessionRef.current,
+    onWritableChange: () => {
+      clearTimer();
+      if (isWritable() && sessionRef.current?.dirty) {
+        scheduleSave();
+      }
+    },
     setDraft: (content: string) => {
       const current = sessionRef.current;
       if (!current || current.finishing === 'revert' || content === draftRef.current) {
@@ -175,6 +186,7 @@ export const getCodeEditKey = (sourceKey: string, itemId: string) =>
   JSON.stringify([sourceKey, itemId]);
 
 export const createCodeEditingStore = () => {
+  let writable = true;
   const entries = new Map<string, CodeEditingSession>();
   const listeners = new Set<() => void>();
   let snapshot: ReadonlyMap<string, EditSession> = new Map();
@@ -207,6 +219,14 @@ export const createCodeEditingStore = () => {
         const session = entry.getSnapshot();
         return session && (session.saving || entry.draftRef.current !== session.document.content);
       }),
+    setWritable: (value: boolean) => {
+      if (value !== writable) {
+        writable = value;
+        for (const entry of entries.values()) {
+          entry.onWritableChange();
+        }
+      }
+    },
     start: (session: EditSession) => {
       // Focused hunks and review sources can show the same working-tree file.
       // Share one disk writer per file; different files edit independently.
@@ -214,20 +234,23 @@ export const createCodeEditingStore = () => {
         return null;
       }
       const key = getCodeEditKey(session.sourceKey, session.item.id);
-      const entry = createFileEditingStore(() => {
-        const next = new Map(snapshot);
-        const current = entry.getSnapshot();
-        if (current) {
-          next.set(key, current);
-        } else {
-          next.delete(key);
-          entries.delete(key);
-        }
-        snapshot = next;
-        for (const listener of listeners) {
-          listener();
-        }
-      });
+      const entry = createFileEditingStore(
+        () => {
+          const next = new Map(snapshot);
+          const current = entry.getSnapshot();
+          if (current) {
+            next.set(key, current);
+          } else {
+            next.delete(key);
+            entries.delete(key);
+          }
+          snapshot = next;
+          for (const listener of listeners) {
+            listener();
+          }
+        },
+        () => writable,
+      );
       entries.set(key, entry);
       entry.draftRef.current = session.document.content;
       entry.setSession(session);

@@ -2,6 +2,7 @@ import { FolderOpenIcon as FolderOpen } from '@phosphor-icons/react/FolderOpen';
 import { GitBranchIcon as GitBranch } from '@phosphor-icons/react/GitBranch';
 import { GitCommitIcon as GitCommit } from '@phosphor-icons/react/GitCommit';
 import { GitPullRequestIcon as GitPullRequest } from '@phosphor-icons/react/GitPullRequest';
+import { GlobeIcon as Globe } from '@phosphor-icons/react/Globe';
 import { PlusIcon as Plus } from '@phosphor-icons/react/Plus';
 import {
   useCallback,
@@ -39,14 +40,21 @@ const menuActions: ReadonlyArray<{
 export function OpenReviewSourceMenu({
   onOpen,
   onOpenFolder,
+  onOpenRemote,
+  remote = false,
 }: {
   onOpen: (kind: OpenReviewSourceKind) => void;
   onOpenFolder: () => void;
+  onOpenRemote?: () => void;
+  remote?: boolean;
 }) {
   // The top bar creates a stacking context (backdrop-filter) that later
   // sibling rows paint over on non-macOS platforms, so the menu is portaled to
   // the document body and positioned from the trigger's viewport rect.
   const [menuPosition, setMenuPosition] = useState<{ left: number; top: number } | null>(null);
+  const actions = remote
+    ? menuActions.filter((action) => action.kind !== 'pull-request')
+    : menuActions;
   const open = menuPosition != null;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -166,7 +174,7 @@ export function OpenReviewSourceMenu({
               role="menu"
               style={{ left: menuPosition.left, top: menuPosition.top }}
             >
-              {menuActions.map((action, index) => (
+              {actions.map((action, index) => (
                 <button
                   className="open-review-source-menu-item"
                   key={action.kind}
@@ -185,6 +193,24 @@ export function OpenReviewSourceMenu({
                   <span>{action.label}</span>
                 </button>
               ))}
+              {onOpenRemote ? (
+                <button
+                  className="open-review-source-menu-item"
+                  onClick={() => {
+                    close();
+                    onOpenRemote();
+                  }}
+                  ref={(element) => {
+                    itemRefs.current[actions.length + 1] = element;
+                  }}
+                  role="menuitem"
+                  tabIndex={-1}
+                  type="button"
+                >
+                  <Globe aria-hidden size={15} weight="bold" />
+                  <span>Open Remote Repository</span>
+                </button>
+              ) : null}
               <div className="open-review-source-menu-separator" role="separator" />
               <button
                 className="open-review-source-menu-item"
@@ -193,7 +219,7 @@ export function OpenReviewSourceMenu({
                   onOpenFolder();
                 }}
                 ref={(element) => {
-                  itemRefs.current[menuActions.length] = element;
+                  itemRefs.current[actions.length] = element;
                 }}
                 role="menuitem"
                 tabIndex={-1}

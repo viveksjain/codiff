@@ -2607,6 +2607,7 @@ export function ReviewCodeView({
   activeSearchMatch,
   agentId,
   agentLabel,
+  allowMarkdownEditing = true,
   allowViewedToggle = false,
   blocks,
   bottomInset = codeViewLayout.paddingBottom,
@@ -2653,6 +2654,7 @@ export function ReviewCodeView({
   onUpdateSourceDescription,
   onUpdateSourceTitle,
   onUploadSourceDescriptionAsset,
+  repositoryConnected = true,
   reviewIdentityByPath,
   scrollTarget,
   searchQuery,
@@ -2671,6 +2673,7 @@ export function ReviewCodeView({
   activeSearchMatch: DiffSearchMatch | null;
   agentId: 'codex' | 'claude' | 'opencode' | 'pi';
   agentLabel: string;
+  allowMarkdownEditing?: boolean;
   allowViewedToggle?: boolean;
   blocks?: ReadonlyArray<ReviewDiffBlock>;
   bottomInset?: number;
@@ -2717,6 +2720,7 @@ export function ReviewCodeView({
   onUpdateSourceDescription?: (body: string) => Promise<void> | void;
   onUpdateSourceTitle?: (title: string) => Promise<void> | void;
   onUploadSourceDescriptionAsset?: (file: File) => Promise<string> | string;
+  repositoryConnected?: boolean;
   reviewIdentityByPath?: ReadonlyMap<string, ReviewIdentity>;
   scrollTarget: ReviewScrollTarget | null;
   searchQuery: string;
@@ -3000,6 +3004,8 @@ export function ReviewCodeView({
           !isReadOnly && onLoadImageContent != null && canRenderImagePreview(file.path, section);
         const canRenderMarkdown = markdownPreview != null;
         const canEditMarkdown =
+          allowMarkdownEditing &&
+          repositoryConnected &&
           canRenderMarkdown &&
           !isReadOnly &&
           isEditableWorkingTreeSection(source.type, file, section);
@@ -3211,6 +3217,8 @@ export function ReviewCodeView({
     getPlaceholderFile,
     imagePreviewLayoutPassBySection,
     isReadOnly,
+    repositoryConnected,
+    allowMarkdownEditing,
     itemVersionByKey,
     markdownPreviewLayoutPassBySection,
     markdownPreviewSections,
@@ -3269,6 +3277,7 @@ export function ReviewCodeView({
       meta != null &&
       item.type === 'diff' &&
       !isReadOnly &&
+      repositoryConnected &&
       !meta.section.binary &&
       (meta.section.loadState == null ||
         meta.section.loadState === 'ready' ||
@@ -3278,7 +3287,7 @@ export function ReviewCodeView({
       isEditableWorkingTreeSection(source.type, meta.file, meta.section) &&
       onLoadSectionContents != null &&
       window.codiff?.getRepositoryFile != null,
-    [isReadOnly, onLoadSectionContents, source.type],
+    [isReadOnly, repositoryConnected, onLoadSectionContents, source.type],
   );
   const startCodeEdit = useCallback(
     (item: CodeViewItem<ReviewAnnotationMetadata>, meta: CodeViewItemMetadata) => {
@@ -4575,7 +4584,7 @@ export function ReviewCodeView({
                     aria-label={`${editSession?.hasChanges ? 'Revert edits to' : 'Cancel editing'} ${meta.file.path}`}
                     className="codiff-edit-revert-button"
                     data-autosaving={isAutosaving ? '' : undefined}
-                    disabled={isBusy || editSession.saving}
+                    disabled={!repositoryConnected || isBusy || editSession.saving}
                     onClick={() => void codeEditing.revertEdit(item.id)}
                     title={
                       editSession?.hasChanges
@@ -4590,7 +4599,7 @@ export function ReviewCodeView({
                   <Button
                     aria-label={`Done editing ${meta.file.path}`}
                     data-autosaving={isAutosaving ? '' : undefined}
-                    disabled={isBusy || editSession.saving}
+                    disabled={!repositoryConnected || isBusy || editSession.saving}
                     onClick={() => void codeEditing.doneEdit(item.id)}
                     title="Finish editing; changes are saved automatically"
                     type="button"
@@ -4642,6 +4651,7 @@ export function ReviewCodeView({
       onOpenFile,
       onToggleCollapsed,
       onToggleViewed,
+      repositoryConnected,
       startCodeEdit,
       toggleMarkdownPreview,
     ],

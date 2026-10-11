@@ -305,6 +305,13 @@ const mergeConfig = (raw) => {
           ? rawSettings.expandUnchanged
           : defaults.settings.expandUnchanged,
       lastRepositoryPath: normalizeLastRepositoryPath(rawSettings.lastRepositoryPath),
+      ...(Array.isArray(rawSettings.recentRemoteRepositories)
+        ? {
+            recentRemoteRepositories: rawSettings.recentRemoteRepositories
+              .filter((value) => typeof value === 'string')
+              .slice(0, 10),
+          }
+        : {}),
       openAIModel:
         typeof rawSettings.openAIModel === 'string'
           ? rawSettings.openAIModel
