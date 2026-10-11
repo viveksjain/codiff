@@ -13,6 +13,7 @@ const {
   PID_MARKER,
   buildCommandScript,
   getShellDialect,
+  quoteFish,
   quotePosix,
   wrapForLoginShell,
 } = require('./shell-quote.cjs');
@@ -36,8 +37,16 @@ const DEFAULT_MAX_BUFFER = 1024 * 1024 * 64;
 // remote kill requests and a fallback session.
 const MAX_QUEUED_CHANNELS = 6;
 const SHELL_PROBE_PREFIX = '__codiff_shell__:';
-// Linux caps one argument (the remote command string) at 128 KiB.
+// How long a kill waits for the command to announce its PID.
+const PID_WAIT_MS = 5000;
+// Linux caps one argument (the remote command string) at 128 KiB. A batch's
+// wrapped remote command stays below half of that; its paths get all but a
+// reserve for the fixed parts of the script.
 const MAX_BATCH_SCRIPT_BYTES = 64 * 1024;
+const MAX_BATCH_PATH_BYTES = MAX_BATCH_SCRIPT_BYTES - 4 * 1024;
+// GNU stat prints the locale's decimal point (`1700000000,5` under de_DE), and
+// ssh forwards LANG and LC_* by default, so every stat runs in the C locale.
+const C_LOCALE = 'export LC_ALL=C';
 // Mode (raw, in hex), size, inode, and modification and change times in seconds
 // with nanoseconds. GNU's `%.9Y` precision needs coreutils 8.x or later.
 /** @type {Record<StatFlavor, string>} */
@@ -138,8 +147,21 @@ const parseReadFilesOutput = (output, paths) => {
 };
 
 /**
- * Splits paths so that each batch's quoted arguments stay below
- * `MAX_BATCH_SCRIPT_BYTES`. A single longer path still gets its own batch.
+ * The bytes a path adds to a batch's remote command: quoted once for the
+ * script and again by `wrapForLoginShell`, where a `'` grows to 13 bytes (POSIX)
+ * and fish doubles every backslash. Plus one separating space.
+ *
+ * @param {string} path
+ */
+const getWrappedPathSize = (path) => {
+  const quoted = quotePosix(path);
+  return Math.max(Buffer.byteLength(quotePosix(quoted)), Buffer.byteLength(quoteFish(quoted))) - 1;
+};
+
+/**
+ * Splits paths so that each batch's remote command, wrapped for any login
+ * shell, stays below `MAX_BATCH_SCRIPT_BYTES`. A single longer path still gets
+ * its own batch.
  *
  * @param {ReadonlyArray<string>} paths
  * @returns {Array<Array<string>>}
@@ -151,22 +173,61 @@ const chunkByScriptSize = (paths) => {
   let current = [];
   let size = 0;
   for (const path of paths) {
-    const quotedSize = Buffer.byteLength(quotePosix(path)) + 1;
-    if (current.length > 0 && size + quotedSize > MAX_BATCH_SCRIPT_BYTES) {
+    const pathSize = getWrappedPathSize(path);
+    if (current.length > 0 && size + pathSize > MAX_BATCH_PATH_BYTES) {
       chunks.push(current);
       current = [];
       size = 0;
     }
     current.push(path);
-    size += quotedSize;
+    size += pathSize;
   }
   if (current.length > 0) {
     chunks.push(current);
   }
   return chunks;
 };
-// How long a kill waits for the command to announce its PID.
-const PID_WAIT_MS = 5000;
+
+/** @param {ReadonlyArray<string>} paths */
+const setPositionalArgs = (paths) => `set -- ${paths.map(quotePosix).join(' ')}`;
+
+/**
+ * Prints `OK <stat>` or `ERR` per path, in order.
+ *
+ * @param {ReadonlyArray<string>} paths
+ * @param {StatFlavor} statFlavor
+ */
+const buildLstatManyScript = (paths, statFlavor) => {
+  const format = STAT_FORMATS[statFlavor];
+  return [
+    C_LOCALE,
+    setPositionalArgs(paths),
+    // One stat for the common case; per-path only when something is missing.
+    `if out=$(stat ${format} "$@" 2>/dev/null); then printf '%s\\n' "$out" | sed 's/^/OK /'; else for p do if line=$(stat ${format} "$p" 2>/dev/null); then printf 'OK %s\\n' "$line"; else echo ERR; fi; done; fi`,
+  ].join('\n');
+};
+
+/**
+ * Prints `OK <size>` and exactly that many bytes, or `ERR`, per path, in order.
+ *
+ * @param {ReadonlyArray<string>} paths
+ */
+const buildReadFilesScript = (paths) =>
+  [
+    setPositionalArgs(paths),
+    'for p do',
+    '  if [ -f "$p" ] && [ -r "$p" ] && n=$(wc -c < "$p"); then',
+    "    n=$(printf '%s' \"$n\" | tr -d ' ')",
+    '    printf \'OK %s\\n\' "$n"',
+    // Exactly n bytes even if the file changes while it is read: a file that
+    // grows is cut off and one that shrinks is padded with zeros. BSD `head`
+    // rejects `-c 0`, so empty files skip the copy.
+    '    if [ "$n" -gt 0 ]; then cat "$p" /dev/zero 2>/dev/null | head -c "$n"; fi',
+    '  else',
+    '    echo ERR',
+    '  fi',
+    'done',
+  ].join('\n');
 
 const createAbortError = () => {
   const error = new Error('The operation was aborted.');
@@ -671,8 +732,6 @@ const createSshHost = ({
     return pty;
   };
 
-  const statFormat = STAT_FORMATS[statFlavor];
-
   /** @param {string} path */
   const assertAbsolute = (path) => {
     if (!path.startsWith('/')) {
@@ -710,7 +769,7 @@ const createSshHost = ({
         await run(
           follow ? 'stat' : 'lstat',
           path,
-          `exec stat ${follow ? '-L ' : ''}${statFormat} ${quotePosix(assertAbsolute(path))}`,
+          `${C_LOCALE}\nexec stat ${follow ? '-L ' : ''}${STAT_FORMATS[statFlavor]} ${quotePosix(assertAbsolute(path))}`,
         )
       ).toString('utf8'),
     );
@@ -723,11 +782,7 @@ const createSshHost = ({
       const output = await run(
         'lstat',
         `${chunk.length} paths`,
-        [
-          `set -- ${chunk.map(quotePosix).join(' ')}`,
-          // One stat for the common case; per-path only when something is missing.
-          `if out=$(stat ${statFormat} "$@" 2>/dev/null); then printf '%s\\n' "$out" | sed 's/^/OK /'; else for p do if line=$(stat ${statFormat} "$p" 2>/dev/null); then printf 'OK %s\\n' "$line"; else echo ERR; fi; done; fi`,
-        ].join('\n'),
+        buildLstatManyScript(chunk, statFlavor),
       );
       results.push(...parseStatLines(output, chunk.length));
     }
@@ -739,24 +794,7 @@ const createSshHost = ({
     /** @type {Array<Buffer | Error>} */
     const results = [];
     for (const chunk of chunkByScriptSize(paths.map(assertAbsolute))) {
-      const output = await run(
-        'readFile',
-        `${chunk.length} paths`,
-        [
-          `set -- ${chunk.map(quotePosix).join(' ')}`,
-          'for p do',
-          '  if [ -f "$p" ] && [ -r "$p" ] && n=$(wc -c < "$p"); then',
-          "    n=$(printf '%s' \"$n\" | tr -d ' ')",
-          '    printf \'OK %s\\n\' "$n"',
-          // Exactly n bytes even if the file changes while it is read: a file
-          // that grows is cut off and one that shrinks is padded with zeros.
-          '    cat "$p" /dev/zero 2>/dev/null | head -c "$n"',
-          '  else',
-          '    echo ERR',
-          '  fi',
-          'done',
-        ].join('\n'),
-      );
+      const output = await run('readFile', `${chunk.length} paths`, buildReadFilesScript(chunk));
       results.push(...parseReadFilesOutput(output, chunk));
     }
     return results;
@@ -769,10 +807,16 @@ const createSshHost = ({
   const writeFile = async (path, contents, options = {}) => {
     const target = quotePosix(assertAbsolute(path));
     const mode = options.mode == null ? null : (options.mode & 0o7777).toString(8);
-    // `set -C` (noclobber) makes the first redirection fail if the file exists.
+    const chmod = mode ? `chmod ${mode} ${target} && ` : '';
+    // The file is opened (as fd 3) before `chmod`, so a read-only mode still
+    // lets the contents be written through it. Under `set -C` (noclobber) the
+    // open fails if the file exists. Without `exclusive`, only a file this call
+    // creates gets the mode.
     const script = options.exclusive
-      ? `set -C && : > ${target} && ${mode ? `chmod ${mode} ${target} && ` : ''}exec cat >| ${target}`
-      : `${mode ? `if [ ! -e ${target} ]; then : > ${target} && chmod ${mode} ${target}; fi && ` : ''}exec cat > ${target}`;
+      ? `set -C; exec 3> ${target} && ${chmod}exec cat >&3`
+      : mode
+        ? `if [ -e ${target} ]; then exec 3> ${target}; else exec 3> ${target} && chmod ${mode} ${target}; fi && exec cat >&3`
+        : `exec cat > ${target}`;
     await run('writeFile', path, script, { input: contents });
   };
 
@@ -818,10 +862,15 @@ const createSshHost = ({
         await run('realpath', path, `exec realpath ${quotePosix(assertAbsolute(path))}`),
       ),
     rename: async (from, to) => {
+      // `mv` would move the file into an existing directory instead of failing.
       await run(
         'rename',
         from,
-        `exec mv -f ${quotePosix(assertAbsolute(from))} ${quotePosix(assertAbsolute(to))}`,
+        [
+          setPositionalArgs([assertAbsolute(from), assertAbsolute(to)]),
+          'if [ -d "$2" ]; then echo "rename: $2: Is a directory" >&2; exit 1; fi',
+          'exec mv -f "$1" "$2"',
+        ].join('\n'),
       );
     },
     rm: async (path, options = {}) => {
@@ -904,6 +953,8 @@ const connectSshHost = async ({
 };
 
 module.exports = {
+  buildLstatManyScript,
+  buildReadFilesScript,
   chunkByScriptSize,
   connectSshHost,
   createPidMarkerFilter,

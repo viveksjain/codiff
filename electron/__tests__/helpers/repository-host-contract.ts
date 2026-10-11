@@ -290,4 +290,40 @@ export const defineRepositoryHostContract = (
       expect((await closed).code).toBe(0);
     }
   });
+
+  test(`${name}: readFiles returns empty files wherever they appear in a batch`, async () => {
+    await using fixture = await createFixture();
+    const { host, root } = fixture;
+    const names = ['empty-first', 'full-a', 'empty-middle', 'full-b', 'empty-last'];
+    for (const name of names) {
+      await host.writeFile(join(root, name), name.startsWith('full') ? name : '');
+    }
+    const contents = await host.readFiles(names.map((name) => join(root, name)));
+    expect(contents).toEqual(
+      names.map((name) => (name.startsWith('full') ? Buffer.from(name) : Buffer.alloc(0))),
+    );
+  });
+
+  test(`${name}: exclusive writeFile can create a read-only file`, async () => {
+    await using fixture = await createFixture();
+    const { host, root } = fixture;
+    const path = join(root, 'read-only.txt');
+    await host.writeFile(path, 'data', { exclusive: true, mode: 0o444 });
+    expect((await host.readFile(path)).toString('utf8')).toBe('data');
+    expect((await host.stat(path)).mode & 0o777).toBe(0o444);
+    await expect(host.writeFile(path, 'again', { exclusive: true, mode: 0o444 })).rejects.toThrow();
+    expect((await host.readFile(path)).toString('utf8')).toBe('data');
+  });
+
+  test(`${name}: rename refuses to move a file onto a directory`, async () => {
+    await using fixture = await createFixture();
+    const { host, root } = fixture;
+    const from = join(root, 'file.txt');
+    const directory = join(root, 'dir');
+    await host.writeFile(from, 'kept');
+    await host.exec('mkdir', [directory]);
+    await expect(host.rename(from, directory)).rejects.toThrow();
+    expect((await host.readFile(from)).toString('utf8')).toBe('kept');
+    expect(await host.lstatMany([join(directory, 'file.txt')])).toEqual([null]);
+  });
 };

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vite-plus/test';
@@ -25,13 +25,18 @@ type SshConnection = {
 
 const require = createRequire(import.meta.url);
 const {
+  buildLstatManyScript,
+  buildReadFilesScript,
   chunkByScriptSize,
   connectSshHost,
   createPidMarkerFilter,
+  createSshHost,
   parseReadFilesOutput,
   parseStatLine,
   parseStatLines,
 } = require('../host/ssh-host.cjs') as {
+  buildLstatManyScript: (paths: ReadonlyArray<string>, statFlavor: 'bsd' | 'gnu') => string;
+  buildReadFilesScript: (paths: ReadonlyArray<string>) => string;
   chunkByScriptSize: (paths: ReadonlyArray<string>) => Array<Array<string>>;
   connectSshHost: (options: {
     alias: string;
@@ -42,9 +47,18 @@ const {
     sshConfigPath?: string;
   }) => Promise<SshHost>;
   createPidMarkerFilter: (onPid: (pid: number) => void) => import('node:stream').Transform;
+  createSshHost: (options: {
+    alias: string;
+    connection: SshConnection;
+    dialect: 'fish' | 'posix';
+    statFlavor: 'bsd' | 'gnu';
+  }) => SshHost;
   parseReadFilesOutput: (output: Buffer, paths: ReadonlyArray<string>) => Array<Buffer | Error>;
   parseStatLine: (line: string) => HostStat;
   parseStatLines: (output: Buffer, count: number) => Array<HostStat | null>;
+};
+const { wrapForLoginShell } = require('../host/shell-quote.cjs') as {
+  wrapForLoginShell: (script: string, dialect: 'fish' | 'posix') => string;
 };
 const { createSshConnection } = require('../host/ssh-connection.cjs') as {
   createSshConnection: (options: {
@@ -468,19 +482,114 @@ test('parses length-framed batch reads, including newlines in contents', () => {
   );
 });
 
-test('splits large path batches below the remote argument limit', () => {
-  const paths = Array.from(
+test('rejects malformed stat and batch read output', () => {
+  // GNU stat prints the locale's decimal point (`1700000000,5` under de_DE), which is why
+  // every stat runs under LC_ALL=C.
+  expect(() => parseStatLine('81a4 1 2 1700000000,5 1700000000,5')).toThrow(
+    'Unexpected stat output.',
+  );
+  expect(() => parseStatLine('81a4 1 2 1.5')).toThrow('Unexpected stat output.');
+  expect(() => parseStatLine('81a4 1 2 1.5 1.5 9')).toThrow('Unexpected stat output.');
+  expect(() => parseStatLines(Buffer.from('OK 81a4 1 2 1.5 1.5\nnoise\n'), 2)).toThrow(
+    'Unexpected stat output.',
+  );
+  expect(() => parseReadFilesOutput(Buffer.from('OK 1\natrailing'), ['/a'])).toThrow(
+    'Unexpected batch read output.',
+  );
+  expect(() => parseReadFilesOutput(Buffer.from('noise\n'), ['/a'])).toThrow(
+    'Unexpected batch read output.',
+  );
+});
+
+test('splits path batches so the wrapped remote command stays below the argument limit', () => {
+  const plain = Array.from(
     { length: 3000 },
     (_, index) => `/repo/${'d'.repeat(40)}/file-${index}.txt`,
   );
-  const chunks = chunkByScriptSize(paths);
-  expect(chunks.length).toBeGreaterThan(1);
-  expect(chunks.flat()).toEqual(paths);
-  for (const chunk of chunks) {
-    expect(
-      chunk.map((path) => path.length + 3).reduce((sum, size) => sum + size, 0),
-    ).toBeLessThanOrEqual(64 * 1024);
+  // A `'` grows to 13 bytes once quoted for the script and again for the login shell,
+  // and fish doubles every backslash.
+  const quoteHeavy = Array.from(
+    { length: 3000 },
+    (_, index) => `/repo/${"'".repeat(20)}${'\\'.repeat(20)} ${index}`,
+  );
+  for (const paths of [plain, quoteHeavy]) {
+    const chunks = chunkByScriptSize(paths);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.flat()).toEqual(paths);
+    for (const chunk of chunks) {
+      expect(
+        chunk.map((path) => path.length + 3).reduce((sum, size) => sum + size, 0),
+      ).toBeLessThanOrEqual(64 * 1024);
+      for (const script of [
+        buildLstatManyScript(chunk, 'bsd'),
+        buildLstatManyScript(chunk, 'gnu'),
+        buildReadFilesScript(chunk),
+      ]) {
+        for (const dialect of ['fish', 'posix'] as const) {
+          expect(Buffer.byteLength(wrapForLoginShell(script, dialect))).toBeLessThanOrEqual(
+            64 * 1024,
+          );
+        }
+      }
+    }
   }
+});
+
+test('stat runs under the C locale so GNU stat prints a decimal point', async () => {
+  await using directory = await createTemporaryDirectory('codiff-ssh-locale-');
+  const bin = join(directory.path, 'bin');
+  mkdirSync(bin);
+  // Stands in for GNU stat: it checks the format and prints the locale's decimal point.
+  writeFileSync(
+    join(bin, 'stat'),
+    [
+      '#!/bin/sh',
+      '[ "$1" = -L ] && shift',
+      'if [ "$1" != -c ] || [ "$2" != "%f %s %i %.9Y %.9Z" ]; then echo "bad format" >&2; exit 2; fi',
+      'shift 2',
+      'if [ "${LC_ALL:-${LC_NUMERIC:-${LANG:-C}}}" = C ]; then dot=.; else dot=,; fi',
+      'status=0',
+      'for p do',
+      '  if [ -e "$p" ]; then printf "81a4 5 7 1700000000%s5 1700000000%s5\\n" "$dot" "$dot"',
+      '  else echo "stat: cannot statx \'$p\'" >&2; status=1; fi',
+      'done',
+      'exit $status',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const file = join(directory.path, 'file.txt');
+  writeFileSync(file, 'hello');
+  const { spawn } = await import('node:child_process');
+  // The "remote" is this machine with a German locale, as forwarded by `SendEnv LANG LC_*`.
+  const connection: SshConnection = {
+    alias: 'fake',
+    check: async () => true,
+    ensureMaster: async () => {},
+    exitMaster: async () => {},
+    run: async () => {
+      throw new Error('Unexpected run.');
+    },
+    spawnClient: (remoteCommand) =>
+      spawn('/bin/sh', ['-c', remoteCommand], {
+        env: {
+          ...process.env,
+          LANG: 'de_DE.UTF-8',
+          LC_ALL: 'de_DE.UTF-8',
+          PATH: `${bin}:${process.env.PATH}`,
+        },
+      }),
+    startMaster: async () => {},
+  };
+  const host = createSshHost({ alias: 'fake', connection, dialect: 'posix', statFlavor: 'gnu' });
+  expect((await host.lstat(file)).mtimeMs).toBe(1_700_000_000_500);
+  expect((await host.stat(file)).ctimeMs).toBe(1_700_000_000_500);
+  expect(
+    (await host.lstatMany([file, join(directory.path, 'missing')])).map(
+      (stat) => stat?.mtimeMs ?? null,
+    ),
+  ).toEqual([1_700_000_000_500, null]);
+  await host.close();
 });
 
 describe.skipIf(!findSshd())('SshHost contract', () => {
