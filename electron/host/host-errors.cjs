@@ -60,7 +60,7 @@ class RemoteShellNoiseError extends Error {
 }
 
 const AUTH_PATTERNS = [
-  /permission denied/i,
+  /permission denied \(/i,
   /host key verification failed/i,
   /too many authentication failures/i,
   /no more authentication methods/i,

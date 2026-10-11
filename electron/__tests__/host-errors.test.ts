@@ -75,3 +75,25 @@ test('other failures are unreachable while connecting and disconnected afterward
   expect(session.name).toBe('HostDisconnectedError');
   expect(session.message).toBe('Lost connection to devbox.');
 });
+
+test('only the authentication form of "permission denied" needs an interactive login', () => {
+  const stderr = 'ssh: connect to host x port 22: Permission denied';
+  expect(errors.classifySshFailure('x', stderr, { connected: false }).name).toBe(
+    'HostUnreachableError',
+  );
+  expect(errors.classifySshFailure('x', stderr).name).toBe('HostDisconnectedError');
+  const exhausted = 'vivek@x: no more authentication methods to try.';
+  expect(errors.classifySshFailure('x', exhausted, { connected: false }).name).toBe(
+    'HostAuthRequiredError',
+  );
+  expect(errors.classifySshFailure('x', exhausted).name).toBe('HostAuthRequiredError');
+});
+
+test('a lost connection keeps the trimmed ssh output as its detail', () => {
+  const error = errors.classifySshFailure(
+    'devbox',
+    '\n  client_loop: send disconnect: Broken pipe\r\n',
+  ) as Error & { detail: string };
+  expect(error.name).toBe('HostDisconnectedError');
+  expect(error.detail).toBe('client_loop: send disconnect: Broken pipe');
+});
