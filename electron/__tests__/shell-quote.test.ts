@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vite-plus/test';
@@ -117,26 +118,31 @@ for (const shell of shells) {
 
     test('applies cwd and env exactly', async () => {
       await using directory = await createTemporaryDirectory("codiff quote 'dir' ");
+      const environmentValue = `a'b "c" $d \\e=f\ng`;
       const script = buildCommandScript({
-        args: ['-c', 'pwd -P; printf "%s" "$CODIFF_QUOTE"'],
+        args: ['-c', 'pwd -P; printf "%s\\0" "$CODIFF_QUOTE"'],
         command: '/bin/sh',
         cwd: directory.path,
-        env: { CODIFF_QUOTE: `a'b "c" $d \\e` },
+        env: { CODIFF_QUOTE: environmentValue },
       });
       const { stdout } = await execFileAsync(shell.path!, [
         '-c',
         wrapForLoginShell(script, shell.dialect),
       ]);
-      const [cwd, value] = stdout.split('\n');
-      expect(cwd.endsWith(directory.path.split('/').pop()!)).toBe(true);
-      expect(value).toBe(`a'b "c" $d \\e`);
+      const newline = stdout.indexOf('\n');
+      expect(stdout.slice(0, newline)).toBe(await realpath(directory.path));
+      expect(stdout.slice(newline + 1).split('\0')).toEqual([environmentValue, '']);
     });
 
-    test('announces the PID of the command it executes', async () => {
+    test.each([
+      ['without env', undefined],
+      ['with env', { CODIFF_QUOTE: "a'b=c" }],
+    ])('announces the PID of the command it executes %s', async (_label, env) => {
       const script = buildCommandScript({
         announcePid: true,
         args: ['-c', 'echo "$$"'],
         command: '/bin/sh',
+        env,
       });
       const { stderr, stdout } = await execFileAsync(shell.path!, [
         '-c',
@@ -169,4 +175,24 @@ test('env names must be valid identifiers', () => {
   expect(() => buildCommandScript({ command: 'true', env: { 'A=B': 'x' } })).toThrow(
     'Invalid environment variable name: A=B',
   );
+});
+
+test('commands that a shell or env would parse as options or assignments are rejected', () => {
+  for (const command of ['-l', '-c', '-i', 'A=B']) {
+    expect(() => buildCommandScript({ command })).toThrow(
+      `Commands cannot start with "-" or contain "=": ${command}`,
+    );
+    expect(() => buildCommandScript({ command, env: { X: 'y' } })).toThrow(
+      `Commands cannot start with "-" or contain "=": ${command}`,
+    );
+  }
+});
+
+test('working directories must be absolute', () => {
+  for (const cwd of ['-P', '-', 'relative/dir', '']) {
+    expect(() => buildCommandScript({ command: 'true', cwd })).toThrow(
+      `Working directories must be absolute: ${cwd}`,
+    );
+  }
+  expect(() => buildCommandScript({ command: 'true', cwd: '/' })).not.toThrow();
 });

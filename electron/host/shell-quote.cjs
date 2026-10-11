@@ -55,6 +55,15 @@ const getShellDialect = (shellPath) => {
  * }} options
  */
 const buildCommandScript = ({ announcePid = false, args = [], command, cwd, env = {} }) => {
+  // `exec` and `env` would parse a leading `-` as an option and `env` would
+  // treat `NAME=value` as an assignment, silently changing the argv.
+  if (command.startsWith('-') || command.includes('=')) {
+    throw new Error(`Commands cannot start with "-" or contain "=": ${command}`);
+  }
+  // `cd` would parse `-`, `-P` and friends, and a relative path consults CDPATH.
+  if (cwd !== undefined && !cwd.startsWith('/')) {
+    throw new Error(`Working directories must be absolute: ${cwd}`);
+  }
   const assignments = Object.entries(env).map(([name, value]) => {
     if (!ENV_NAME_PATTERN.test(name)) {
       throw new Error(`Invalid environment variable name: ${name}`);
@@ -67,7 +76,7 @@ const buildCommandScript = ({ announcePid = false, args = [], command, cwd, env 
     ...[command, ...args].map(quotePosix),
   ].join(' ');
   return [
-    ...(cwd ? [`cd ${quotePosix(cwd)}`] : []),
+    ...(cwd !== undefined ? [`cd ${quotePosix(cwd)}`] : []),
     ...(announcePid ? [`printf '${PID_MARKER}%s\\n' "$$" >&2`] : []),
     invocation,
   ].join(' && ');
