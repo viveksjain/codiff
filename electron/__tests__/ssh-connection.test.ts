@@ -199,6 +199,28 @@ describe.skipIf(!findSshd())('ssh connection', () => {
     expect(await pgrepMasters(sshd.controlDirectory)).toHaveLength(0);
   });
 
+  test('a master that loses the socket to a temporary master is stopped', async () => {
+    await using sshd = await startTestSshd();
+    const connection = createSshConnection({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    // With no master, this client becomes a temporary one and owns the socket.
+    const client = connection.run('sleep 3');
+    for (let attempt = 0; attempt < 200 && !(await connection.check()); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(await connection.check()).toBe(true);
+
+    await connection.startMaster();
+    expect(await pgrepMasters(sshd.controlDirectory)).toHaveLength(0);
+    expect(await connection.check()).toBe(true);
+
+    await connection.exitMaster();
+    await client;
+  });
+
   test('ensureMaster starts a master once for concurrent callers', async () => {
     await using sshd = await startTestSshd();
     const counter = countingSpawn();
