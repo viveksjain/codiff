@@ -180,8 +180,11 @@ export const defineRepositoryHostContract = (
   test(`${name}: exec without input reports the command and its stderr`, async () => {
     await using fixture = await createFixture();
     const failure = fixture.host.exec('/bin/sh', ['-c', 'echo boom >&2; exit 3']);
-    await expect(failure).rejects.toThrow(/^Command failed: \/bin\/sh -c echo boom >&2; exit 3\n/);
-    await expect(failure).rejects.toThrow('boom');
+    // The whole message is pinned: the command line echoes "boom" too, so only a
+    // full match proves stderr arrives on its own line.
+    await expect(failure).rejects.toThrow(
+      /^Command failed: \/bin\/sh -c echo boom >&2; exit 3\nboom\n$/,
+    );
   });
 
   test(`${name}: lstat reports sub-second modification times`, async () => {
@@ -216,6 +219,10 @@ export const defineRepositoryHostContract = (
       expect((await host.readFile(path)).toString('utf8')).toBe(`content ${index}`);
       expect((await host.lstat(path)).type).toBe('file');
     }
+    // Listing through exec is independent of the host's file operations, so a quoting
+    // bug that expands `$HOME` or `$(id)` identically on write and read still shows up.
+    const listing = await host.exec('/bin/sh', ['-c', 'ls -A "$1"', 'sh', root]);
+    expect(listing.toString('utf8').split('\n').filter(Boolean).sort()).toEqual([...names].sort());
     const paths = names.map((name) => join(root, name));
     expect((await host.lstatMany(paths)).map((stat) => stat?.type)).toEqual(
       names.map(() => 'file'),
