@@ -80,6 +80,7 @@ const {
   getLaunchPath,
 } = require('./main/command-line.cjs');
 const { createSkillInstaller } = require('./main/agent-skill.cjs');
+const { createWindowLaunchQueue } = require('./main/window-launch-queue.cjs');
 const { createEditorOpener } = require('./main/editor.cjs');
 const { createDefinitionSearchCoordinator } = require('./definition-search.cjs');
 const { createLocalHost } = require('./host/local-host.cjs');
@@ -1267,8 +1268,7 @@ const shareSnapshot = async (context, snapshot) => {
   }
 };
 
-/** @type {Promise<unknown>} */
-let windowLaunchQueue = Promise.resolve();
+const windowLaunchQueue = createWindowLaunchQueue();
 
 /**
  * Window identities resolve asynchronously, so launches run one at a time: a
@@ -1279,11 +1279,7 @@ let windowLaunchQueue = Promise.resolve();
  * @param {() => Promise<T>} launch
  * @returns {Promise<T>}
  */
-const enqueueWindowLaunch = (launch) => {
-  const result = windowLaunchQueue.then(launch);
-  windowLaunchQueue = result.catch(() => {});
-  return result;
-};
+const enqueueWindowLaunch = (launch) => windowLaunchQueue.enqueue(launch);
 
 /**
  * @param {RepositoryHost} host

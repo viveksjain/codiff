@@ -160,3 +160,16 @@ test('commits through the host and preserves the exact message', async () => {
     expect(calls.some(({ method }) => method === 'rm')).toBe(true);
   });
 });
+
+test('a cleanup failure does not turn a successful commit into a failure', async () => {
+  await withRepo(async (repoPath) => {
+    await writeFile(join(repoPath, 'a.txt'), 'a\n');
+    const result = await createWalkthroughCommit(
+      { ...host, rm: () => Promise.reject(new Error('cleanup failed')) },
+      repoPath,
+      { paths: ['a.txt'], subject: 'Add a.' },
+    );
+    expect(result.status).toBe('committed');
+    expect((await git(repoPath, ['log', '-1', '--format=%s'])).trim()).toBe('Add a.');
+  });
+});

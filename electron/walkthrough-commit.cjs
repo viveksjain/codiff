@@ -117,7 +117,9 @@ const createWalkthroughCommit = async (host, repoPath, request, onOutput) => {
       await host.writeFile(messagePath, message);
       await gitStreaming(host, repoPath, ['commit', '-F', messagePath, '--', ...paths], onOutput);
     } finally {
-      await host.rm(tempDirectory, { force: true, recursive: true });
+      // Cleanup is best-effort: a leftover temp directory must not turn a
+      // commit that already happened into a reported failure.
+      await host.rm(tempDirectory, { force: true, recursive: true }).catch(() => {});
     }
     const hash = (await git(host, repoPath, ['rev-parse', 'HEAD'])).trim();
     return { hash, status: 'committed' };
