@@ -2,9 +2,10 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vite-plus/test';
+import { afterAll, beforeAll, describe, expect, test } from 'vite-plus/test';
 import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
-import type { RepositoryHost } from '../host/repository-host.cjs';
+import type { HostStat, RepositoryHost } from '../host/repository-host.cjs';
+import { defineRepositoryHostContract } from './helpers/repository-host-contract.ts';
 import { findSshd, startTestSshd, type TestSshd } from './helpers/test-sshd.ts';
 
 type SshHost = RepositoryHost & { close: () => Promise<void> };
@@ -23,15 +24,27 @@ type SshConnection = {
 };
 
 const require = createRequire(import.meta.url);
-const { connectSshHost, createPidMarkerFilter } = require('../host/ssh-host.cjs') as {
+const {
+  chunkByScriptSize,
+  connectSshHost,
+  createPidMarkerFilter,
+  parseReadFilesOutput,
+  parseStatLine,
+  parseStatLines,
+} = require('../host/ssh-host.cjs') as {
+  chunkByScriptSize: (paths: ReadonlyArray<string>) => Array<Array<string>>;
   connectSshHost: (options: {
     alias: string;
     connection?: SshConnection;
     controlDirectory?: string;
     masterCheckIntervalMs?: number;
+    spawnProcess?: typeof import('node:child_process').spawn;
     sshConfigPath?: string;
   }) => Promise<SshHost>;
   createPidMarkerFilter: (onPid: (pid: number) => void) => import('node:stream').Transform;
+  parseReadFilesOutput: (output: Buffer, paths: ReadonlyArray<string>) => Array<Buffer | Error>;
+  parseStatLine: (line: string) => HostStat;
+  parseStatLines: (output: Buffer, count: number) => Array<HostStat | null>;
 };
 const { createSshConnection } = require('../host/ssh-connection.cjs') as {
   createSshConnection: (options: {
@@ -411,6 +424,126 @@ describe.skipIf(!findSshd())('SshHost commands', () => {
     );
     expect(exitCode).toBe(3);
     expect(output.replaceAll('\r\n', '\n')).toBe('tty\nxterm-256color\n24 80\n');
+    await host.close();
+  });
+});
+
+test('parses GNU and BSD stat output into host stats', () => {
+  expect(parseStatLine('81a4 401 72290885 1769911025.860883671 1777163364.430570372')).toEqual({
+    ctimeMs: 1777163364.430570372 * 1000,
+    ino: 72290885,
+    mode: 0o100644,
+    mtimeMs: 1769911025.860883671 * 1000,
+    size: 401,
+    type: 'file',
+  });
+  expect(parseStatLine('41ed 64 2 1.5 1.5').type).toBe('directory');
+  expect(parseStatLine('a1ff 8 3 1.5 1.5').type).toBe('symlink');
+  expect(parseStatLine('11a4 0 4 1.5 1.5').type).toBe('other');
+});
+
+test('parses batched stat output and rejects misaligned output', () => {
+  const stats = parseStatLines(Buffer.from('OK 81a4 1 2 1.5 1.5\nERR\nOK 41ed 64 3 2.5 2.5\n'), 3);
+  expect(stats.map((stat) => stat?.type ?? null)).toEqual(['file', null, 'directory']);
+  expect(() => parseStatLines(Buffer.from('OK 81a4 1 2 1.5 1.5\n'), 2)).toThrow(
+    'Unexpected stat output.',
+  );
+});
+
+test('parses length-framed batch reads, including newlines in contents', () => {
+  const output = Buffer.concat([
+    Buffer.from('OK 3\na\nb'),
+    Buffer.from('ERR\n'),
+    Buffer.from('OK 0\n'),
+    Buffer.from('OK 2\n'),
+    Buffer.from([0, 255]),
+  ]);
+  const results = parseReadFilesOutput(output, ['/a', '/missing', '/empty', '/binary']);
+  expect(results[0]).toEqual(Buffer.from('a\nb'));
+  expect(results[1]).toBeInstanceOf(Error);
+  expect(results[2]).toEqual(Buffer.alloc(0));
+  expect(results[3]).toEqual(Buffer.from([0, 255]));
+  expect(() => parseReadFilesOutput(Buffer.from('OK 9\nabc'), ['/a'])).toThrow(
+    'Unexpected batch read output.',
+  );
+});
+
+test('splits large path batches below the remote argument limit', () => {
+  const paths = Array.from(
+    { length: 3000 },
+    (_, index) => `/repo/${'d'.repeat(40)}/file-${index}.txt`,
+  );
+  const chunks = chunkByScriptSize(paths);
+  expect(chunks.length).toBeGreaterThan(1);
+  expect(chunks.flat()).toEqual(paths);
+  for (const chunk of chunks) {
+    expect(
+      chunk.map((path) => path.length + 3).reduce((sum, size) => sum + size, 0),
+    ).toBeLessThanOrEqual(64 * 1024);
+  }
+});
+
+describe.skipIf(!findSshd())('SshHost contract', () => {
+  let sshd: TestSshd;
+  let host: SshHost;
+
+  beforeAll(async () => {
+    sshd = await startTestSshd();
+    host = await connect(sshd);
+  });
+
+  afterAll(async () => {
+    await host?.close();
+    await sshd?.stop();
+  });
+
+  defineRepositoryHostContract('SshHost', async () => {
+    const root = await host.mkdtemp('codiff-ssh-contract-');
+    return {
+      host,
+      root,
+      [Symbol.asyncDispose]: () => host.rm(root, { force: true, recursive: true }),
+    };
+  });
+});
+
+describe.skipIf(!findSshd())('SshHost batching', () => {
+  test('batched calls use one remote command per chunk and none for empty input', async () => {
+    await using sshd = await startTestSshd();
+    const spawned: Array<string> = [];
+    const { spawn } = await import('node:child_process');
+    const host = await connectSshHost({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      // Only client sessions run remote commands; master checks and starts don't count.
+      spawnProcess: ((command: string, args: ReadonlyArray<string>, options: object) => {
+        if (args.includes('ControlMaster=auto')) {
+          spawned.push(args.at(-1) ?? '');
+        }
+        return spawn(command, [...args], options);
+      }) as unknown as typeof spawn,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    const root = await host.mkdtemp('codiff-ssh-batch-');
+    const paths = await Promise.all(
+      Array.from({ length: 50 }, async (_, index) => {
+        const path = join(root, `file-${index}.txt`);
+        await host.writeFile(path, `value ${index}`);
+        return path;
+      }),
+    );
+    spawned.length = 0;
+    expect(await host.lstatMany([])).toEqual([]);
+    expect(await host.readFiles([])).toEqual([]);
+    expect(spawned).toEqual([]);
+    const stats = await host.lstatMany(paths);
+    const contents = await host.readFiles(paths);
+    expect(stats.every((stat) => stat?.type === 'file')).toBe(true);
+    expect(contents.map((value) => value.toString())).toEqual(
+      paths.map((_, index) => `value ${index}`),
+    );
+    expect(spawned).toHaveLength(2);
+    await host.rm(root, { force: true, recursive: true });
     await host.close();
   });
 });

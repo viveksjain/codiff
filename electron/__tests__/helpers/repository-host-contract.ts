@@ -260,4 +260,34 @@ export const defineRepositoryHostContract = (
       contents.map((value) => (Buffer.isBuffer(value) ? value.toString('utf8') : 'ERR')),
     ).toEqual(['value 0\n', 'value 1\n', 'value 2\n']);
   });
+
+  test(`${name}: batched reads stay aligned while a file changes size`, async () => {
+    await using fixture = await createFixture();
+    const { host, root } = fixture;
+    const changing = join(root, 'changing.txt');
+    const after = join(root, 'after.txt');
+    const stop = join(root, 'stop');
+    await host.writeFile(changing, '');
+    await host.writeFile(after, 'after');
+    // Flips the file between empty and 64 KiB until the stop file appears, so its size
+    // changes between a read's size check and its copy.
+    const writer = host.spawn('/bin/sh', [
+      '-c',
+      `big=$(head -c 65536 /dev/zero | tr '\\0' x); while [ ! -e "$2" ]; do printf '%s' "$big" > "$1"; : > "$1"; done`,
+      'sh',
+      changing,
+      stop,
+    ]);
+    const closed = collect(writer);
+    try {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const [value, tail] = await host.readFiles([changing, after]);
+        expect(Buffer.isBuffer(value) && value.length <= 65_536).toBe(true);
+        expect(Buffer.isBuffer(tail) ? tail.toString('utf8') : tail).toBe('after');
+      }
+    } finally {
+      await host.writeFile(stop, '');
+      expect((await closed).code).toBe(0);
+    }
+  });
 };

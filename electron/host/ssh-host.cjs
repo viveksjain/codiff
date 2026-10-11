@@ -13,6 +13,7 @@ const {
   PID_MARKER,
   buildCommandScript,
   getShellDialect,
+  quotePosix,
   wrapForLoginShell,
 } = require('./shell-quote.cjs');
 const { createSshConnection } = require('./ssh-connection.cjs');
@@ -35,6 +36,135 @@ const DEFAULT_MAX_BUFFER = 1024 * 1024 * 64;
 // remote kill requests and a fallback session.
 const MAX_QUEUED_CHANNELS = 6;
 const SHELL_PROBE_PREFIX = '__codiff_shell__:';
+// Linux caps one argument (the remote command string) at 128 KiB.
+const MAX_BATCH_SCRIPT_BYTES = 64 * 1024;
+// Mode (raw, in hex), size, inode, and modification and change times in seconds
+// with nanoseconds. GNU's `%.9Y` precision needs coreutils 8.x or later.
+/** @type {Record<StatFlavor, string>} */
+const STAT_FORMATS = {
+  bsd: "-f '%Xp %z %i %Fm %Fc'",
+  gnu: "-c '%f %s %i %.9Y %.9Z'",
+};
+
+/** @param {string} line @returns {HostStat} */
+const parseStatLine = (line) => {
+  const fields = line.trim().split(' ');
+  const [mode, size, ino, mtime, ctime] = fields;
+  const modeNumber = Number.parseInt(mode, 16);
+  const stat = {
+    ctimeMs: Number(ctime) * 1000,
+    ino: Number(ino),
+    mode: modeNumber,
+    mtimeMs: Number(mtime) * 1000,
+    size: Number(size),
+  };
+  if (fields.length !== 5 || Object.values(stat).some(Number.isNaN)) {
+    throw new Error('Unexpected stat output.');
+  }
+  const typeBits = modeNumber & 0o170000;
+  return {
+    ...stat,
+    type:
+      typeBits === 0o120000
+        ? 'symlink'
+        : typeBits === 0o040000
+          ? 'directory'
+          : typeBits === 0o100000
+            ? 'file'
+            : 'other',
+  };
+};
+
+/**
+ * Parses one `OK <stat>` or `ERR` line per path.
+ *
+ * @param {Buffer} output
+ * @param {number} count
+ * @returns {Array<HostStat | null>}
+ */
+const parseStatLines = (output, count) => {
+  const lines = output.toString('utf8').split('\n');
+  if (lines.at(-1) === '') {
+    lines.pop();
+  }
+  if (lines.length !== count) {
+    throw new Error('Unexpected stat output.');
+  }
+  return lines.map((line) => {
+    if (line === 'ERR') {
+      return null;
+    }
+    if (!line.startsWith('OK ')) {
+      throw new Error('Unexpected stat output.');
+    }
+    return parseStatLine(line.slice(3));
+  });
+};
+
+/**
+ * Parses one `OK <size>\n<exactly size bytes>` or `ERR\n` frame per path.
+ *
+ * @param {Buffer} output
+ * @param {ReadonlyArray<string>} paths
+ * @returns {Array<Buffer | Error>}
+ */
+const parseReadFilesOutput = (output, paths) => {
+  /** @type {Array<Buffer | Error>} */
+  const results = [];
+  let offset = 0;
+  for (const path of paths) {
+    const newline = output.indexOf(10, offset);
+    if (newline === -1) {
+      throw new Error('Unexpected batch read output.');
+    }
+    const header = output.subarray(offset, newline).toString('utf8');
+    offset = newline + 1;
+    if (header === 'ERR') {
+      results.push(new Error(`Cannot read ${path}.`));
+      continue;
+    }
+    const match = /^OK (\d+)$/.exec(header);
+    const size = match ? Number(match[1]) : -1;
+    if (size < 0 || offset + size > output.length) {
+      throw new Error('Unexpected batch read output.');
+    }
+    results.push(Buffer.from(output.subarray(offset, offset + size)));
+    offset += size;
+  }
+  if (offset !== output.length) {
+    throw new Error('Unexpected batch read output.');
+  }
+  return results;
+};
+
+/**
+ * Splits paths so that each batch's quoted arguments stay below
+ * `MAX_BATCH_SCRIPT_BYTES`. A single longer path still gets its own batch.
+ *
+ * @param {ReadonlyArray<string>} paths
+ * @returns {Array<Array<string>>}
+ */
+const chunkByScriptSize = (paths) => {
+  /** @type {Array<Array<string>>} */
+  const chunks = [];
+  /** @type {Array<string>} */
+  let current = [];
+  let size = 0;
+  for (const path of paths) {
+    const quotedSize = Buffer.byteLength(quotePosix(path)) + 1;
+    if (current.length > 0 && size + quotedSize > MAX_BATCH_SCRIPT_BYTES) {
+      chunks.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(path);
+    size += quotedSize;
+  }
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+  return chunks;
+};
 // How long a kill waits for the command to announce its PID.
 const PID_WAIT_MS = 5000;
 
@@ -541,7 +671,124 @@ const createSshHost = ({
     return pty;
   };
 
-  const notImplemented = () => Promise.reject(new Error('Not implemented yet.'));
+  const statFormat = STAT_FORMATS[statFlavor];
+
+  /** @param {string} path */
+  const assertAbsolute = (path) => {
+    if (!path.startsWith('/')) {
+      throw new Error(`SSH host paths must be absolute: ${path}`);
+    }
+    return path;
+  };
+
+  /**
+   * Runs a file operation's script and returns its stdout.
+   *
+   * @param {string} operation
+   * @param {string} subject
+   * @param {string} script
+   * @param {{input?: string | Buffer}} [options]
+   */
+  const run = async (operation, subject, script, options = {}) => {
+    const result = await runScript(script, { input: options.input, label: operation });
+    if (result.code === 0) {
+      return result.stdout;
+    }
+    const connectionError = await getConnectionError(result);
+    if (connectionError) {
+      throw connectionError;
+    }
+    throw new Error(
+      `${operation} ${subject}: ${result.stderr.trim() || `exited with status ${result.code}`}`,
+    );
+  };
+
+  /** @param {string} path @param {boolean} follow */
+  const statPath = async (path, follow) =>
+    parseStatLine(
+      (
+        await run(
+          follow ? 'stat' : 'lstat',
+          path,
+          `exec stat ${follow ? '-L ' : ''}${statFormat} ${quotePosix(assertAbsolute(path))}`,
+        )
+      ).toString('utf8'),
+    );
+
+  /** @type {RepositoryHost['lstatMany']} */
+  const lstatMany = async (paths) => {
+    /** @type {Array<HostStat | null>} */
+    const results = [];
+    for (const chunk of chunkByScriptSize(paths.map(assertAbsolute))) {
+      const output = await run(
+        'lstat',
+        `${chunk.length} paths`,
+        [
+          `set -- ${chunk.map(quotePosix).join(' ')}`,
+          // One stat for the common case; per-path only when something is missing.
+          `if out=$(stat ${statFormat} "$@" 2>/dev/null); then printf '%s\\n' "$out" | sed 's/^/OK /'; else for p do if line=$(stat ${statFormat} "$p" 2>/dev/null); then printf 'OK %s\\n' "$line"; else echo ERR; fi; done; fi`,
+        ].join('\n'),
+      );
+      results.push(...parseStatLines(output, chunk.length));
+    }
+    return results;
+  };
+
+  /** @type {RepositoryHost['readFiles']} */
+  const readFiles = async (paths) => {
+    /** @type {Array<Buffer | Error>} */
+    const results = [];
+    for (const chunk of chunkByScriptSize(paths.map(assertAbsolute))) {
+      const output = await run(
+        'readFile',
+        `${chunk.length} paths`,
+        [
+          `set -- ${chunk.map(quotePosix).join(' ')}`,
+          'for p do',
+          '  if [ -f "$p" ] && [ -r "$p" ] && n=$(wc -c < "$p"); then',
+          "    n=$(printf '%s' \"$n\" | tr -d ' ')",
+          '    printf \'OK %s\\n\' "$n"',
+          // Exactly n bytes even if the file changes while it is read: a file
+          // that grows is cut off and one that shrinks is padded with zeros.
+          '    cat "$p" /dev/zero 2>/dev/null | head -c "$n"',
+          '  else',
+          '    echo ERR',
+          '  fi',
+          'done',
+        ].join('\n'),
+      );
+      results.push(...parseReadFilesOutput(output, chunk));
+    }
+    return results;
+  };
+
+  /** @param {Buffer} output */
+  const withoutTrailingNewline = (output) => output.toString('utf8').replace(/\n$/, '');
+
+  /** @type {RepositoryHost['writeFile']} */
+  const writeFile = async (path, contents, options = {}) => {
+    const target = quotePosix(assertAbsolute(path));
+    const mode = options.mode == null ? null : (options.mode & 0o7777).toString(8);
+    // `set -C` (noclobber) makes the first redirection fail if the file exists.
+    const script = options.exclusive
+      ? `set -C && : > ${target} && ${mode ? `chmod ${mode} ${target} && ` : ''}exec cat >| ${target}`
+      : `${mode ? `if [ ! -e ${target} ]; then : > ${target} && chmod ${mode} ${target}; fi && ` : ''}exec cat > ${target}`;
+    await run('writeFile', path, script, { input: contents });
+  };
+
+  /** @type {RepositoryHost['mkdtemp']} */
+  const mkdtemp = async (prefix) => {
+    if (!/^[\w.-]+$/.test(prefix)) {
+      throw new Error(`Invalid temporary directory prefix: ${prefix}`);
+    }
+    return withoutTrailingNewline(
+      await run(
+        'mkdtemp',
+        prefix,
+        `dir=\${TMPDIR:-/tmp}; exec mktemp -d "\${dir%/}/${prefix}XXXXXX"`,
+      ),
+    );
+  };
 
   return Object.freeze({
     close: async () => {
@@ -557,19 +804,38 @@ const createSshHost = ({
     exec,
     id: `ssh://${alias}`,
     label: alias,
-    lstat: notImplemented,
-    lstatMany: notImplemented,
-    mkdtemp: notImplemented,
-    readFile: notImplemented,
-    readFiles: notImplemented,
-    readlink: notImplemented,
-    realpath: notImplemented,
-    rename: notImplemented,
-    rm: notImplemented,
+    lstat: (path) => statPath(path, false),
+    lstatMany,
+    mkdtemp,
+    readFile: async (path) => run('readFile', path, `exec cat ${quotePosix(assertAbsolute(path))}`),
+    readFiles,
+    readlink: async (path) =>
+      withoutTrailingNewline(
+        await run('readlink', path, `exec readlink ${quotePosix(assertAbsolute(path))}`),
+      ),
+    realpath: async (path) =>
+      withoutTrailingNewline(
+        await run('realpath', path, `exec realpath ${quotePosix(assertAbsolute(path))}`),
+      ),
+    rename: async (from, to) => {
+      await run(
+        'rename',
+        from,
+        `exec mv -f ${quotePosix(assertAbsolute(from))} ${quotePosix(assertAbsolute(to))}`,
+      );
+    },
+    rm: async (path, options = {}) => {
+      const flags = `${options.recursive ? 'r' : ''}${options.force ? 'f' : ''}`;
+      await run(
+        'rm',
+        path,
+        `exec rm ${flags ? `-${flags} ` : ''}${quotePosix(assertAbsolute(path))}`,
+      );
+    },
     spawn,
     spawnPty,
-    stat: notImplemented,
-    writeFile: notImplemented,
+    stat: (path) => statPath(path, true),
+    writeFile,
   });
 };
 
@@ -637,4 +903,12 @@ const connectSshHost = async ({
   }
 };
 
-module.exports = { connectSshHost, createPidMarkerFilter, createSshHost };
+module.exports = {
+  chunkByScriptSize,
+  connectSshHost,
+  createPidMarkerFilter,
+  createSshHost,
+  parseReadFilesOutput,
+  parseStatLine,
+  parseStatLines,
+};
