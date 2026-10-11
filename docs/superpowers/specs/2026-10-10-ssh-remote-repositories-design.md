@@ -1,6 +1,8 @@
 # SSH Remote Repositories: Design
 
-Status: Draft for review
+Status: Implemented locally through Phase 5; external release validation remains.
+
+Progress: [Overall implementation record](../ssh-remote-progress.md).
 Date: 2026-10-10
 
 ## Goal
@@ -231,7 +233,7 @@ over stdin.
 | Stage and commit (`walkthrough-commit.cjs`)                     | `git add` via `host.exec`. Commit message passed with `commit -F -` over stdin instead of a local temp file (for both hosts). Hook output streamed via `host.spawn({pty: true})`. |
 | Walkthroughs                                                    | Agent runs on the remote host (see below).                                                                                                                                        |
 | Session context (`~/.claude`, `~/.codex` transcripts)           | Read through the host with `readdir` and `readFileTail`; home, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` come from the remote environment.                                             |
-| `--context <file>` CLI flag                                     | Stays a local file.                                                                                                                                                               |
+| `--walkthrough-context <file>` CLI flag                         | Stays a local file.                                                                                                                                                               |
 | Walkthrough cache, viewed state, comments, plan reviews, config | Local, keyed by `host.id` + `repoPath`.                                                                                                                                           |
 | PR/MR review, Open in Editor, Show in Folder                    | Hidden for remote repositories.                                                                                                                                                   |
 

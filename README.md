@@ -103,6 +103,51 @@ codiff --completions zsh > ~/.zsh/completions/_codiff
 
 Launching Codiff in multiple repositories opens a separate native window for each repository.
 
+## Remote Repositories over SSH
+
+On macOS and Linux, open a repository on an SSH host from the terminal:
+
+```bash
+codiff 'devbox:~/src/app'
+codiff HEAD 'devbox:~/src/app'
+codiff --branch main 'devbox:~/src/app'
+codiff 'ssh://user@host:2222/home/user/src/app'
+```
+
+Targets accept an SSH config alias or `user@host`, with an absolute path or a path starting
+with `~/`. Use an `ssh://` URL for a custom port. In the app, choose **Open Remote Repository**
+from the File menu, command bar, or repository **+** menu and enter the same target. The title
+shows the host, and the dialog remembers recent remote targets.
+
+Codiff uses your system SSH client, SSH config, keys, agent and `ProxyJump`. If authentication
+needs a password or interactive approval, first open the target using `codiff` in a terminal;
+the app reuses that connection. GUI connections cannot display interactive SSH prompts.
+The remote needs Git, `realpath`, a POSIX or fish login shell, and GNU or BSD `stat`. No Codiff installation
+is needed there. An already-installed Perl speeds up large batches of file reads; hosts without
+it use the shell fallback. Windows SSH clients are unsupported.
+
+Review local changes on the remote, stage or discard files, and create commits in that repository.
+Walkthroughs and inline agents use the backend selected in your local Codiff settings, running
+its CLI with the remote host's login environment and credentials:
+
+```bash
+codiff -w --agent claude 'devbox:~/src/app'
+codiff --share HEAD 'devbox:~/src/app'
+```
+
+Install and authenticate the selected agent on the remote host first. Session IDs are read from
+that host's session files; `--walkthrough-context` and `--walkthrough-file` inputs
+remain files on your laptop. Sharing keeps the existing account and Git identity requirements.
+Remote PR/MR sources, plan and Markdown editing, opening files in a local editor, and showing
+remote folders in Finder are unavailable.
+
+If the connection drops, Codiff keeps the loaded review visible, disables write actions and offers
+**Reconnect**. For a `ProxyJump` failure whose app diagnostic is unclear, run `ssh devbox` in a
+terminal to see the underlying SSH diagnostic.
+
+See [SSH implementation progress](docs/superpowers/ssh-remote-progress.md) and
+[validation and release checks](docs/superpowers/ssh-remote-validation.md).
+
 ## Command Bar
 
 Open the command bar with <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> on macOS, or
