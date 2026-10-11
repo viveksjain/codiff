@@ -24,13 +24,8 @@ const resolveRepositoryLaunch = async ({ registry, localHost }, path, launchOpti
   if (launchOptions.source?.type === 'pull-request') {
     throw new Error('PR/MR reviews are unavailable for remote repositories.');
   }
-  if (
-    launchOptions.planFile ||
-    launchOptions.walkthrough ||
-    launchOptions.walkthroughFile ||
-    launchOptions.walkthroughContext
-  ) {
-    throw new Error('Remote walkthrough and local-file workflows are not available yet.');
+  if (launchOptions.planFile) {
+    throw new Error('Plan reviews are unavailable for remote repositories.');
   }
   const lease = await registry.acquire(target);
   try {

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 
 export type ReviewModeItem<Mode extends string> = {
   ariaLabel?: string;
+  disabled?: boolean;
   icon: ReactNode;
   indicator?: ReactNode;
   label: string;
@@ -24,6 +25,7 @@ export function ReviewModeControl<Mode extends string>({
         <button
           aria-label={item.ariaLabel}
           aria-selected={mode === item.value}
+          disabled={item.disabled}
           key={item.value}
           onClick={() => onModeChange(item.value)}
           role="tab"

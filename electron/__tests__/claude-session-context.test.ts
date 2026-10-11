@@ -6,10 +6,15 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
-
+import type { RepositoryHost } from '../host/repository-host.cjs';
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs');
+const host: RepositoryHost = createLocalHost();
 const { readClaudeSessionContext } = require('../claude-session-context.cjs') as {
-  readClaudeSessionContext: (sessionId?: string) => Promise<{
+  readClaudeSessionContext: (
+    host: RepositoryHost,
+    sessionId?: string,
+  ) => Promise<{
     messages?: ReadonlyArray<{ role: 'assistant' | 'user'; text: string }>;
     risks?: ReadonlyArray<string>;
     source: { threadId?: string; type: string };
@@ -53,7 +58,7 @@ test('extracts bounded readable messages from Claude Code session jsonl', async 
     ].join('\n'),
   );
 
-  await expect(readClaudeSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readClaudeSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [
       { role: 'user', text: 'Implement walkthrough session handoff.' },
       { role: 'assistant', text: 'Updated the CLI and skill handoff.' },
@@ -80,7 +85,7 @@ test('finds the active Claude Code session under CLAUDE_CONFIG_DIR', async () =>
     })}\n`,
   );
 
-  await expect(readClaudeSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readClaudeSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [
       {
         role: 'user',
@@ -115,7 +120,7 @@ test('reads recent Claude messages from a large session without loading the whol
     })}\n`,
   );
 
-  await expect(readClaudeSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readClaudeSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [{ role: 'user', text: 'Newest bounded Claude message.' }],
   });
 });

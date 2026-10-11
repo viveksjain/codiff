@@ -6,6 +6,7 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { promisify } = require('node:util');
 const { spawnPty } = require('../pty.cjs');
+const { getCommandEnvironment } = require('../login-shell-environment.cjs');
 
 /**
  * @typedef {import('./repository-host.cjs').HostStat} HostStat
@@ -132,10 +133,19 @@ const writeFile = async (path, contents, options = {}) => {
   }
 };
 
+const getEnvironment = async () => {
+  /** @type {Record<string, string>} */
+  const environment = {};
+  for (const [key, value] of Object.entries(await getCommandEnvironment())) {
+    if (typeof value === 'string') environment[key] = value;
+  }
+  return environment;
+};
 /** @returns {RepositoryHost} */
 const createLocalHost = () =>
   Object.freeze({
     exec,
+    getEnvironment,
     id: 'local',
     label: '',
     lstat: async (path) => toHostStat(await fs.lstat(path)),
@@ -143,6 +153,60 @@ const createLocalHost = () =>
       Promise.all(paths.map((path) => fs.lstat(path).then(toHostStat, () => null))),
     mkdtemp: (prefix) => fs.mkdtemp(join(tmpdir(), prefix)),
     readFile: (path) => fs.readFile(path),
+    readFileTail: async (path, maxBytes) => {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('Invalid tail size.');
+      const file = await fs.open(path, 'r');
+      try {
+        const stat = await file.stat();
+        if (!stat.isFile()) throw new Error('Expected a regular file.');
+        const size = Math.min(maxBytes, stat.size);
+        const buffer = Buffer.alloc(size);
+        let read = 0;
+        while (read < size) {
+          const result = await file.read(buffer, read, size - read, stat.size - size + read);
+          if (!result.bytesRead) break;
+          read += result.bytesRead;
+        }
+        return buffer.subarray(0, read);
+      } finally {
+        await file.close();
+      }
+    },
+    readdir: async (path) =>
+      (await fs.readdir(path, { withFileTypes: true })).map((entry) => ({
+        name: entry.name,
+        type: entry.isSymbolicLink()
+          ? 'symlink'
+          : entry.isFile()
+            ? 'file'
+            : entry.isDirectory()
+              ? 'directory'
+              : 'other',
+      })),
+    resolveCommand: async (name) => {
+      if (!name || name.startsWith('-') || name.includes('\0'))
+        throw new Error('Invalid command name.');
+      const environment = await getEnvironment();
+      if (process.platform === 'win32') {
+        try {
+          return (
+            (await exec('where.exe', [name], { env: environment })).toString().split(/\r?\n/)[0] ||
+            null
+          );
+        } catch {
+          return null;
+        }
+      }
+      try {
+        return (
+          (await exec('/bin/sh', ['-c', 'command -v "$1"', 'sh', name], { env: environment }))
+            .toString()
+            .trim() || null
+        );
+      } catch {
+        return null;
+      }
+    },
     readFiles: (paths) => Promise.all(paths.map((path) => fs.readFile(path).catch(toError))),
     readlink: (path) => fs.readlink(path),
     realpath: (path) => realpath(path),

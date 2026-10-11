@@ -25,6 +25,7 @@ const PI_NOT_FOUND_MESSAGE =
 /**
  * @typedef {{
  *   fallbackModel?: string;
+ *   repositoryHost?: import('./host/repository-host.cjs').RepositoryHost;
  *   commandTransport?: import('./agent-command.cjs').AgentCommandTransport;
  *   model?: string;
  *   onModelFallback?: (fallbackModel: string, originalModel: string) => Promise<void> | void;
@@ -126,7 +127,9 @@ const runPi = async (
   const model = normalizePiModel(options.model);
   const timeoutMs = options.timeoutMs ?? PI_TIMEOUT_MS;
   const effectivePrompt = `${prompt}${buildSchemaReminder(schema)}`;
-  const environment = await getCommandEnvironment();
+  const environment = await (options.repositoryHost
+    ? options.repositoryHost.getEnvironment()
+    : getCommandEnvironment());
 
   return await /** @type {Promise<string>} */ (
     new Promise((resolve, reject) => {
@@ -156,7 +159,11 @@ const runPi = async (
       const timer = setTimeout(() => {
         if (!finished) {
           finished = true;
-          child.kill('SIGTERM');
+          child.kill(
+            options.repositoryHost?.id !== 'local' && options.repositoryHost
+              ? 'SIGKILL'
+              : 'SIGTERM',
+          );
           reject(new Error(timeoutMessage));
         }
       }, timeoutMs);

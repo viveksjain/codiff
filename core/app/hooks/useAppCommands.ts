@@ -245,8 +245,8 @@ export function useAppCommands({
       }),
     ];
     const unavailable = new Set([
-      ...(remote ? ['open-pull-request', 'open-file', 'sidebar-walkthrough'] : []),
-      ...(disconnected ? ['reload'] : []),
+      ...(remote ? ['open-pull-request', 'open-file'] : []),
+      ...(disconnected ? ['reload', 'sidebar-walkthrough'] : []),
     ]);
     const availableCommands = registry.commands.filter((command) => !unavailable.has(command.id));
     setCommands(availableCommands);

@@ -1,10 +1,7 @@
 // @ts-check
 
-const { readdir } = require('node:fs/promises');
-const { homedir } = require('node:os');
-const { join } = require('node:path');
 const { cleanText, truncate } = require('./codex.cjs');
-const { readSessionFileTail } = require('./session-context-shared.cjs');
+const { readSessionFileTail, getSessionHome, hostPath } = require('./session-context-shared.cjs');
 
 const MAX_SESSION_SCAN_FILES = 20_000;
 const MAX_SESSION_MESSAGE_CHARS = 2_400;
@@ -13,14 +10,13 @@ const MAX_SESSION_CONTEXT_CHARS = 28_000;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../core/types.ts').WalkthroughContext} WalkthroughContext
  */
 
 /** @param {unknown} value */
 const normalizeCodexSessionId = (value) =>
   typeof value === 'string' && SESSION_ID_PATTERN.test(value) ? value : '';
-
-const getCodexHome = () => process.env.CODEX_HOME || join(homedir(), '.codex');
 
 /** @param {unknown} value */
 const extractContentText = (value) => {
@@ -66,10 +62,11 @@ const pathMatchesSessionId = (path, sessionId) =>
   path.endsWith('.jsonl') && path.toLowerCase().includes(sessionId.toLowerCase());
 
 /**
+ * @param {RepositoryHost} host
  * @param {string} root
  * @param {string} sessionId
  */
-const findCodexSessionFile = async (root, sessionId) => {
+const findCodexSessionFile = async (host, root, sessionId) => {
   if (!sessionId) {
     return null;
   }
@@ -84,25 +81,24 @@ const findCodexSessionFile = async (root, sessionId) => {
       continue;
     }
 
-    /** @type {Array<import('node:fs').Dirent>} */
+    /** @type {Awaited<ReturnType<RepositoryHost['readdir']>>} */
     let entries;
     try {
-      entries = (await readdir(directory, { withFileTypes: true })).sort((a, b) =>
-        b.name.localeCompare(a.name),
-      );
-    } catch {
+      entries = (await host.readdir(directory)).sort((a, b) => b.name.localeCompare(a.name));
+    } catch (error) {
+      if (error instanceof Error && error.name.startsWith('Host')) throw error;
       continue;
     }
 
     const directories = [];
     for (const entry of entries) {
       scanned += 1;
-      const path = join(directory, entry.name);
-      if (entry.isFile() && pathMatchesSessionId(path, sessionId)) {
+      const path = hostPath(host).join(directory, entry.name);
+      if (entry.type === 'file' && pathMatchesSessionId(path, sessionId)) {
         return path;
       }
 
-      if (entry.isDirectory()) {
+      if (entry.type === 'directory') {
         directories.push(path);
       }
 
@@ -152,13 +148,13 @@ const extractMessage = (input) => {
   return { role, text };
 };
 
-/** @param {string} sessionPath */
-const readSessionMessages = async (sessionPath) => {
+/** @param {RepositoryHost} host @param {string} sessionPath */
+const readSessionMessages = async (host, sessionPath) => {
   /** @type {Array<{role: 'assistant' | 'user'; text: string}>} */
   const messages = [];
   let totalChars = 0;
 
-  for (const line of (await readSessionFileTail(sessionPath)).split('\n')) {
+  for (const line of (await readSessionFileTail(host, sessionPath)).split('\n')) {
     if (!line.trim()) {
       continue;
     }
@@ -195,17 +191,22 @@ const readSessionMessages = async (sessionPath) => {
 };
 
 /**
+ * @param {RepositoryHost} host
  * @param {string | undefined} codexSessionId
  * @returns {Promise<WalkthroughContext | null>}
  */
-const readCodexSessionContext = async (codexSessionId) => {
+const readCodexSessionContext = async (host, codexSessionId) => {
   const threadId = normalizeCodexSessionId(codexSessionId);
   if (!threadId) {
     return null;
   }
 
-  const path = await findCodexSessionFile(join(getCodexHome(), 'sessions'), threadId);
-  const messages = path ? await readSessionMessages(path) : [];
+  const path = await findCodexSessionFile(
+    host,
+    hostPath(host).join(await getSessionHome(host, 'CODEX_HOME', '.codex'), 'sessions'),
+    threadId,
+  );
+  const messages = path ? await readSessionMessages(host, path) : [];
 
   return {
     messages,

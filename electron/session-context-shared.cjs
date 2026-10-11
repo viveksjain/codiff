@@ -1,58 +1,30 @@
 // @ts-check
-
-const { open } = require('node:fs/promises');
-
+const { join, posix } = require('node:path');
 const MAX_SESSION_READ_BYTES = 16 * 1024 * 1024;
-
-/** @param {string} path */
-const readSessionFileTail = async (path) => {
-  /** @type {import('node:fs/promises').FileHandle | undefined} */
-  let handle;
-
+/** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
+/** @param {RepositoryHost} host */
+const hostPath = (host) => (host.id === 'local' ? { join } : posix);
+/** @param {RepositoryHost} host @param {string} override @param {string} defaultDirectory */
+const getSessionHome = async (host, override, defaultDirectory) => {
+  const environment = await host.getEnvironment();
+  const home = environment.HOME || environment.USERPROFILE;
+  if (environment[override]) return environment[override];
+  if (!home) throw new Error(`HOME is unavailable on ${host.label || 'this machine'}.`);
+  return hostPath(host).join(home, defaultDirectory);
+};
+/** @param {RepositoryHost} host @param {string} path */
+const readSessionFileTail = async (host, path) => {
   try {
-    handle = await open(path, 'r');
-    const file = await handle.stat();
-    if (!file.isFile() || file.size === 0) {
-      return '';
-    }
-
-    const length = Math.min(file.size, MAX_SESSION_READ_BYTES);
-    const offset = file.size - length;
-    const buffer = Buffer.allocUnsafe(length);
-    let totalBytesRead = 0;
-
-    while (totalBytesRead < length) {
-      const { bytesRead } = await handle.read(
-        buffer,
-        totalBytesRead,
-        length - totalBytesRead,
-        offset + totalBytesRead,
-      );
-      if (bytesRead === 0) {
-        break;
-      }
-      totalBytesRead += bytesRead;
-    }
-
-    const text = buffer.toString('utf8', 0, totalBytesRead);
-
-    if (offset === 0) {
-      return text;
-    }
-
-    const precedingByte = Buffer.allocUnsafe(1);
-    const { bytesRead: precedingBytesRead } = await handle.read(precedingByte, 0, 1, offset - 1);
-    if (precedingBytesRead === 1 && precedingByte[0] === 0x0a) {
-      return text;
-    }
-
-    const firstCompleteLine = text.indexOf('\n');
-    return firstCompleteLine === -1 ? '' : text.slice(firstCompleteLine + 1);
-  } catch {
+    const stat = await host.stat(path);
+    if (stat.type !== 'file' || !stat.size) return '';
+    const truncated = stat.size > MAX_SESSION_READ_BYTES;
+    const buffer = await host.readFileTail(path, MAX_SESSION_READ_BYTES + (truncated ? 1 : 0));
+    if (!truncated) return buffer.toString('utf8');
+    const newline = buffer.indexOf(10);
+    return newline < 0 ? '' : buffer.subarray(newline + 1).toString('utf8');
+  } catch (error) {
+    if (error instanceof Error && error.name.startsWith('Host')) throw error;
     return '';
-  } finally {
-    await handle?.close().catch(() => {});
   }
 };
-
-module.exports = { readSessionFileTail };
+module.exports = { readSessionFileTail, getSessionHome, hostPath };

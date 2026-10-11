@@ -122,11 +122,15 @@ test('old configurations retain automatic reasoning and custom values survive sa
       openAIModel: 'gpt-6.1-sol',
       openAIReasoningEffort: 'ultra',
     });
-    await vi.waitFor(() =>
-      expect(reloaded?.settings).toMatchObject({
-        openAIModel: 'gpt-6.1-sol',
-        openAIReasoningEffort: 'ultra',
-      }),
+    // Native filesystem events plus the reload debounce can exceed one second
+    // when this integration test runs alongside the full suite.
+    await vi.waitFor(
+      () =>
+        expect(reloaded?.settings).toMatchObject({
+          openAIModel: 'gpt-6.1-sol',
+          openAIReasoningEffort: 'ultra',
+        }),
+      { timeout: 5000 },
     );
   } finally {
     stop();

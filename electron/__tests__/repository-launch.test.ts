@@ -45,7 +45,6 @@ test('local-only launch workflows are rejected before remote acquisition', async
   };
   for (const extra of [
     { planFile: '/local/plan.md' },
-    { walkthrough: true },
     { source: { type: 'pull-request', url: 'https://github.com/a/b/pull/1' } },
   ]) {
     await expect(
@@ -53,4 +52,34 @@ test('local-only launch workflows are rejected before remote acquisition', async
     ).rejects.toThrow(/unavailable|not available/);
   }
   expect(acquires).toBe(0);
+});
+
+test('remote walkthrough launches retain local context and file options', async () => {
+  let released = false;
+  const context = {
+    localHost: { id: 'local' },
+    registry: {
+      acquire: async () => ({
+        host: {
+          id: 'ssh://devbox',
+          exec: async () => Buffer.from('/remote/repo\n'),
+          realpath: async (path: string) => path,
+        },
+        release: async () => {
+          released = true;
+        },
+      }),
+    },
+  };
+  const extra = {
+    ...options,
+    walkthrough: true,
+    walkthroughFile: '/local/walkthrough.json',
+    walkthroughContext: { version: 1, summary: 'local supplied' },
+  };
+  const result = await resolveRepositoryLaunch(context, 'devbox:/repo', extra);
+  expect(result.launchOptions).toMatchObject(extra);
+  expect(result.repositoryPath).toBe('/remote/repo');
+  await result.release();
+  expect(released).toBe(true);
 });

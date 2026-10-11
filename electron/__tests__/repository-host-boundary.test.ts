@@ -16,6 +16,11 @@ const guardedModules = [
   'repository-file.cjs',
   'repository-watcher.cjs',
   'walkthrough-commit.cjs',
+  'session-context-shared.cjs',
+  'claude-session-context.cjs',
+  'codex-session-context.cjs',
+  'pi-session-context.cjs',
+  'opencode-session-context.cjs',
 ];
 
 const forbiddenModules = [

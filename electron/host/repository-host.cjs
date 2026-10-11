@@ -70,6 +70,10 @@
  *   stat: (path: string) => Promise<HostStat>;
  *   lstatMany: (paths: ReadonlyArray<string>) => Promise<Array<HostStat | null>>;
  *   readFile: (path: string) => Promise<Buffer>;
+ *   readFileTail: (path: string, maxBytes: number) => Promise<Buffer>;
+ *   readdir: (path: string) => Promise<Array<{name: string; type: HostFileType}>>;
+ *   getEnvironment: () => Promise<Readonly<Record<string, string>>>;
+ *   resolveCommand: (name: string) => Promise<string | null>;
  *   readFiles: (paths: ReadonlyArray<string>) => Promise<Array<Buffer | Error>>;
  *   readlink: (path: string) => Promise<string>;
  *   realpath: (path: string) => Promise<string>;

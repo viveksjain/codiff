@@ -339,6 +339,7 @@ export default function App() {
     walkthroughUnread,
   } = useAppWalkthrough({
     preferencesRef,
+    repositoryConnected: !disconnected,
     state,
     stateGenerationRef,
     stateRef,
@@ -1758,7 +1759,7 @@ export default function App() {
     itemVersionByKey,
     keymap: codiffConfig.keymap,
     loadingSectionIds,
-    onAskCodex: hostInfo.remote ? undefined : askCodex,
+    onAskCodex: disconnected ? undefined : askCodex,
     onCommentDraftChange: updateActiveReviewCommentDraft,
     onCreateComment: createComment,
     onDeleteComment: deleteComment,
@@ -1888,9 +1889,10 @@ export default function App() {
           </>
         }
         mode={sidebarMode}
-        modes={
-          hostInfo.remote ? reviewModes.filter((mode) => mode.value !== 'walkthrough') : reviewModes
-        }
+        modes={reviewModes.map((mode) => ({
+          ...mode,
+          disabled: mode.value === 'walkthrough' && disconnected,
+        }))}
         onModeChange={changeSidebarMode}
         onToggleSidebar={toggleSidebar}
         repository={
@@ -2030,10 +2032,11 @@ export default function App() {
             model={plainCommitModel}
             onCommit={commitWalkthrough}
             onCommitOutput={subscribeToCommitOutput}
-            onUpdateMessage={hostInfo.remote ? undefined : updateWalkthroughCommitMessage}
+            onUpdateMessage={disconnected ? undefined : updateWalkthroughCommitMessage}
           />
         ) : showNarrativeWalkthrough && narrativeWalkthrough ? (
           <NarrativeWalkthroughView
+            disabled={disconnected}
             files={state.files}
             navigation={narrativeNavigation}
             onActiveReviewTargetChange={updateActiveWalkthroughReviewTarget}

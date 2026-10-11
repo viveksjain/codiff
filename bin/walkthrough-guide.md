@@ -13,6 +13,15 @@ a commit, branch, pull request, ref range, or repository path. If nothing is sta
 to the working tree (`git diff`) and say so. Anchor every `hunkId` against whichever diff you
 choose.
 
+For an SSH repository, run Codiff on the laptop with a target such as
+`codiff --walkthrough devbox:~/src/app`. Generated walkthroughs use the selected
+agent CLI, credentials and linked-session transcripts on that remote host.
+The selected agent must be installed there; Codiff reports a missing remote CLI
+without switching agents or running it locally. `--context` and `--walkthrough-file`
+still name local files on the laptop. To open an authored document against a remote
+diff, use `codiff --walkthrough-file /tmp/walkthrough.json devbox:~/src/app`;
+`--share` also supports remote walkthroughs. PR/MR and plan reviews remain local.
+
 ## Shape
 
 - **`version` / `kind` / `title` / `focus`** — use `version: 4`, `kind: "narrative"`,

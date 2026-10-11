@@ -41,6 +41,7 @@ const { normalizePiModel } = require('./pi.cjs');
 const {
   detectInitialAgentBackend,
   getAgent,
+  getAgentForHost,
   getAgentMenuModels,
   listAgents,
   normalizeAgentBackend,
@@ -221,17 +222,21 @@ const readRepositoryStateWithConfig = async (host, repositoryPath, source) => {
 };
 
 /** @param {RepositoryHost} host @param {string} repositoryPath @param {CodiffLaunchOptions} launchOptions */
-const readInitialRepositoryStateWithConfig = (host, repositoryPath, launchOptions) =>
-  launchOptions.walkthrough && !launchOptions.walkthroughFile
-    ? readWalkthroughRepositoryState(host, repositoryPath, launchOptions.source, {
-        showWhitespace: config.settings.showWhitespace,
-      })
-    : readRepositoryStateWithConfig(host, repositoryPath, launchOptions.source);
+const readInitialRepositoryStateWithConfig = async (host, repositoryPath, launchOptions) => {
+  const state =
+    launchOptions.walkthrough && !launchOptions.walkthroughFile
+      ? await readWalkthroughRepositoryState(host, repositoryPath, launchOptions.source, {
+          showWhitespace: config.settings.showWhitespace,
+        })
+      : await readRepositoryStateWithConfig(host, repositoryPath, launchOptions.source);
+  return host.id === 'local' ? state : { ...state, hostId: host.id, hostLabel: host.label };
+};
 
 /** @param {number} webContentsId */
 const resolveWindowAgent = (webContentsId) => {
   const override = windowLaunchOptions.get(webContentsId)?.agentBackend;
-  return getAgent(
+  return getAgentForHost(
+    getWindowRepository(webContentsId).host,
     override === 'codex' || override === 'claude' || override === 'opencode' || override === 'pi'
       ? override
       : config.settings.agentBackend,
@@ -1857,7 +1862,7 @@ ipcMain.handle('codiff:installTerminalHelper', async (event) => {
 });
 
 ipcMain.handle('codiff:getNarrativeWalkthrough', async (event, source, options) => {
-  assertLocalWindow(event.sender.id, 'getNarrativeWalkthrough');
+  assertConnectedWindow(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const progressGeneration = (walkthroughProgressGenerations.get(event.sender.id) || 0) + 1;
   walkthroughProgressGenerations.set(event.sender.id, progressGeneration);
@@ -2054,7 +2059,7 @@ ipcMain.handle('codiff:getFeatureFlags', async (event) => {
 });
 
 ipcMain.handle('codiff:askReviewAssistant', async (event, request) => {
-  assertLocalWindow(event.sender.id, 'askReviewAssistant');
+  assertConnectedWindow(event.sender.id);
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const state = await readRepositoryStateWithConfig(
@@ -2081,7 +2086,7 @@ ipcMain.handle('codiff:createWalkthroughCommit', async (event, request) => {
 });
 
 ipcMain.handle('codiff:updateWalkthroughCommitMessage', async (event, request) => {
-  assertLocalWindow(event.sender.id, 'updateWalkthroughCommitMessage');
+  assertConnectedWindow(event.sender.id);
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const state = await readRepositoryStateWithConfig(

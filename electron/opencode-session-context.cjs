@@ -1,11 +1,8 @@
 // @ts-check
 
-const { spawn } = require('node:child_process');
-const { closeSync, mkdtempSync, openSync, rmSync } = require('node:fs');
-const { readFile, stat } = require('node:fs/promises');
-const { tmpdir } = require('node:os');
-const { join } = require('node:path');
 const { cleanText, truncate } = require('./agent-shared.cjs');
+const { exportLocalCommandOutput } = require('./host/local-command-output.cjs');
+const { hostPath } = require('./session-context-shared.cjs');
 const { getOpenCodeCommand } = require('./opencode.cjs');
 
 const OPENCODE_EXPORT_TIMEOUT_MS = 15_000;
@@ -16,6 +13,7 @@ const MAX_SESSION_CONTEXT_CHARS = 28_000;
 const SESSION_ID_PATTERN = /^ses_[a-z0-9]{8,}$/i;
 
 /**
+ * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../core/types.ts').WalkthroughContext} WalkthroughContext
  */
 
@@ -122,108 +120,59 @@ const isMatchingSessionExport = (input, sessionId) =>
     input.info.id === sessionId,
   );
 
-/**
- * @param {string} sessionId
- * @param {number} [timeoutMs]
- */
-const exportOpenCodeSession = (sessionId, timeoutMs = OPENCODE_EXPORT_TIMEOUT_MS) =>
-  new Promise((resolve) => {
-    const directory = mkdtempSync(join(tmpdir(), 'codiff-opencode-session-'));
-    const path = join(directory, 'session.json');
-    let output;
-    let settled = false;
-    let timedOut = false;
-    /** @type {ReturnType<typeof setTimeout> | undefined} */
-    let timeout;
-
-    const closeOutput = () => {
-      if (output == null) {
-        return;
-      }
-
-      try {
-        closeSync(output);
-      } catch {}
-      output = undefined;
-    };
-
-    const removeDirectory = () => {
-      try {
-        rmSync(directory, { force: true, recursive: true });
-      } catch {}
-    };
-
-    /** @param {unknown} value */
-    const finish = (value) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      closeOutput();
-      removeDirectory();
-      resolve(value);
-    };
-
-    try {
-      output = openSync(path, 'w', 0o600);
-      // OpenCode can truncate large exports when stdout is a pipe. Writing
-      // directly to a file descriptor preserves the complete JSON document.
-      const child = spawn(getOpenCodeCommand(), ['export', '--pure', sessionId], {
-        stdio: ['ignore', output, 'ignore'],
-        windowsHide: true,
+/** @param {RepositoryHost} host @param {string} sessionId */
+const exportOpenCodeSession = async (host, sessionId) => {
+  const environment = await host.getEnvironment();
+  const command =
+    host.id === 'local'
+      ? getOpenCodeCommand()
+      : await host.resolveCommand(environment.CODIFF_OPENCODE_PATH || 'opencode');
+  if (!command) return null;
+  if (host.id === 'local') {
+    const input = await exportLocalCommandOutput(
+      command,
+      ['export', '--pure', sessionId],
+      OPENCODE_EXPORT_TIMEOUT_MS,
+      MAX_OPENCODE_EXPORT_BYTES,
+    );
+    return isMatchingSessionExport(input, sessionId) ? input : null;
+  }
+  const directory = await host.mkdtemp('codiff-opencode-session-');
+  try {
+    const path = hostPath(host).join(directory, 'session.json');
+    await new Promise((resolve, reject) => {
+      const child = host.spawn(
+        '/bin/sh',
+        ['-c', 'exec "$1" export --pure "$2" > "$3"', 'sh', command, sessionId, path],
+        { env: environment },
+      );
+      const timer = setTimeout(() => child.kill('SIGKILL'), OPENCODE_EXPORT_TIMEOUT_MS);
+      child.stdout.resume();
+      child.stderr.resume();
+      child.stdin.end();
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
       });
-      timeout = setTimeout(() => {
-        timedOut = true;
-        try {
-          child.kill('SIGKILL');
-        } catch {}
-        finish(null);
-      }, timeoutMs);
-      child.once('error', () => finish(null));
-      child.once('close', async (code) => {
-        if (settled) {
-          closeOutput();
-          removeDirectory();
-          return;
-        }
-
-        if (timedOut || code !== 0) {
-          finish(null);
-          return;
-        }
-
-        if (timeout) {
-          clearTimeout(timeout);
-          timeout = undefined;
-        }
-        closeOutput();
-
-        try {
-          if ((await stat(path)).size > MAX_OPENCODE_EXPORT_BYTES) {
-            finish(null);
-            return;
-          }
-
-          const input = JSON.parse(await readFile(path, 'utf8'));
-          finish(isMatchingSessionExport(input, sessionId) ? input : null);
-        } catch {
-          finish(null);
-        }
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        code === 0 ? resolve(undefined) : reject(new Error('OpenCode export failed.'));
       });
-    } catch {
-      finish(null);
-    }
-  });
+    });
+    if ((await host.stat(path)).size > MAX_OPENCODE_EXPORT_BYTES) return null;
+    const input = JSON.parse((await host.readFile(path)).toString('utf8'));
+    return isMatchingSessionExport(input, sessionId) ? input : null;
+  } finally {
+    await host.rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+};
 
 /**
+ * @param {RepositoryHost} host
  * @param {string | undefined} opencodeSessionId
  * @returns {Promise<WalkthroughContext | null>}
  */
-const readOpenCodeSessionContext = async (opencodeSessionId) => {
+const readOpenCodeSessionContext = async (host, opencodeSessionId) => {
   const threadId = normalizeOpenCodeSessionId(opencodeSessionId);
   if (!threadId) {
     return null;
@@ -231,8 +180,9 @@ const readOpenCodeSessionContext = async (opencodeSessionId) => {
 
   let session;
   try {
-    session = await exportOpenCodeSession(threadId);
-  } catch {
+    session = await exportOpenCodeSession(host, threadId);
+  } catch (error) {
+    if (error instanceof Error && error.name.startsWith('Host')) throw error;
     session = null;
   }
   const messages = extractSessionMessages(session);

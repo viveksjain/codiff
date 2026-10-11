@@ -136,6 +136,7 @@ const runCodiffUpdate = () => {
 };
 
 let remoteHandoff;
+let remoteShareHost;
 const run = async () => {
   const rawArguments = process.argv.slice(2);
   if (rawArguments.length === 1 && rawArguments[0] === 'update') {
@@ -195,14 +196,8 @@ const run = async () => {
     ) {
       throw new Error('PR/MR reviews are unavailable for remote repositories.');
     }
-    if (
-      parsedArguments.planFilePath ||
-      parsedArguments.walkthrough ||
-      parsedArguments.walkthroughFilePath ||
-      parsedArguments.walkthroughContextPath ||
-      parsedArguments.share
-    ) {
-      throw new Error('Remote walkthrough and local-file workflows are not available yet.');
+    if (parsedArguments.planFilePath) {
+      throw new Error('Plan reviews are unavailable for remote repositories.');
     }
     const target = parsedArguments.remoteTarget;
     const connection = createSshConnection({
@@ -213,7 +208,14 @@ const run = async () => {
     const adopted = await connection.check();
     remoteHandoff = createRemoteHandoff(connection, adopted);
     await connection.ensureMaster();
-    const host = await connectSshHost({ alias: target.alias, connection });
+    const host = await connectSshHost({
+      alias: target.alias,
+      connection: {
+        ...connection,
+        exitMaster: () => remoteHandoff.cleanup(),
+      },
+    });
+    if (parsedArguments.share) remoteShareHost = host;
     parsedArguments.requestedPath = await resolveRemoteRepository(host, target.path);
     const source = await resolveRemoteSource(host, parsedArguments.requestedPath, {
       candidate: parsedArguments.remoteSourceCandidate,
@@ -319,11 +321,11 @@ const run = async () => {
         source,
       };
       const url = walkthroughFilePath
-        ? await shareWalkthroughFile(localHost, {
+        ? await shareWalkthroughFile(remoteShareHost || localHost, {
             ...commonOptions,
             walkthroughFile: walkthroughFilePath,
           })
-        : await generateAndShareWalkthrough(localHost, {
+        : await generateAndShareWalkthrough(remoteShareHost || localHost, {
             ...commonOptions,
             claudeSessionId,
             codexSessionId,
@@ -424,4 +426,7 @@ run()
     process.stderr.write(`codiff: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   })
-  .finally(() => remoteHandoff?.cleanup());
+  .finally(async () => {
+    await remoteShareHost?.close();
+    await remoteHandoff?.cleanup();
+  });

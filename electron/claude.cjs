@@ -24,6 +24,7 @@ const CLAUDE_NOT_LOGGED_IN_MESSAGE =
 /**
  * @typedef {{
  *   fallbackModel?: string;
+ *   repositoryHost?: import('./host/repository-host.cjs').RepositoryHost;
  *   commandTransport?: import('./agent-command.cjs').AgentCommandTransport;
  *   model?: string;
  *   onModelFallback?: (fallbackModel: string, originalModel: string) => Promise<void> | void;
@@ -236,7 +237,9 @@ const runClaude = async (
 
   /** @param {string} claudeModel @returns {Promise<string>} */
   const invokeClaude = async (claudeModel) => {
-    const environment = await getCommandEnvironment();
+    const environment = await (options.repositoryHost
+      ? options.repositoryHost.getEnvironment()
+      : getCommandEnvironment());
     return /** @type {Promise<string>} */ (
       new Promise((resolve, reject) => {
         let stderr = '';
@@ -277,7 +280,11 @@ const runClaude = async (
         const timer = setTimeout(() => {
           if (!finished) {
             finished = true;
-            child.kill('SIGTERM');
+            child.kill(
+              options.repositoryHost?.id !== 'local' && options.repositoryHost
+                ? 'SIGKILL'
+                : 'SIGTERM',
+            );
             reject(new Error(timeoutMessage));
           }
         }, timeoutMs);

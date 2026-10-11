@@ -6,10 +6,15 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
-
+import type { RepositoryHost } from '../host/repository-host.cjs';
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs');
+const host: RepositoryHost = createLocalHost();
 const { readPiSessionContext } = require('../pi-session-context.cjs') as {
-  readPiSessionContext: (sessionId?: string) => Promise<{
+  readPiSessionContext: (
+    host: RepositoryHost,
+    sessionId?: string,
+  ) => Promise<{
     messages?: ReadonlyArray<{ role: 'assistant' | 'user'; text: string }>;
     risks?: ReadonlyArray<string>;
     source: { threadId?: string; type: string };
@@ -54,7 +59,7 @@ test('extracts bounded readable messages from Pi session jsonl', async () => {
     ].join('\n'),
   );
 
-  await expect(readPiSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readPiSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [
       { role: 'user', text: 'Implement walkthrough session handoff.' },
       { role: 'assistant', text: 'Updated the Pi skill handoff.' },
@@ -85,7 +90,7 @@ test('finds the active Pi session under PI_HOME', async () => {
     })}\n`,
   );
 
-  await expect(readPiSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readPiSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [
       {
         role: 'user',
@@ -101,7 +106,7 @@ test('finds the active Pi session under PI_HOME', async () => {
 });
 
 test('ignores invalid Pi session ids', async () => {
-  await expect(readPiSessionContext('../../sessions')).resolves.toBeNull();
+  await expect(readPiSessionContext(host, '../../sessions')).resolves.toBeNull();
 });
 
 test('reads recent Pi messages from a large session without loading the whole file', async () => {
@@ -124,7 +129,7 @@ test('reads recent Pi messages from a large session without loading the whole fi
     })}\n`,
   );
 
-  await expect(readPiSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readPiSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [{ role: 'user', text: 'Newest bounded Pi message.' }],
   });
 });

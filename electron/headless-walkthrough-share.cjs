@@ -1,7 +1,7 @@
 // @ts-check
 
 const { readFileSync } = require('node:fs');
-const { getAgent } = require('./agent.cjs');
+const { getAgentForHost } = require('./agent.cjs');
 const { readConfig, writeConfig } = require('./config.cjs');
 const { createCloudflareAccessClient } = require('./cloudflare-access.cjs');
 const {
@@ -247,7 +247,7 @@ const generateAndShareWalkthrough = async (
   },
 ) => {
   const config = readConfig();
-  const agent = getAgent(agentOverride || config.settings.agentBackend);
+  const agent = getAgentForHost(host, agentOverride || config.settings.agentBackend);
   const [state, uploader] = await readGeneratedShareState(host, repositoryPath, source, config);
   const sessionIds = {
     claudeSessionId,

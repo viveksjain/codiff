@@ -6,10 +6,15 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
-
+import type { RepositoryHost } from '../host/repository-host.cjs';
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs');
+const host: RepositoryHost = createLocalHost();
 const { readCodexSessionContext } = require('../codex-session-context.cjs') as {
-  readCodexSessionContext: (sessionId?: string) => Promise<{
+  readCodexSessionContext: (
+    host: RepositoryHost,
+    sessionId?: string,
+  ) => Promise<{
     messages?: ReadonlyArray<{ role: 'assistant' | 'user'; text: string }>;
     risks?: ReadonlyArray<string>;
     source: { threadId?: string; type: string };
@@ -64,7 +69,7 @@ test('extracts bounded readable messages from Codex session jsonl', async () => 
     ].join('\n'),
   );
 
-  await expect(readCodexSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readCodexSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [
       { role: 'user', text: 'Implement walkthrough session handoff.' },
       { role: 'assistant', text: 'Updated the CLI and skill handoff.' },
@@ -96,7 +101,7 @@ test('finds the active Codex session under CODEX_HOME', async () => {
     })}\n`,
   );
 
-  await expect(readCodexSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readCodexSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [
       {
         role: 'user',
@@ -144,7 +149,7 @@ test('searches newer Codex session directories first', async () => {
     })}\n`,
   );
 
-  await expect(readCodexSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readCodexSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [{ role: 'user', text: 'Newer message.' }],
   });
 });
@@ -172,7 +177,7 @@ test('reads recent Codex messages from a large session without loading the whole
     'utf8',
   );
 
-  await expect(readCodexSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readCodexSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [{ role: 'user', text: 'Newest bounded Codex message.' }],
   });
 });

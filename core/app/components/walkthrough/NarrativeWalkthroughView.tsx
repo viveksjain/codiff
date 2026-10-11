@@ -516,6 +516,7 @@ function Arc({
 
 export function NarrativeWalkthroughView({
   allowCommit = true,
+  disabled = false,
   files,
   navigation,
   onActiveReviewTargetChange,
@@ -530,6 +531,7 @@ export function NarrativeWalkthroughView({
   walkthrough,
 }: {
   allowCommit?: boolean;
+  disabled?: boolean;
   files: ReadonlyArray<ChangedFile>;
   navigation: NarrativeNavigation;
   onActiveReviewTargetChange: (target: WalkthroughReviewTarget | null) => void;
@@ -545,7 +547,7 @@ export function NarrativeWalkthroughView({
 }) {
   const hasStatus = status != null;
   const { walkthroughView } = navigation;
-  const committable = allowCommit && isWalkthroughCommittable(walkthrough);
+  const committable = allowCommit && !disabled && isWalkthroughCommittable(walkthrough);
   const walkthroughBlocks = useMemo(
     () =>
       walkthroughView
@@ -723,6 +725,7 @@ export function NarrativeWalkthroughView({
       {navigation.mode === 'commit' ? (
         <CommitView
           branch={walkthrough.repo.branch}
+          disabled={disabled}
           draft={navigation}
           model={buildCommitModel(walkthroughView, files)}
           onCommit={onCommit}

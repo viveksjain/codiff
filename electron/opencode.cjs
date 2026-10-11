@@ -321,6 +321,7 @@ const getOpenCodeServerModel = (model) => {
  * @param {string} [_outputName]
  * @param {string} [timeoutMessage]
  * @param {{
+ *   repositoryHost?: import('./host/repository-host.cjs').RepositoryHost;
  *   commandTransport?: import('./agent-command.cjs').AgentCommandTransport;
  *   fallbackModel?: string;
  *   model?: string;
@@ -345,7 +346,9 @@ const runOpenCode = async (
 
   /** @param {string} openCodeModel */
   const invokeOpenCodeCli = async (openCodeModel) => {
-    const environment = await getCommandEnvironment();
+    const environment = await (options.repositoryHost
+      ? options.repositoryHost.getEnvironment()
+      : getCommandEnvironment());
     return /** @type {Promise<string>} */ (
       new Promise((resolve, reject) => {
         let stderr = '';
@@ -381,7 +384,11 @@ const runOpenCode = async (
         const timer = setTimeout(() => {
           if (!finished) {
             finished = true;
-            child.kill('SIGTERM');
+            child.kill(
+              options.repositoryHost?.id !== 'local' && options.repositoryHost
+                ? 'SIGKILL'
+                : 'SIGTERM',
+            );
             reject(new Error(timeoutMessage));
           }
         }, timeoutMs);
@@ -441,7 +448,9 @@ const runOpenCode = async (
       getOpenCodeCommand,
     );
     const port = await reserveOpenCodePort();
-    const environment = await getCommandEnvironment();
+    const environment = await (options.repositoryHost
+      ? options.repositoryHost.getEnvironment()
+      : getCommandEnvironment());
     const child = commandTransport.spawn(
       commandTransport.command,
       ['serve', '--pure', '--hostname=127.0.0.1', `--port=${port}`],
@@ -619,14 +628,16 @@ const runOpenCode = async (
       }
       abortController.abort();
       if (!child.killed) {
-        child.kill('SIGTERM');
+        child.kill(
+          options.repositoryHost?.id !== 'local' && options.repositoryHost ? 'SIGKILL' : 'SIGTERM',
+        );
       }
     }
   };
 
   /** @param {string} openCodeModel */
   const invokeOpenCode = async (openCodeModel) => {
-    if (!options.onProgress) {
+    if (!options.onProgress || (options.repositoryHost && options.repositoryHost.id !== 'local')) {
       return invokeOpenCodeCli(openCodeModel);
     }
     try {

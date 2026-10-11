@@ -21,6 +21,7 @@ const {
 } = require('./shell-quote.cjs');
 const { getSshHostId } = require('./repository-target.cjs');
 const { createSshConnection } = require('./ssh-connection.cjs');
+const { ENVIRONMENT_COMMAND, parseEnvironment } = require('./environment.cjs');
 
 /**
  * @typedef {import('./repository-host.cjs').HostPty} HostPty
@@ -351,6 +352,7 @@ const createPidMarkerFilter = (onPid) => {
  *   alias: string;
  *   connection: SshConnection;
  *   dialect: ShellDialect;
+ *   loginShell?: string;
  *   masterCheckIntervalMs?: number;
  *   statFlavor: StatFlavor;
  * }} options
@@ -360,6 +362,7 @@ const createSshHost = ({
   alias,
   connection,
   dialect,
+  loginShell = '/bin/sh',
   masterCheckIntervalMs = 5000,
   statFlavor,
 }) => {
@@ -521,12 +524,17 @@ const createSshHost = ({
   /** @param {number} pid @param {NodeJS.Signals | number} signal */
   const killRemote = (pid, signal) => {
     const signalNumber = typeof signal === 'number' ? signal : signal.slice(3);
+    // Freeze each owned process before discovering children so wrappers cannot
+    // fork new workers during forced cancellation. Stop descendants before
+    // signalling them together, then release the SSH channel after cleanup.
+    const script =
+      signalNumber === 'KILL' || signalNumber === 9
+        ? `targets=''; stop_tree() { kill -STOP "$1" 2>/dev/null || return; for descendant in $(ps -ax -o pid= -o ppid= | awk -v parent="$1" '$2 == parent { print $1 }'); do stop_tree "$descendant"; done; targets="$targets $1"; }; stop_tree ${Math.trunc(pid)}; [ -z "$targets" ] || kill -KILL $targets 2>/dev/null; :`
+        : `kill -${signalNumber} ${Math.trunc(pid)} 2>/dev/null; :`;
     const pending = killLimit(
       () =>
         new Promise((resolve) => {
-          const child = connection.spawnClient(
-            toRemoteCommand(`kill -${signalNumber} ${Math.trunc(pid)} 2>/dev/null; :`),
-          );
+          const child = connection.spawnClient(toRemoteCommand(script));
           child.on('error', () => {});
           child.on('close', () => resolve(undefined));
           child.stdout.resume();
@@ -535,6 +543,7 @@ const createSshHost = ({
         }),
     ).finally(() => kills.delete(pending));
     kills.add(pending);
+    return pending;
   };
 
   /**
@@ -575,9 +584,10 @@ const createSshHost = ({
     const killNow = () => {
       clearTimer();
       if (pid != null) {
-        killRemote(pid, killSignal);
+        void killRemote(pid, killSignal).finally(() => child.kill(killSignal));
+      } else {
+        child.kill(killSignal);
       }
-      child.kill(killSignal);
     };
     const remote = {
       done,
@@ -596,7 +606,13 @@ const createSshHost = ({
       },
       /** @param {NodeJS.Signals | number} [signal] */
       kill: (signal = 'SIGTERM') => {
-        if (killed || exited) {
+        if (
+          exited ||
+          (killed &&
+            (killSignal === 'SIGKILL' ||
+              killSignal === 9 ||
+              (signal !== 'SIGKILL' && signal !== 9)))
+        ) {
           return false;
         }
         if (
@@ -677,7 +693,7 @@ const createSshHost = ({
       let stderrEnded = false;
 
       const abort = () => {
-        remote.kill();
+        remote.kill('SIGKILL');
         fail(createAbortError());
       };
       const cleanup = () => signal?.removeEventListener('abort', abort);
@@ -708,7 +724,7 @@ const createSshHost = ({
         }
         stdoutBytes += chunk.length;
         if (stdoutBytes > maxBuffer) {
-          remote.kill();
+          remote.kill('SIGKILL');
           fail(new Error(`${label} output exceeded ${maxBuffer} bytes.`));
           return;
         }
@@ -1029,7 +1045,71 @@ const createSshHost = ({
 
   /** @type {Promise<void> | null} */
   let closePromise = null;
+  /** @type {Promise<Readonly<Record<string, string>>> | null} */
+  let environmentPromise = null;
+  const getEnvironment = () => {
+    assertOpen();
+    environmentPromise ??= exec(loginShell, ['-l', '-i', '-c', ENVIRONMENT_COMMAND], {
+      signal: AbortSignal.timeout(10_000),
+    })
+      .then((output) => Object.freeze(parseEnvironment(output.toString('utf8'))))
+      .catch((error) => {
+        environmentPromise = null;
+        throw error;
+      });
+    return environmentPromise;
+  };
   return Object.freeze({
+    getEnvironment,
+    readdir: async (path) => {
+      const output = await run(
+        'readdir',
+        path,
+        `dir=${quotePosix(assertAbsolute(path))}; [ -d "$dir" ] || exit 1; for p in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; type=other; if [ -L "$p" ]; then type=symlink; elif [ -d "$p" ]; then type=directory; elif [ -f "$p" ]; then type=file; fi; printf '%s\\0%s\\0' "$type" "\${p##*/}"; done`,
+      );
+      const fields = output.toString('utf8').split('\0');
+      fields.pop();
+      if (fields.length % 2) throw new Error('Invalid directory listing.');
+      /** @type {Array<{name: string; type: import('./repository-host.cjs').HostFileType}>} */
+      const entries = [];
+      for (let index = 0; index < fields.length; index += 2) {
+        const type = fields[index];
+        if (type !== 'file' && type !== 'directory' && type !== 'symlink' && type !== 'other')
+          throw new Error('Invalid directory entry.');
+        entries.push({ name: fields[index + 1], type });
+      }
+      return entries;
+    },
+    readFileTail: async (path, maxBytes) => {
+      assertOpen();
+      assertAbsolute(path);
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error('Invalid tail size.');
+      if (!maxBytes) return Buffer.alloc(0);
+      return run(
+        'readFileTail',
+        path,
+        `[ -f ${quotePosix(path)} ] || exit 1; exec tail -c ${maxBytes} ${quotePosix(path)}`,
+      );
+    },
+    resolveCommand: async (name) => {
+      assertOpen();
+      if (!name || name.startsWith('-') || name.includes('\0'))
+        throw new Error('Invalid command name.');
+      try {
+        return (
+          (
+            await exec('/bin/sh', ['-c', 'command -v "$1"', 'sh', name], {
+              env: await getEnvironment(),
+            })
+          )
+            .toString()
+            .trim() || null
+        );
+      } catch (error) {
+        if (error instanceof Error && error.name.startsWith('Host')) throw error;
+        return null;
+      }
+    },
     close: () => {
       closePromise ??= (async () => {
         closed = true;
@@ -1157,6 +1237,7 @@ const connectSshHost = async ({
       alias,
       connection,
       dialect,
+      loginShell: shell,
       masterCheckIntervalMs,
       statFlavor: probeLines[0] === 'gnu' ? 'gnu' : 'bsd',
     });

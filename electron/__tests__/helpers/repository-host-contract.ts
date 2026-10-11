@@ -36,6 +36,37 @@ export const defineRepositoryHostContract = (
   name: string,
   createFixture: () => Promise<HostFixture>,
 ) => {
+  test(`${name}: directory listing includes hidden names and distinguishes symlinks`, async () => {
+    await using fixture = await createFixture();
+    await createEntries(fixture);
+    await fixture.host.writeFile(join(fixture.root, '.héllo\nfile'), '123456789');
+    const entries = await fixture.host.readdir(fixture.root);
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        { name: '.héllo\nfile', type: 'file' },
+        { name: 'dir', type: 'directory' },
+        { name: 'link', type: 'symlink' },
+        { name: 'file.txt', type: 'file' },
+      ]),
+    );
+    expect(await fixture.host.readFileTail(join(fixture.root, '.héllo\nfile'), 4)).toEqual(
+      Buffer.from('6789'),
+    );
+    expect(await fixture.host.readFileTail(join(fixture.root, 'file.txt'), 100)).toEqual(
+      Buffer.from('hello'),
+    );
+    expect(await fixture.host.readFileTail(join(fixture.root, 'file.txt'), 0)).toEqual(
+      Buffer.alloc(0),
+    );
+    await expect(fixture.host.readFileTail(join(fixture.root, 'file.txt'), -1)).rejects.toThrow();
+  });
+  test(`${name}: captures its environment and resolves a command on that machine`, async () => {
+    await using fixture = await createFixture();
+    const environment = await fixture.host.getEnvironment();
+    expect(environment.PATH).toBeTruthy();
+    expect(await fixture.host.resolveCommand('git')).toBeTruthy();
+    expect(await fixture.host.resolveCommand('codiff-command-that-does-not-exist')).toBeNull();
+  });
   test(`${name}: exec returns stdout as a Buffer`, async () => {
     await using fixture = await createFixture();
     const output = await fixture.host.exec('printf', ['%s', 'héllo wörld']);

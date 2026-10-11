@@ -6,10 +6,15 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
-
+import type { RepositoryHost } from '../host/repository-host.cjs';
 const require = createRequire(import.meta.url);
+const { createLocalHost } = require('../host/local-host.cjs');
+const host: RepositoryHost = createLocalHost();
 const { readOpenCodeSessionContext } = require('../opencode-session-context.cjs') as {
-  readOpenCodeSessionContext: (sessionId?: string) => Promise<{
+  readOpenCodeSessionContext: (
+    host: RepositoryHost,
+    sessionId?: string,
+  ) => Promise<{
     messages?: ReadonlyArray<{ role: 'assistant' | 'user'; text: string }>;
     risks?: ReadonlyArray<string>;
     source: { threadId?: string; type: string };
@@ -40,7 +45,7 @@ printf '%s' '${JSON.stringify({
   );
   await chmod(commandPath, 0o755);
 
-  await expect(readOpenCodeSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readOpenCodeSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [{ role: 'user', text: 'Keep the creating session attached.' }],
     source: {
       threadId: sessionId,
@@ -68,7 +73,7 @@ printf '%s' '${JSON.stringify({
   await chmod(commandPath, 0o755);
 
   let settled = false;
-  const context = readOpenCodeSessionContext(sessionId).then((result) => {
+  const context = readOpenCodeSessionContext(host, sessionId).then((result) => {
     settled = true;
     return result;
   });
@@ -98,8 +103,8 @@ printf '%s' '${JSON.stringify({
   );
   await chmod(commandPath, 0o755);
 
-  await expect(readOpenCodeSessionContext('../../sessions')).resolves.toBeNull();
-  await expect(readOpenCodeSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readOpenCodeSessionContext(host, '../../sessions')).resolves.toBeNull();
+  await expect(readOpenCodeSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [],
     risks: ['Codiff could not find recent readable messages for the linked OpenCode session.'],
   });
@@ -119,7 +124,7 @@ dd if=/dev/zero bs=1048576 count=17 2>/dev/null
   );
   await chmod(commandPath, 0o755);
 
-  await expect(readOpenCodeSessionContext(sessionId)).resolves.toMatchObject({
+  await expect(readOpenCodeSessionContext(host, sessionId)).resolves.toMatchObject({
     messages: [],
     risks: ['Codiff could not find recent readable messages for the linked OpenCode session.'],
   });

@@ -27,6 +27,7 @@ const CODEX_NOT_FOUND_MESSAGE =
 /**
  * @typedef {{
  *   fallbackModel?: string;
+ *   repositoryHost?: import('./host/repository-host.cjs').RepositoryHost;
  *   commandTransport?: import('./agent-command.cjs').AgentCommandTransport;
  *   model?: string;
  *   onMetrics?: (metrics: {
@@ -384,114 +385,134 @@ const runCodex = async (
   /** @param {string} codexModel @returns {Promise<string>} */
   const invokeCodexExec = async (codexModel) => {
     const reasoningEffort = getOpenAIModelReasoningEffort(codexModel, options.reasoningEffort);
-    const directory = await fs.mkdtemp(join(tmpdir(), 'codiff-codex-'));
-    const outputPath = join(directory, outputName);
-    const schemaPath = join(directory, 'schema.json');
-    await fs.writeFile(schemaPath, JSON.stringify(schema), 'utf8');
-    const environment = await getCommandEnvironment();
+    const host = options.repositoryHost;
+    const directory = host
+      ? await host.mkdtemp('codiff-codex-')
+      : await fs.mkdtemp(join(tmpdir(), 'codiff-codex-'));
+    let processClosed = Promise.resolve();
+    try {
+      const outputPath = join(directory, outputName);
+      const schemaPath = join(directory, 'schema.json');
+      if (host) await host.writeFile(schemaPath, JSON.stringify(schema));
+      else await fs.writeFile(schemaPath, JSON.stringify(schema), 'utf8');
+      const environment = await (options.repositoryHost
+        ? options.repositoryHost.getEnvironment()
+        : getCommandEnvironment());
 
-    return await /** @type {Promise<string>} */ (
-      new Promise((resolve, reject) => {
-        let stderr = '';
-        /** @type {Error | null} */
-        let stdinError = null;
-        let stdout = '';
-        let finished = false;
+      return await /** @type {Promise<string>} */ (
+        new Promise((resolve, reject) => {
+          let stderr = '';
+          /** @type {Error | null} */
+          let stdinError = null;
+          let stdout = '';
+          let finished = false;
 
-        const commandTransport = resolveAgentCommandTransport(
-          options.commandTransport,
-          getCodexCommand,
-        );
-        const codexArgs = [
-          'exec',
-          '-m',
-          codexModel,
-          ...(reasoningEffort
-            ? ['-c', `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`]
-            : []),
-          '--cd',
-          repoRoot,
-          '--sandbox',
-          'read-only',
-          '--ephemeral',
-          '--ignore-rules',
-          '--color',
-          'never',
-          '--json',
-          '--output-schema',
-          schemaPath,
-          '--output-last-message',
-          outputPath,
-          '-',
-        ];
-        const child = commandTransport.spawn(commandTransport.command, codexArgs, {
-          env: environment,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-        const eventParser = createCodexEventParser(options.onProgress);
+          const commandTransport = resolveAgentCommandTransport(
+            options.commandTransport,
+            getCodexCommand,
+          );
+          const codexArgs = [
+            'exec',
+            '-m',
+            codexModel,
+            ...(reasoningEffort
+              ? ['-c', `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`]
+              : []),
+            '--cd',
+            repoRoot,
+            '--sandbox',
+            'read-only',
+            '--ephemeral',
+            '--ignore-rules',
+            '--color',
+            'never',
+            '--json',
+            '--output-schema',
+            schemaPath,
+            '--output-last-message',
+            outputPath,
+            '-',
+          ];
+          const child = commandTransport.spawn(commandTransport.command, codexArgs, {
+            env: environment,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          processClosed = new Promise((resolve) => child.on('close', () => resolve()));
+          const eventParser = createCodexEventParser(options.onProgress);
 
-        const timer = setTimeout(() => {
-          if (!finished) {
+          const timer = setTimeout(() => {
+            if (!finished) {
+              finished = true;
+              child.kill(
+                options.repositoryHost?.id !== 'local' && options.repositoryHost
+                  ? 'SIGKILL'
+                  : 'SIGTERM',
+              );
+              reject(new Error(timeoutMessage));
+            }
+          }, timeoutMs);
+
+          child.stdout.on('data', (chunk) => {
+            const text = chunk.toString();
+            stdout += text;
+            eventParser.push(text);
+          });
+          child.stderr.on('data', (chunk) => {
+            stderr += chunk.toString();
+          });
+          child.stdin.on('error', (error) => {
+            stdinError = error;
+          });
+          child.on('error', (error) => {
             finished = true;
-            child.kill('SIGTERM');
-            reject(new Error(timeoutMessage));
-          }
-        }, timeoutMs);
+            clearTimeout(timer);
+            reject(getCodexLaunchError(error));
+          });
+          child.on('close', async (code, signal) => {
+            if (finished) {
+              return;
+            }
 
-        child.stdout.on('data', (chunk) => {
-          const text = chunk.toString();
-          stdout += text;
-          eventParser.push(text);
-        });
-        child.stderr.on('data', (chunk) => {
-          stderr += chunk.toString();
-        });
-        child.stdin.on('error', (error) => {
-          stdinError = error;
-        });
-        child.on('error', (error) => {
-          finished = true;
-          clearTimeout(timer);
-          reject(getCodexLaunchError(error));
-        });
-        child.on('close', async (code, signal) => {
-          if (finished) {
-            return;
-          }
+            finished = true;
+            clearTimeout(timer);
 
-          finished = true;
-          clearTimeout(timer);
+            if (code !== 0) {
+              const rawMessage = stderr || stdout || stdinError?.message || '';
+              const message = oneLine(
+                getCodexStructuredErrorMessage(rawMessage) || rawMessage,
+                signal ? `Codex was terminated by ${signal}.` : `Codex exited with code ${code}.`,
+              );
+              reject(
+                new Error(
+                  getCodexLaunchErrorMessage({
+                    message,
+                    signal: signal ?? '',
+                  }),
+                ),
+              );
+              return;
+            }
 
-          if (code !== 0) {
-            const rawMessage = stderr || stdout || stdinError?.message || '';
-            const message = oneLine(
-              getCodexStructuredErrorMessage(rawMessage) || rawMessage,
-              signal ? `Codex was terminated by ${signal}.` : `Codex exited with code ${code}.`,
-            );
-            reject(
-              new Error(
-                getCodexLaunchErrorMessage({
-                  message,
-                  signal: signal ?? '',
-                }),
-              ),
-            );
-            return;
-          }
+            const { lastMessage: streamedMessage, usage } = eventParser.flush();
+            options.onMetrics?.({ transport: 'exec', usage });
+            try {
+              const message = host
+                ? (await host.readFile(outputPath)).toString('utf8')
+                : await fs.readFile(outputPath, 'utf8');
+              resolve(message);
+            } catch {
+              resolve(streamedMessage || stdout);
+            }
+          });
 
-          const { lastMessage: streamedMessage, usage } = eventParser.flush();
-          options.onMetrics?.({ transport: 'exec', usage });
-          try {
-            const message = await fs.readFile(outputPath, 'utf8');
-            resolve(message);
-          } catch {
-            resolve(streamedMessage || stdout);
-          }
-        });
-
-        child.stdin.end(prompt, () => {});
-      })
-    ).finally(() => fs.rm(directory, { force: true, recursive: true }).catch(() => {}));
+          child.stdin.end(prompt, () => {});
+        })
+      );
+    } finally {
+      if (host && host.id !== 'local') await processClosed;
+      if (host) await host.rm(directory, { force: true, recursive: true }).catch(() => {});
+      else await fs.rm(directory, { force: true, recursive: true }).catch(() => {});
+    }
   };
 
   /**
@@ -504,7 +525,9 @@ const runCodex = async (
    */
   const invokeCodexAppServer = async (codexModel) => {
     const reasoningEffort = getOpenAIModelReasoningEffort(codexModel, options.reasoningEffort);
-    const environment = await getCommandEnvironment();
+    const environment = await (options.repositoryHost
+      ? options.repositoryHost.getEnvironment()
+      : getCommandEnvironment());
     return new Promise((resolve, reject) => {
       const commandTransport = resolveAgentCommandTransport(
         options.commandTransport,
@@ -538,7 +561,11 @@ const runCodex = async (
       const timer = setTimeout(() => {
         if (!finished) {
           finished = true;
-          child.kill('SIGTERM');
+          child.kill(
+            options.repositoryHost?.id !== 'local' && options.repositoryHost
+              ? 'SIGKILL'
+              : 'SIGTERM',
+          );
           reject(new Error(timeoutMessage));
         }
       }, timeoutMs);
@@ -570,7 +597,9 @@ const runCodex = async (
         }
         finished = true;
         clearTimeout(timer);
-        child.kill('SIGTERM');
+        child.kill(
+          options.repositoryHost?.id !== 'local' && options.repositoryHost ? 'SIGKILL' : 'SIGTERM',
+        );
         reject(error);
       };
 
@@ -581,7 +610,9 @@ const runCodex = async (
         }
         finished = true;
         clearTimeout(timer);
-        child.kill('SIGTERM');
+        child.kill(
+          options.repositoryHost?.id !== 'local' && options.repositoryHost ? 'SIGKILL' : 'SIGTERM',
+        );
         resolve(message);
       };
 

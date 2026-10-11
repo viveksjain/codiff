@@ -4007,13 +4007,19 @@ test('remote review identifies the host, keeps its diff on loss, and reconnects'
     [...app.container.querySelectorAll('button[role="tab"]')].some(
       (button) => button.textContent === 'Walkthrough',
     ),
-  ).toBe(false);
+  ).toBe(true);
   const loadedPaths = [...app.container.querySelectorAll('.codiff-file-path')].map(
     (path) => path.textContent,
   );
   expect(loadedPaths).toContain('src/app.ts');
   await act(async () => changed({ ...info, state: 'disconnected' }));
   expect(app.container.textContent).toContain('Lost connection to devbox.');
+  const walkthroughTab = [
+    ...app.container.querySelectorAll<HTMLButtonElement>('button[role="tab"]'),
+  ].find((button) => button.textContent === 'Walkthrough');
+  expect(walkthroughTab?.disabled).toBe(true);
+  await act(async () => walkthroughTab!.click());
+  expect(window.codiff.getNarrativeWalkthrough).not.toHaveBeenCalled();
   expect(
     [...app.container.querySelectorAll('.codiff-file-path')].map((path) => path.textContent),
   ).toEqual(loadedPaths);

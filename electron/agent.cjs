@@ -12,6 +12,8 @@ const { readPiSessionContext } = require('./pi-session-context.cjs');
 /**
  * @typedef {import('../core/types.ts').WalkthroughContext} WalkthroughContext
  * @typedef {{
+ *   repositoryHost?: import('./host/repository-host.cjs').RepositoryHost;
+ *   commandTransport?: import('./agent-command.cjs').AgentCommandTransport;
  *   fallbackModel?: string;
  *   model?: string;
  *   onMetrics?: (metrics: {
@@ -42,7 +44,7 @@ const { readPiSessionContext } = require('./pi-session-context.cjs');
  *   modelSettingKey: 'openAIModel' | 'claudeModel' | 'opencodeModel' | 'piModel';
  *   normalizeModel: (value: unknown) => string;
  *   notFoundCode: string;
- *   isAvailable: () => boolean;
+ *   isAvailable: () => boolean | Promise<boolean>;
  *   isNotFoundError: (error: unknown) => boolean;
  *   run: (
  *     repoRoot: string,
@@ -94,7 +96,9 @@ const createCodexAgent = () => ({
   isAvailable: () => canResolveCommand(codex.getCodexCommand, codex.isCodexNotFoundError),
   isNotFoundError: codex.isCodexNotFoundError,
   run: codex.runCodex,
-  readSessionContext: readCodexSessionContext,
+  readSessionContext: async () => {
+    throw new Error('A repository host is required for session context.');
+  },
   sessionLaunchOptionKey: 'codexSessionId',
 });
 
@@ -114,7 +118,9 @@ const createClaudeAgent = () => ({
   isAvailable: () => canResolveCommand(claude.getClaudeCommand, claude.isClaudeNotFoundError),
   isNotFoundError: claude.isClaudeNotFoundError,
   run: claude.runClaude,
-  readSessionContext: readClaudeSessionContext,
+  readSessionContext: async () => {
+    throw new Error('A repository host is required for session context.');
+  },
   sessionLaunchOptionKey: 'claudeSessionId',
 });
 
@@ -135,7 +141,9 @@ const createOpenCodeAgent = () => ({
     canResolveCommand(opencode.getOpenCodeCommand, opencode.isOpenCodeNotFoundError),
   isNotFoundError: opencode.isOpenCodeNotFoundError,
   run: opencode.runOpenCode,
-  readSessionContext: readOpenCodeSessionContext,
+  readSessionContext: async () => {
+    throw new Error('A repository host is required for session context.');
+  },
   sessionLaunchOptionKey: 'opencodeSessionId',
 });
 
@@ -155,7 +163,9 @@ const createPiAgent = () => ({
   isAvailable: () => canResolveCommand(pi.getPiCommand, pi.isPiNotFoundError),
   isNotFoundError: pi.isPiNotFoundError,
   run: pi.runPi,
-  readSessionContext: readPiSessionContext,
+  readSessionContext: async () => {
+    throw new Error('A repository host is required for session context.');
+  },
   sessionLaunchOptionKey: 'piSessionId',
 });
 
@@ -176,6 +186,56 @@ const normalizeAgentBackend = (value) =>
 /** @param {unknown} backendId @returns {Agent} */
 const getAgent = (backendId) => AGENT_FACTORIES[normalizeAgentBackend(backendId)]();
 
+/** @param {import('./host/repository-host.cjs').RepositoryHost} host @param {unknown} backendId @returns {Agent} */
+const getAgentForHost = (host, backendId) => {
+  const agent = getAgent(backendId);
+  const readers = {
+    codex: readCodexSessionContext,
+    claude: readClaudeSessionContext,
+    opencode: readOpenCodeSessionContext,
+    pi: readPiSessionContext,
+  };
+  const resolveCommand = async () => {
+    const environment = await host.getEnvironment();
+    return host.resolveCommand(environment[agent.cliPathEnvVar]?.trim() || agent.cliName);
+  };
+  return {
+    ...agent,
+    isAvailable:
+      host.id === 'local' ? agent.isAvailable : async () => Boolean(await resolveCommand()),
+    readSessionContext: (sessionId) => readers[agent.id](host, sessionId),
+    run:
+      host.id === 'local'
+        ? agent.run
+        : async (root, prompt, schema, outputName, timeoutMessage, options) => {
+            const command = await resolveCommand();
+            if (!command)
+              throw Object.assign(new Error(`${agent.cliName} isn't installed on ${host.label}.`), {
+                code: agent.notFoundCode,
+              });
+            const spawnOnHost = (
+              /** @type {string} */ command,
+              /** @type {ReadonlyArray<string>} */ args,
+              /** @type {import('node:child_process').SpawnOptions} */ options = {},
+            ) =>
+              host.spawn(command, args, {
+                cwd: options.cwd ? String(options.cwd) : root,
+                env: /** @type {Record<string, string>} */ (options.env),
+              });
+            return agent.run(root, prompt, schema, outputName, timeoutMessage, {
+              ...options,
+              repositoryHost: host,
+              commandTransport: {
+                command,
+                spawn: /** @type {typeof import('node:child_process').spawn} */ (
+                  /** @type {unknown} */ (spawnOnHost)
+                ),
+              },
+            });
+          },
+  };
+};
+
 /** @returns {ReadonlyArray<Agent>} */
 const listAgents = () => AGENT_BACKENDS.map((id) => AGENT_FACTORIES[id]());
 
@@ -195,13 +255,14 @@ const getAgentMenuModels = (agent, selectedModel, models = agent.models) =>
  * @param {(agent: Agent) => boolean} [isAvailable]
  * @returns {'codex' | 'claude' | 'opencode' | 'pi'}
  */
-const detectInitialAgentBackend = (isAvailable = (agent) => agent.isAvailable()) =>
+const detectInitialAgentBackend = (isAvailable = (agent) => agent.isAvailable() === true) =>
   listAgents().find(isAvailable)?.id ?? DEFAULT_AGENT_BACKEND;
 
 module.exports = {
   detectInitialAgentBackend,
   getAgentMenuModels,
   getAgent,
+  getAgentForHost,
   listAgents,
   normalizeAgentBackend,
 };

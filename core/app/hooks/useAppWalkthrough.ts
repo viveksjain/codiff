@@ -26,6 +26,7 @@ type MainMode = 'commit' | 'review';
 
 type UseAppWalkthroughOptions = {
   preferencesRef: RefObject<CodiffPreferences>;
+  repositoryConnected?: boolean;
   state: RepositoryState | null;
   stateGenerationRef: RefObject<number>;
   stateRef: RefObject<RepositoryState | null>;
@@ -35,6 +36,7 @@ const emptyFiles: ReadonlyArray<ChangedFile> = [];
 
 export function useAppWalkthrough({
   preferencesRef,
+  repositoryConnected = true,
   state,
   stateGenerationRef,
   stateRef,
@@ -140,6 +142,9 @@ export function useAppWalkthrough({
 
   const loadNarrativeWalkthrough = useCallback(
     (source: RepositoryState['source'], options?: NarrativeWalkthroughRequestOptions) => {
+      if (!repositoryConnected) {
+        return;
+      }
       const request = walkthroughRequestRef.current + 1;
       walkthroughRequestRef.current = request;
       const sourceKey = getSourceKey(source);
@@ -184,7 +189,7 @@ export function useAppWalkthrough({
           }
         });
     },
-    [startWalkthroughLoading, stateGenerationRef, stateRef],
+    [repositoryConnected, startWalkthroughLoading, stateGenerationRef, stateRef],
   );
 
   const refreshWalkthroughForState = useCallback(
@@ -214,6 +219,9 @@ export function useAppWalkthrough({
 
   const changeSidebarMode = useCallback(
     (mode: SidebarMode) => {
+      if (mode === 'walkthrough' && !repositoryConnected) {
+        return;
+      }
       setMainMode('review');
       if (mode === 'tree') {
         setSidebarMode('tree');
@@ -239,7 +247,14 @@ export function useAppWalkthrough({
 
       loadNarrativeWalkthrough(state.source);
     },
-    [loadNarrativeWalkthrough, narrativeWalkthrough, state, walkthroughError, walkthroughLoading],
+    [
+      loadNarrativeWalkthrough,
+      narrativeWalkthrough,
+      repositoryConnected,
+      state,
+      walkthroughError,
+      walkthroughLoading,
+    ],
   );
 
   const openCommitView = useCallback(() => {
