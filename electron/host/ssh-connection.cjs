@@ -95,6 +95,8 @@ const createSshConnection = ({
     '-o',
     'LogLevel=ERROR',
   ];
+  // A `RemoteCommand`, forwarding or `LocalCommand` from the user's config
+  // would break or hijack every command.
   const clientArgs = [
     ...baseArgs,
     '-o',
@@ -103,6 +105,12 @@ const createSshConnection = ({
     'ControlPersist=no',
     '-o',
     'ProxyCommand=false',
+    '-o',
+    'RemoteCommand=none',
+    '-o',
+    'ClearAllForwardings=yes',
+    '-o',
+    'PermitLocalCommand=no',
   ];
 
   /**
@@ -193,6 +201,8 @@ const createSshConnection = ({
           'ControlMaster=yes',
           '-o',
           'ControlPersist=yes',
+          '-o',
+          'RemoteCommand=none',
           '-f',
           '-N',
           '--',

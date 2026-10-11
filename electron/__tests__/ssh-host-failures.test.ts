@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { appendFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vite-plus/test';
@@ -130,6 +131,23 @@ describe.skipIf(!findSshd())('SshHost connection failures', () => {
       message: expect.stringMatching(/Connection refused/),
       name: 'HostUnreachableError',
     });
+  });
+
+  test('a RemoteCommand in the ssh config is ignored', async () => {
+    await using sshd = await startTestSshd();
+    await appendFile(sshd.sshConfigPath, 'Host codiff-test\n  RemoteCommand echo hijacked\n');
+    const host = await connectSshHost({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    try {
+      const output = (await host.exec('printf', ['ran'])).toString('utf8');
+      expect(output).toBe('ran');
+      expect(output).not.toMatch(/hijacked/);
+    } finally {
+      await host.close();
+    }
   });
 
   test('a command that exits 255 is a command failure, not a lost connection', async () => {
