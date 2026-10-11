@@ -450,6 +450,8 @@ export type CodiffLaunchOptions = {
   planFile?: string;
   /** Result file used to resume the waiting agent process. */
   planResultFile?: string;
+  /** Positional ref classified after connecting to a remote repository. */
+  remoteSourceCandidate?: string;
   repositoryPathProvided: boolean;
   source?: ReviewSource;
   walkthrough: boolean;

@@ -29,6 +29,14 @@ const {
 const { sharePlanFile } = require('../electron/headless-plan-share.cjs');
 const { createLocalHost } = require('../electron/host/local-host.cjs');
 const localHost = createLocalHost();
+const { createSshConnection } = require('../electron/host/ssh-connection.cjs');
+const { connectSshHost } = require('../electron/host/ssh-host.cjs');
+const {
+  formatRemoteRepositoryTarget,
+  resolveRemoteRepository,
+  resolveRemoteSource,
+} = require('../electron/host/repository-target.cjs');
+const { getCommandEnvironment } = require('../electron/login-shell-environment.cjs');
 
 // The renderer is the built dist/ by default. When Codiff's own Vite dev server
 // is running, use it instead so source edits hot-reload without a rebuild. The
@@ -174,6 +182,57 @@ const run = async () => {
     return;
   }
 
+  if (parsedArguments.remoteTarget) {
+    if (process.platform === 'win32') {
+      throw new Error('Remote repositories require macOS or Linux.');
+    }
+    if (
+      parsedArguments.pullRequestUrl ||
+      parsedArguments.pullRequestNumber ||
+      parsedArguments.pullRequestBranch
+    ) {
+      throw new Error('PR/MR reviews are unavailable for remote repositories.');
+    }
+    if (
+      parsedArguments.planFilePath ||
+      parsedArguments.walkthrough ||
+      parsedArguments.walkthroughFilePath ||
+      parsedArguments.walkthroughContextPath ||
+      parsedArguments.share
+    ) {
+      throw new Error('Remote walkthrough and local-file workflows are not available yet.');
+    }
+    const target = parsedArguments.remoteTarget;
+    const connection = createSshConnection({
+      ...target,
+      interactive: true,
+      getLocalEnvironment: getCommandEnvironment,
+    });
+    const adopted = await connection.check();
+    try {
+      await connection.ensureMaster();
+      const host = await connectSshHost({ alias: target.alias, connection });
+      parsedArguments.requestedPath = await resolveRemoteRepository(host, target.path);
+      const source = await resolveRemoteSource(host, parsedArguments.requestedPath, {
+        candidate: parsedArguments.remoteSourceCandidate,
+        range: parsedArguments.range,
+      });
+      if (source?.type === 'commit') {
+        parsedArguments.commitRef = source.ref;
+      }
+      if (source?.type === 'branch-working-tree') {
+        parsedArguments.branchRef = source.ref;
+      }
+      // Leave the master alive for the app to adopt using the same destination,
+      // port, and ControlPath. The app owns its lifetime after the handoff.
+    } catch (error) {
+      if (!adopted) {
+        await connection.exitMaster().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
   const {
     agentBackend,
     branchRef,
@@ -314,6 +373,9 @@ const run = async () => {
     CODIFF_REVIEW_PROVIDER: pullRequestProvider ?? '',
     CODIFF_RANGE: range ? `${range.base}${range.symmetric ? '...' : '..'}${range.head}` : '',
     CODIFF_REPOSITORY_PATH: requestedPath,
+    CODIFF_REMOTE_TARGET: parsedArguments.remoteTarget
+      ? formatRemoteRepositoryTarget({ ...parsedArguments.remoteTarget, path: requestedPath })
+      : '',
     CODIFF_WALKTHROUGH: walkthrough ? '1' : '',
     CODIFF_WALKTHROUGH_CONTEXT: walkthroughContextPath ?? '',
     CODIFF_WALKTHROUGH_FILE: walkthroughFilePath ?? '',
@@ -360,4 +422,7 @@ const run = async () => {
   }
 };
 
-run();
+run().catch((error) => {
+  process.stderr.write(`codiff: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

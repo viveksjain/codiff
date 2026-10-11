@@ -5,6 +5,7 @@ const { existsSync } = require('node:fs');
 const { resolve } = require('node:path');
 const { parseArgs } = require('node:util');
 const { readWalkthroughContext } = require('../walkthrough-context.cjs');
+const { parseRepositoryTarget } = require('../host/repository-target.cjs');
 const { parseReviewUrl, resolveLocalReviewUrlSync } = require('../review-source.cjs');
 
 /**
@@ -161,6 +162,10 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
   let pullRequestProvider = null;
   let pullRequestUrl = null;
   let repositoryPath = null;
+  let remoteTarget =
+    useEnvironment && process.env.CODIFF_REMOTE_TARGET
+      ? parseRepositoryTarget(process.env.CODIFF_REMOTE_TARGET)
+      : null;
   let sourceCandidate = null;
   let rangeCandidate = null;
   const requestedPlanFilePath =
@@ -169,6 +174,14 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
 
   for (let index = 0; index < positionals.length; index += 1) {
     const arg = positionals[index];
+    if (arg.startsWith('ssh://') || /^[^/]+:(?:\/|~)/.test(arg)) {
+      const target = parseRepositoryTarget(arg);
+      if (target) {
+        remoteTarget = target;
+        repositoryPath = arg;
+        continue;
+      }
+    }
     if (requestedPlanFilePath) {
       repositoryPath ??= arg;
       continue;
@@ -214,7 +227,9 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
   }
 
   let range = null;
-  if (rangeCandidate) {
+  if (remoteTarget) {
+    range = rangeCandidate;
+  } else if (rangeCandidate) {
     const rangeRepo = resolve(repositoryPath || process.cwd());
     range =
       isCommitRef(rangeRepo, rangeCandidate.base) && isCommitRef(rangeRepo, rangeCandidate.head)
@@ -222,7 +237,7 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
         : null;
   }
 
-  if (!range && !commitRef && !branchRef && sourceCandidate) {
+  if (!remoteTarget && !range && !commitRef && !branchRef && sourceCandidate) {
     const source = resolveSourceCandidate(
       resolve(repositoryPath || process.cwd()),
       sourceCandidate,
@@ -316,6 +331,7 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
   );
   return {
     launchOptions: {
+      ...(remoteTarget && sourceCandidate ? { remoteSourceCandidate: sourceCandidate } : {}),
       ...(values['apply-update'] === true ? { applyUpdate: true } : {}),
       ...(agentBackend ? { agentBackend } : {}),
       ...(claudeSessionId ? { claudeSessionId } : {}),
@@ -371,6 +387,13 @@ const getCommandLineRepositoryPath = (commandLine = process.argv) =>
 const getCommandLineLaunchOptions = (commandLine = process.argv, fallbackPath = process.cwd()) => {
   const { launchOptions, pullRequestNumber, pullRequestProvider, repositoryPath } =
     parseCommandLineArguments(commandLine);
+  if (
+    pullRequestNumber != null &&
+    (parseRepositoryTarget(repositoryPath || '') ||
+      (commandLine === process.argv && process.env.CODIFF_REMOTE_TARGET))
+  ) {
+    throw new Error('PR/MR reviews are unavailable for remote repositories.');
+  }
   if (pullRequestNumber == null || launchOptions.source) {
     return launchOptions;
   }
@@ -393,8 +416,14 @@ const getCommandLineLaunchOptions = (commandLine = process.argv, fallbackPath = 
   };
 };
 
-const getLaunchPath = () =>
-  resolve(process.env.CODIFF_REPOSITORY_PATH || getCommandLineRepositoryPath() || process.cwd());
+const getLaunchPath = () => {
+  const path =
+    process.env.CODIFF_REMOTE_TARGET ||
+    process.env.CODIFF_REPOSITORY_PATH ||
+    getCommandLineRepositoryPath() ||
+    process.cwd();
+  return parseRepositoryTarget(path) ? path : resolve(path);
+};
 
 /**
  * @param {string} launchPath

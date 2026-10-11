@@ -11,7 +11,9 @@ const { classifySshFailure, HostUnreachableError } = require('./host-errors.cjs'
  * @typedef {{
  *   alias: string;
  *   controlDirectory?: string;
- *   getLocalEnvironment?: () => NodeJS.ProcessEnv;
+ *   getLocalEnvironment?: () => NodeJS.ProcessEnv | Promise<NodeJS.ProcessEnv>;
+ *   interactive?: boolean;
+ *   port?: number;
  *   masterStartTimeoutMs?: number;
  *   spawnProcess?: typeof spawn;
  *   sshCommand?: string;
@@ -68,17 +70,23 @@ const createSshConnection = ({
   alias,
   controlDirectory = getDefaultControlDirectory(),
   getLocalEnvironment = () => process.env,
+  interactive = false,
+  port,
   masterStartTimeoutMs = 30_000,
   spawnProcess = spawn,
   sshCommand = 'ssh',
   sshConfigPath,
 }) => {
-  if (!ALIAS_PATTERN.test(alias)) {
+  if (!(ALIAS_PATTERN.test(alias) || /^(?:[\w.%+-]+@)?[a-fA-F0-9]*:[a-fA-F0-9:]+$/.test(alias))) {
     throw new Error(`Invalid SSH host: ${alias}`);
+  }
+  if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    throw new Error(`Invalid SSH port: ${port}`);
   }
   mkdirSync(controlDirectory, { mode: 0o700, recursive: true });
   const baseArgs = [
     ...(sshConfigPath ? ['-F', sshConfigPath] : []),
+    ...(port !== undefined ? ['-p', String(port)] : []),
     // -S takes the path directly, without ssh_config's quote parsing. Only the
     // final %C is a token; percent signs in the directory are literal.
     '-S',
@@ -90,7 +98,7 @@ const createSshConnection = ({
     '-o',
     'ServerAliveCountMax=3',
     '-o',
-    'BatchMode=yes',
+    `BatchMode=${interactive ? 'no' : 'yes'}`,
     '-o',
     // Preserve transport diagnostics, including mux-only and proxy failures.
     'LogLevel=INFO',
@@ -117,15 +125,27 @@ const createSshConnection = ({
     'ProxyCommand=false',
   ];
 
+  /** @type {NodeJS.ProcessEnv | null} */
+  let localEnvironment = null;
+  /** @type {Promise<NodeJS.ProcessEnv> | null} */
+  let pendingEnvironment = null;
+  const prepareEnvironment = async () => {
+    pendingEnvironment ??= Promise.resolve()
+      .then(getLocalEnvironment)
+      .then((env) => (localEnvironment = env));
+    await pendingEnvironment;
+  };
+
   /**
    * @param {ReadonlyArray<string>} args
    * @param {{input?: string | Buffer}} [options]
    * @returns {Promise<SshResult>}
    */
-  const runSsh = (args, { input } = {}) =>
-    new Promise((resolve) => {
+  const runSsh = async (args, { input } = {}) => {
+    await prepareEnvironment();
+    return new Promise((resolve) => {
       const child = spawnProcess(sshCommand, [...args], {
-        env: getLocalEnvironment(),
+        env: localEnvironment ?? process.env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       /** @type {Array<Buffer>} */
@@ -154,6 +174,7 @@ const createSshConnection = ({
       child.on('close', finish);
       child.stdin.end(input);
     });
+  };
 
   // ssh expands `%C` itself, so ask it for the exact socket path.
   /** @type {Promise<string | null> | null} */
@@ -218,10 +239,13 @@ const createSshConnection = ({
           '--',
           alias,
         ],
-        { env: getLocalEnvironment(), stdio: ['ignore', 'ignore', 'pipe'] },
+        { env: localEnvironment ?? process.env, stdio: ['ignore', 'ignore', 'pipe'] },
       );
       child.stderr.on('data', (chunk) => {
         stderr += chunk.toString('utf8');
+        if (interactive) {
+          process.stderr.write(chunk);
+        }
         if (!lostSocket && /ControlSocket .* already exists, disabling multiplexing/.test(stderr)) {
           lostSocket = true;
           child.kill();
@@ -288,11 +312,11 @@ const createSshConnection = ({
    */
   const spawnClient = (remoteCommand, { tty = false } = {}) =>
     spawnProcess(sshCommand, [...getClientArgs(), tty ? '-tt' : '-T', '--', alias, remoteCommand], {
-      env: getLocalEnvironment(),
+      env: localEnvironment ?? process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-  return { alias, check, ensureMaster, exitMaster, run, spawnClient, startMaster };
+  return { alias, port, check, ensureMaster, exitMaster, run, spawnClient, startMaster };
 };
 
 module.exports = { createSshConnection, getDefaultControlDirectory, isSocketStale };

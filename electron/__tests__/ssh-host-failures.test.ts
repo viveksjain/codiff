@@ -11,7 +11,12 @@ import type { RepositoryHost } from '../host/repository-host.cjs';
 import { findSshd, startTestSshd } from './helpers/test-sshd.ts';
 
 type SshResult = { code: number | null; stderr: string; stdout: Buffer };
-type SshHost = RepositoryHost & { close: () => Promise<void> };
+type SshHost = RepositoryHost & {
+  close: () => Promise<void>;
+  getConnectionState: () => string;
+  onConnectionState: (listener: (state: string) => void) => () => void;
+  reconnect: () => Promise<void>;
+};
 type FakeConnection = {
   alias: string;
   check: () => Promise<boolean>;
@@ -42,6 +47,9 @@ const { createSshConnection } = require('../host/ssh-connection.cjs') as {
     exitMaster: () => Promise<void>;
   };
 };
+
+const processClosed = (child: ReturnType<RepositoryHost['spawn']>) =>
+  new Promise<Array<unknown>>((resolve) => child.on('close', (...args) => resolve(args)));
 
 const execFileAsync = promisify(execFile);
 
@@ -111,7 +119,117 @@ test('a missing git is reported by name', async () => {
   });
 });
 
+test('unsupported stat implementations are rejected during connect', async () => {
+  await expect(
+    connectSshHost({
+      connection: createFakeConnection(['__codiff_shell__:/bin/bash\n', 'unsupported\n']),
+    }),
+  ).rejects.toThrow(/GNU or BSD stat/);
+});
+
 describe.skipIf(!findSshd())('SshHost connection failures', () => {
+  test('closing rejects later work and kills an active remote process', async () => {
+    await using sshd = await startTestSshd();
+    const host = await connectSshHost({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    const child = host.spawn('/bin/sh', ['-c', 'echo $$; exec sleep 60']);
+    const pid = await new Promise<string>((resolve) =>
+      child.stdout.once('data', (data) => resolve(data.toString().trim())),
+    );
+    const closed = processClosed(child);
+    await host.close();
+    await closed;
+    expect(host.getConnectionState()).toBe('closed');
+    await expect(host.exec('true', [])).rejects.toThrow(/closed/i);
+    expect(() => host.spawn('true', [])).toThrow(/closed/i);
+    const probe = await connectSshHost({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    try {
+      await expect(probe.exec('kill', ['-0', pid])).rejects.toThrow();
+    } finally {
+      await probe.close();
+    }
+  });
+
+  test('spawns share bounded channels, including queued cancellation', async () => {
+    await using sshd = await startTestSshd();
+    const host = await connectSshHost({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    try {
+      const children = Array.from({ length: 14 }, () =>
+        host.spawn('/bin/sh', ['-c', 'sleep 0.1; printf ran']),
+      );
+      const results = children.map(async (child) => {
+        let output = '';
+        child.stdout.on('data', (data) => {
+          output += data;
+        });
+        child.stderr.resume();
+        const [code] = await processClosed(child);
+        return { code, output };
+      });
+      expect(await Promise.all(results)).toEqual(
+        Array.from({ length: 14 }, () => ({ code: 0, output: 'ran' })),
+      );
+      const blockers = Array.from({ length: 6 }, () => host.spawn('sleep', ['60']));
+      const closed = blockers.map((child) => {
+        child.stdout.resume();
+        child.stderr.resume();
+        return processClosed(child);
+      });
+      const queued = host.spawn('sleep', ['60']);
+      const queuedClosed = processClosed(queued);
+      queued.kill();
+      expect(
+        await Promise.race([
+          queuedClosed.then(() => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 1000)),
+        ]),
+      ).toBe(true);
+      blockers.forEach((child) => child.kill());
+      await Promise.all(closed);
+    } finally {
+      await host.close();
+    }
+  });
+
+  test('connection state reports loss and reconnect and classifies spawn failures', async () => {
+    await using sshd = await startTestSshd();
+    const options = {
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    };
+    const host = await connectSshHost(options);
+    const states: Array<string> = [];
+    const dispose = host.onConnectionState((state) => states.push(state));
+    try {
+      await host.exec('true', []);
+      await createSshConnection(options).exitMaster();
+      const child = host.spawn('true', []);
+      child.stdout.resume();
+      child.stderr.resume();
+      const error = new Promise<Error>((resolve) => child.on('error', resolve));
+      expect(await error).toMatchObject({ name: 'HostDisconnectedError' });
+      await host.reconnect();
+      expect(host.getConnectionState()).toBe('connected');
+      expect(states).toContain('disconnected');
+      expect(states.at(-1)).toBe('connected');
+      expect((await host.exec('printf', ['back'])).toString()).toBe('back');
+    } finally {
+      dispose();
+      await host.close();
+    }
+  });
   test('an unauthorized key needs an interactive login', async () => {
     await using sshd = await startTestSshd({ authorize: false });
     await expect(

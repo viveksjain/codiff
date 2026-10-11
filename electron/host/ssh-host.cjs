@@ -1,9 +1,11 @@
 // @ts-check
 
 const { EventEmitter } = require('node:events');
-const { Transform } = require('node:stream');
+const { constants } = require('node:os');
+const { PassThrough, Transform } = require('node:stream');
 const { StringDecoder } = require('node:string_decoder');
 const {
+  HostDisconnectedError,
   RemoteCommandMissingError,
   RemoteShellNoiseError,
   UnsupportedRemoteShellError,
@@ -17,6 +19,7 @@ const {
   quotePosix,
   wrapForLoginShell,
 } = require('./shell-quote.cjs');
+const { getSshHostId } = require('./repository-target.cjs');
 const { createSshConnection } = require('./ssh-connection.cjs');
 
 /**
@@ -28,13 +31,14 @@ const { createSshConnection } = require('./ssh-connection.cjs');
  * @typedef {import('./ssh-connection.cjs').SshConnectionOptions} SshConnectionOptions
  * @typedef {import('./ssh-connection.cjs').SshResult} SshResult
  * @typedef {'bsd' | 'gnu'} StatFlavor
- * @typedef {RepositoryHost & {close: () => Promise<void>}} SshHost
+ * @typedef {'connected' | 'disconnected' | 'closed'} ConnectionState
+ * @typedef {RepositoryHost & {close: () => Promise<void>; reconnect: () => Promise<void>; getConnectionState: () => ConnectionState; onConnectionState: (listener: (state: ConnectionState) => void) => () => void}} SshHost
+ * @typedef {import('node:child_process').ChildProcessWithoutNullStreams & {cancelQueued: () => boolean}} QueuedChild
  */
 
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 64;
-// sshd allows 10 sessions per connection by default (MaxSessions). Queued
-// operations use at most 6, leaving room for long-lived spawns, a commit PTY,
-// remote kill requests and a fallback session.
+// All commands, file operations and PTYs share six sessions. One separate
+// cancellation session ensures they can always be stopped under MaxSessions=10.
 const MAX_QUEUED_CHANNELS = 6;
 const SHELL_PROBE_PREFIX = '__codiff_shell__:';
 // How long a kill waits for the command to announce its PID.
@@ -360,6 +364,107 @@ const createSshHost = ({
   statFlavor,
 }) => {
   const limit = createLimiter(MAX_QUEUED_CHANNELS);
+  const killLimit = createLimiter(1);
+  const closing = new AbortController();
+  /** @type {ConnectionState} */
+  let state = 'connected';
+  /** @type {Set<(state: ConnectionState) => void>} */
+  const stateListeners = new Set();
+  /** @param {ConnectionState} next */
+  const setState = (next) => {
+    if (state !== next) {
+      state = next;
+      for (const listener of stateListeners) {
+        listener(next);
+      }
+    }
+  };
+  const assertOpen = () => {
+    if (closed) {
+      throw new Error(`SSH host ${alias} is closed.`);
+    }
+  };
+  /** @type {Set<{kill: (signal?: NodeJS.Signals | number) => boolean; done: Promise<void>}>} */
+  const processes = new Set();
+  /** @type {Set<Promise<void>>} */
+  const kills = new Set();
+
+  // A queued client exposes streams immediately, preserving spawn's synchronous
+  // API and stream backpressure. Its slot belongs to the real child until close,
+  // even if an exec caller has already rejected on cancellation.
+  /** @param {string} command @param {{tty?: boolean}} [options] @returns {QueuedChild} */
+  const queueClient = (command, options) => {
+    assertOpen();
+    const controller = new AbortController();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    /** @type {import('node:child_process').ChildProcessWithoutNullStreams | null} */
+    let child = null;
+    let cancelled = false;
+    let finished = false;
+    const cancelQueued = () => {
+      if (child || finished) {
+        return false;
+      }
+      cancelled = true;
+      controller.abort();
+      return true;
+    };
+    const cancelOnClose = () => {
+      cancelQueued();
+    };
+    closing.signal.addEventListener('abort', cancelOnClose, { once: true });
+    const facade = /** @type {QueuedChild} */ (
+      /** @type {unknown} */ (
+        Object.assign(new EventEmitter(), {
+          cancelQueued,
+          stdin,
+          stdout,
+          stderr,
+          kill: (/** @type {NodeJS.Signals | number | undefined} */ signal) => {
+            if (cancelQueued()) {
+              return true;
+            }
+            return child?.kill(signal) ?? false;
+          },
+        })
+      )
+    );
+    void limit(async () => {
+      if (cancelled || closed) {
+        throw createAbortError();
+      }
+      keepMasterAlive();
+      child = connection.spawnClient(command, options);
+      stdin.pipe(child.stdin);
+      child.stdout.pipe(stdout);
+      child.stderr.pipe(stderr);
+      stdin.on('error', () => {});
+      child.stdin.on('error', () => {});
+      await new Promise((resolve) => {
+        child?.on('error', (error) => facade.emit('error', error));
+        child?.on('close', (code, signal) => {
+          finished = true;
+          facade.emit('close', code, signal);
+          resolve(undefined);
+        });
+      });
+    }, controller.signal)
+      .catch((error) => {
+        if (!cancelled && !closed) {
+          facade.emit('error', error);
+        }
+        stdout.end();
+        stderr.end();
+        facade.emit('close', null, 'SIGTERM');
+      })
+      .finally(() => {
+        finished = true;
+        closing.signal.removeEventListener('abort', cancelOnClose);
+      });
+    return facade;
+  };
   let lastMasterCheck = 0;
   let closed = false;
   /** @type {Promise<void> | null} */
@@ -376,7 +481,16 @@ const createSshHost = ({
     }
     restoringMaster = connection
       .ensureMaster()
-      .catch(() => {})
+      .then(() => {
+        if (!closed) {
+          setState('connected');
+        }
+      })
+      .catch(() => {
+        if (!closed) {
+          setState('disconnected');
+        }
+      })
       .finally(() => {
         restoringMaster = null;
       });
@@ -396,15 +510,23 @@ const createSshHost = ({
   // Closing the local ssh client does not stop the remote process.
   // The PID is announced before `exec`, so if `exec` itself fails the PID is
   // already dead and could in theory be reused; it is only killed on cancel.
-  /** @param {number} pid */
-  const killRemote = (pid) => {
-    const child = connection.spawnClient(
-      toRemoteCommand(`kill -TERM ${Math.trunc(pid)} 2>/dev/null; :`),
-    );
-    child.on('error', () => {});
-    child.stdout.resume();
-    child.stderr.resume();
-    child.stdin.end();
+  /** @param {number} pid @param {NodeJS.Signals | number} signal */
+  const killRemote = (pid, signal) => {
+    const signalNumber = typeof signal === 'number' ? signal : signal.slice(3);
+    const pending = killLimit(
+      () =>
+        new Promise((resolve) => {
+          const child = connection.spawnClient(
+            toRemoteCommand(`kill -${signalNumber} ${Math.trunc(pid)} 2>/dev/null; :`),
+          );
+          child.on('error', () => {});
+          child.on('close', () => resolve(undefined));
+          child.stdout.resume();
+          child.stderr.resume();
+          child.stdin.end();
+        }),
+    ).finally(() => kills.delete(pending));
+    kills.add(pending);
   };
 
   /**
@@ -419,13 +541,20 @@ const createSshHost = ({
    * process exits, with no PID to kill it by. Until the PID is announced, the
    * client is therefore only killed once it arrives (or after a timeout).
    *
-   * @param {import('node:child_process').ChildProcess} child
+   * @param {QueuedChild} child
    */
   const createRemoteProcess = (child) => {
     /** @type {number | null} */
     let pid = null;
     let killed = false;
     let exited = false;
+    /** @type {NodeJS.Signals | number} */
+    let killSignal = 'SIGTERM';
+    /** @type {() => void} */
+    let finish;
+    const done = new Promise((resolve) => {
+      finish = () => resolve(undefined);
+    });
     /** @type {NodeJS.Timeout | undefined} */
     let timer;
     const clearTimer = () => {
@@ -437,12 +566,13 @@ const createSshHost = ({
     };
     const killNow = () => {
       clearTimer();
-      child.kill();
       if (pid != null) {
-        killRemote(pid);
+        killRemote(pid, killSignal);
       }
+      child.kill(killSignal);
     };
-    return {
+    const remote = {
+      done,
       /** @param {number} value */
       announce: (value) => {
         pid = value;
@@ -453,12 +583,25 @@ const createSshHost = ({
       exit: () => {
         exited = true;
         clearTimer();
+        processes.delete(remote);
+        finish();
       },
-      kill: () => {
+      /** @param {NodeJS.Signals | number} [signal] */
+      kill: (signal = 'SIGTERM') => {
         if (killed || exited) {
-          return;
+          return false;
+        }
+        if (
+          (typeof signal === 'string' && !Object.hasOwn(constants.signals, signal)) ||
+          (typeof signal === 'number' && (!Number.isInteger(signal) || signal < 0 || signal > 64))
+        ) {
+          throw new Error(`Invalid signal: ${signal}`);
         }
         killed = true;
+        killSignal = signal;
+        if (child.cancelQueued()) {
+          return true;
+        }
         if (pid != null) {
           killNow();
         } else {
@@ -466,8 +609,11 @@ const createSshHost = ({
           timer.unref();
           killTimers.add(timer);
         }
+        return true;
       },
     };
+    processes.add(remote);
+    return remote;
   };
 
   /**
@@ -478,11 +624,14 @@ const createSshHost = ({
    * @returns {Promise<Error | null>}
    */
   const getConnectionError = async (result) => {
-    if (result.code !== 255 || (await connection.check())) {
+    if (closed || result.code !== 255 || (await connection.check())) {
       return null;
     }
-    restoreMaster();
-    return classifySshFailure(alias, result.stderr);
+    if (!closed) {
+      setState('disconnected');
+      restoreMaster();
+    }
+    return new HostDisconnectedError(alias, result.stderr);
   };
 
   /**
@@ -494,86 +643,81 @@ const createSshHost = ({
     script,
     { input, label = 'ssh', maxBuffer = DEFAULT_MAX_BUFFER, signal } = {},
   ) =>
-    limit(
-      () =>
-        new Promise((resolve, reject) => {
-          if (signal?.aborted) {
-            reject(createAbortError());
-            return;
-          }
-          keepMasterAlive();
-          const child = connection.spawnClient(toRemoteCommand(script));
-          const remote = createRemoteProcess(child);
-          const stderrFilter = createPidMarkerFilter(remote.announce);
-          /** @type {Array<Buffer>} */
-          const stdout = [];
-          /** @type {Array<Buffer>} */
-          const stderr = [];
-          let stdoutBytes = 0;
-          let settled = false;
-          /** @type {number | null | undefined} */
-          let exitCode;
-          let stderrEnded = false;
+    new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(createAbortError());
+        return;
+      }
+      const child = queueClient(toRemoteCommand(script));
+      const remote = createRemoteProcess(child);
+      const stderrFilter = createPidMarkerFilter(remote.announce);
+      /** @type {Array<Buffer>} */
+      const stdout = [];
+      /** @type {Array<Buffer>} */
+      const stderr = [];
+      let stdoutBytes = 0;
+      let settled = false;
+      /** @type {number | null | undefined} */
+      let exitCode;
+      let stderrEnded = false;
 
-          const abort = () => {
-            remote.kill();
-            fail(createAbortError());
-          };
-          const cleanup = () => signal?.removeEventListener('abort', abort);
-          /** @param {Error} error */
-          const fail = (error) => {
-            if (!settled) {
-              settled = true;
-              cleanup();
-              reject(error);
-            }
-          };
-          const finish = () => {
-            if (!settled && exitCode !== undefined && stderrEnded) {
-              settled = true;
-              cleanup();
-              resolve({
-                code: exitCode,
-                stderr: Buffer.concat(stderr).toString('utf8'),
-                stdout: Buffer.concat(stdout),
-              });
-            }
-          };
+      const abort = () => {
+        remote.kill();
+        fail(createAbortError());
+      };
+      const cleanup = () => signal?.removeEventListener('abort', abort);
+      /** @param {Error} error */
+      const fail = (error) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(error);
+        }
+      };
+      const finish = () => {
+        if (!settled && exitCode !== undefined && stderrEnded) {
+          settled = true;
+          cleanup();
+          resolve({
+            code: exitCode,
+            stderr: Buffer.concat(stderr).toString('utf8'),
+            stdout: Buffer.concat(stdout),
+          });
+        }
+      };
 
-          signal?.addEventListener('abort', abort, { once: true });
-          child.stdout.on('data', (chunk) => {
-            if (settled) {
-              return;
-            }
-            stdoutBytes += chunk.length;
-            if (stdoutBytes > maxBuffer) {
-              remote.kill();
-              fail(new Error(`${label} output exceeded ${maxBuffer} bytes.`));
-              return;
-            }
-            stdout.push(chunk);
-          });
-          child.stderr.pipe(stderrFilter);
-          stderrFilter.on('data', (chunk) => stderr.push(chunk));
-          stderrFilter.on('end', () => {
-            stderrEnded = true;
-            finish();
-          });
-          child.stdin.on('error', (error) => {
-            if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EPIPE') {
-              fail(error);
-            }
-          });
-          child.on('error', fail);
-          child.on('close', (code) => {
-            remote.exit();
-            exitCode = code;
-            finish();
-          });
-          child.stdin.end(input);
-        }),
-      signal,
-    );
+      signal?.addEventListener('abort', abort, { once: true });
+      child.stdout.on('data', (chunk) => {
+        if (settled) {
+          return;
+        }
+        stdoutBytes += chunk.length;
+        if (stdoutBytes > maxBuffer) {
+          remote.kill();
+          fail(new Error(`${label} output exceeded ${maxBuffer} bytes.`));
+          return;
+        }
+        stdout.push(chunk);
+      });
+      child.stderr.pipe(stderrFilter);
+      stderrFilter.on('data', (chunk) => stderr.push(chunk));
+      stderrFilter.on('end', () => {
+        stderrEnded = true;
+        finish();
+      });
+      child.stdin.on('error', (error) => {
+        if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EPIPE') {
+          fail(error);
+        }
+      });
+      child.on('error', fail);
+      child.on('close', (code) => {
+        remote.exit();
+        exitCode = code;
+        finish();
+      });
+      child.stdin.end(input);
+    });
 
   /** @type {RepositoryHost['exec']} */
   const exec = async (command, args, options = {}) => {
@@ -602,8 +746,7 @@ const createSshHost = ({
 
   /** @type {RepositoryHost['spawn']} */
   const spawn = (command, args, options = {}) => {
-    keepMasterAlive();
-    const child = connection.spawnClient(
+    const child = queueClient(
       toRemoteCommand(
         buildCommandScript({
           announcePid: true,
@@ -622,19 +765,40 @@ const createSshHost = ({
     /** @type {NodeJS.Signals | null} */
     let exitSignal = null;
     let stderrFinished = false;
+    let killed = false;
     const hostProcess = Object.assign(new EventEmitter(), {
-      kill: () => {
-        remote.kill();
-        return true;
+      kill: (/** @type {NodeJS.Signals | number | undefined} */ signal) => {
+        const result = remote.kill(signal);
+        killed ||= result;
+        return result;
       },
       stderr,
       stdin: child.stdin,
       stdout: child.stdout,
     });
+    Object.defineProperty(hostProcess, 'killed', { get: () => killed });
+    /** @type {Array<Buffer>} */
+    const diagnostics = [];
+    stderr.on('data', (chunk) => diagnostics.push(chunk));
     // Emit 'close' only after the filtered stderr has received everything.
     const emitClose = () => {
       if (exitCode !== undefined && stderrFinished) {
-        setImmediate(() => hostProcess.emit('close', exitCode, exitSignal));
+        const code = exitCode;
+        void getConnectionError({
+          code,
+          stderr: Buffer.concat(diagnostics).toString(),
+          stdout: Buffer.alloc(0),
+        })
+          .then((error) => {
+            if (error) {
+              hostProcess.emit('error', error);
+            }
+            hostProcess.emit('close', code, exitSignal);
+          })
+          .catch((error) => {
+            hostProcess.emit('error', error);
+            hostProcess.emit('close', code, exitSignal);
+          });
       }
     };
     stderr.on('finish', () => {
@@ -653,7 +817,7 @@ const createSshHost = ({
 
   /** @type {RepositoryHost['spawnPty']} */
   const spawnPty = (command, args, options) => {
-    keepMasterAlive();
+    assertOpen();
     const script = `stty cols ${Math.trunc(options.cols)} rows ${Math.trunc(options.rows)} 2>/dev/null; ${buildCommandScript(
       {
         announcePid: true,
@@ -663,7 +827,7 @@ const createSshHost = ({
         env: { ...options.env, TERM: options.name },
       },
     )}`;
-    const child = connection.spawnClient(toRemoteCommand(script), { tty: true });
+    const child = queueClient(toRemoteCommand(script), { tty: true });
     const remote = createRemoteProcess(child);
     const output = createPidMarkerFilter(remote.announce);
     const decoder = new StringDecoder('utf8');
@@ -702,12 +866,20 @@ const createSshHost = ({
       outputEnded = true;
       emitExit();
     });
-    child.stderr.resume();
+    /** @type {Array<Buffer>} */
+    const diagnostics = [];
+    child.stderr.on('data', (chunk) => diagnostics.push(chunk));
     child.stdin.on('error', () => {});
     child.on('close', (code) => {
       remote.exit();
-      exitCode = code;
-      emitExit();
+      void getConnectionError({
+        code,
+        stderr: Buffer.concat(diagnostics).toString(),
+        stdout: Buffer.alloc(0),
+      }).finally(() => {
+        exitCode = code;
+        emitExit();
+      });
     });
     child.on('error', () => {
       exitCode = 1;
@@ -776,6 +948,7 @@ const createSshHost = ({
 
   /** @type {RepositoryHost['lstatMany']} */
   const lstatMany = async (paths) => {
+    assertOpen();
     /** @type {Array<HostStat | null>} */
     const results = [];
     for (const chunk of chunkByScriptSize(paths.map(assertAbsolute))) {
@@ -791,6 +964,7 @@ const createSshHost = ({
 
   /** @type {RepositoryHost['readFiles']} */
   const readFiles = async (paths) => {
+    assertOpen();
     /** @type {Array<Buffer | Error>} */
     const results = [];
     for (const chunk of chunkByScriptSize(paths.map(assertAbsolute))) {
@@ -834,19 +1008,50 @@ const createSshHost = ({
     );
   };
 
+  /** @type {Promise<void> | null} */
+  let closePromise = null;
   return Object.freeze({
-    close: async () => {
-      closed = true;
-      // Exiting the master ends every client, so pending fallbacks are moot.
-      for (const timer of killTimers) {
-        clearTimeout(timer);
-      }
-      killTimers.clear();
+    close: () => {
+      closePromise ??= (async () => {
+        closed = true;
+        setState('closed');
+        closing.abort();
+        const active = [...processes];
+        for (const remote of active) {
+          remote.kill();
+        }
+        await Promise.all(active.map((remote) => remote.done));
+        await Promise.all(kills);
+        await restoringMaster;
+        await connection.exitMaster();
+      })();
+      return closePromise;
+    },
+    getConnectionState: () => state,
+    onConnectionState: (/** @type {(state: ConnectionState) => void} */ listener) => {
+      stateListeners.add(listener);
+      return () => {
+        stateListeners.delete(listener);
+      };
+    },
+    reconnect: async () => {
+      assertOpen();
       await restoringMaster;
-      await connection.exitMaster();
+      try {
+        await connection.ensureMaster();
+        if (!closed) {
+          setState('connected');
+        }
+      } catch (error) {
+        if (!closed) {
+          setState('disconnected');
+        }
+        throw error;
+      }
+      assertOpen();
     },
     exec,
-    id: `ssh://${alias}`,
+    id: getSshHostId(alias, connection.port),
     label: alias,
     lstat: (path) => statPath(path, false),
     lstatMany,
@@ -925,7 +1130,7 @@ const connectSshHost = async ({
 
     const probe = await connection.run(
       wrapForLoginShell(
-        'if stat --version >/dev/null 2>&1; then echo gnu; else echo bsd; fi; for c in git realpath; do command -v "$c" >/dev/null 2>&1 || echo "missing:$c"; done',
+        `if stat -c '%f %s %i %.9Y %.9Z' / >/dev/null 2>&1 && stat --version 2>/dev/null | grep -q 'GNU'; then echo gnu; elif stat -f '%Xp %z %i %Fm %Fc' / >/dev/null 2>&1; then echo bsd; else echo unsupported; fi; for c in git realpath; do command -v "$c" >/dev/null 2>&1 || echo "missing:$c"; done`,
         dialect,
       ),
     );
@@ -936,6 +1141,9 @@ const connectSshHost = async ({
     const missing = probeLines.find((line) => line.startsWith('missing:'));
     if (missing) {
       throw new RemoteCommandMissingError(alias, missing.slice('missing:'.length));
+    }
+    if (probeLines[0] !== 'gnu' && probeLines[0] !== 'bsd') {
+      throw new Error(`Codiff needs GNU or BSD stat on ${alias}.`);
     }
     return createSshHost({
       alias,

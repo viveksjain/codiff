@@ -543,3 +543,16 @@ test('reads base...head and base..head positionals as a range source', async () 
     readCommandLine(['codiff', 'nope...nada', directory.path]).launchOptions.source,
   ).toBeUndefined();
 });
+
+test('remote app launch arguments never resolve through the local checkout', () => {
+  expect(getCommandLineRepositoryPath(['codiff', 'feature', 'devbox:~/src/app'])).toBe(
+    'devbox:~/src/app',
+  );
+  expect(getCommandLineLaunchOptions(['codiff', 'feature', 'devbox:~/src/app'])).toMatchObject({
+    repositoryPathProvided: true,
+    remoteSourceCandidate: 'feature',
+  });
+  expect(getCommandLineLaunchOptions(['codiff', 'v1...HEAD', 'devbox:/app'])).toMatchObject({
+    source: { base: 'v1', head: 'HEAD', symmetric: true, type: 'range' },
+  });
+});

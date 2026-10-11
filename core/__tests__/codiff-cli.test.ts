@@ -1521,3 +1521,19 @@ test('parseArguments reads base...target and base..target as a range', async () 
     expect(parseArguments(['nope...nada']).range).toBeUndefined();
   });
 });
+
+test('preserves remote targets and defers remote positional refs', () => {
+  expect(parseArguments(['feature', 'devbox:~/src/app'])).toMatchObject({
+    remoteSourceCandidate: 'feature',
+    remoteTarget: { hostId: 'ssh://devbox' },
+    requestedPath: 'devbox:~/src/app',
+  });
+  expect(parseArguments(['v1...HEAD', 'ssh://devbox:2222/srv/app'])).toMatchObject({
+    range: { base: 'v1', head: 'HEAD', symmetric: true },
+    requestedPath: 'ssh://devbox:2222/srv/app',
+  });
+  expect(parseArguments(['--commit', 'HEAD', 'devbox:/app'])).toMatchObject({
+    commitRef: 'HEAD',
+    requestedPath: 'devbox:/app',
+  });
+});

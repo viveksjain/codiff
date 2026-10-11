@@ -2,8 +2,10 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import repositoryTarget from '../electron/host/repository-target.cjs';
 import reviewSource from '../electron/review-source.cjs';
 
+const { parseRepositoryTarget } = repositoryTarget;
 const { parseReviewUrl, resolveLocalReviewUrlSync } = reviewSource;
 
 export const flagDefinitions = [
@@ -355,6 +357,7 @@ export const parseArguments = (args) => {
   let pullRequestProvider = null;
   let pullRequestUrl = null;
   let requestedPath = null;
+  let remoteTarget = null;
   let sourceCandidate = null;
   let rangeCandidate = null;
   const walkthroughContextPath =
@@ -364,6 +367,17 @@ export const parseArguments = (args) => {
 
   for (let index = 0; index < positionals.length; index += 1) {
     const arg = positionals[index];
+    if (arg.startsWith('ssh://') || /^[^/]+:(?:\/|~)/.test(arg)) {
+      const target = parseRepositoryTarget(arg);
+      if (target) {
+        if (remoteTarget) {
+          throw new Error('Specify one remote repository.');
+        }
+        remoteTarget = target;
+        requestedPath = arg;
+        continue;
+      }
+    }
     if (planFilePath) {
       requestedPath ??= arg;
       continue;
@@ -423,7 +437,9 @@ export const parseArguments = (args) => {
 
   const repositoryPath = resolve(requestedPath ?? process.cwd());
   let range = null;
-  if (rangeCandidate) {
+  if (remoteTarget) {
+    range = rangeCandidate;
+  } else if (rangeCandidate) {
     // Only honor the range when both ends resolve in this repository; otherwise
     // fall back so a stray `a..b`-shaped argument isn't silently misread.
     range =
@@ -432,7 +448,7 @@ export const parseArguments = (args) => {
         ? rangeCandidate
         : null;
   }
-  if (!range && !commitRef && !branchRef && sourceCandidate) {
+  if (!remoteTarget && !range && !commitRef && !branchRef && sourceCandidate) {
     const source = resolveSourceCandidate(repositoryPath, sourceCandidate);
     if (source?.branchRef) {
       branchRef = source.branchRef;
@@ -464,7 +480,12 @@ export const parseArguments = (args) => {
     ...(pullRequestProvider ? { pullRequestProvider } : {}),
     pullRequestUrl,
     ...(values.public === true ? { public: true } : {}),
-    requestedPath: resolve(requestedPath ?? process.cwd()),
+    ...(remoteTarget
+      ? { remoteTarget, ...(sourceCandidate ? { remoteSourceCandidate: sourceCandidate } : {}) }
+      : {}),
+    requestedPath: remoteTarget
+      ? (requestedPath ?? remoteTarget.path)
+      : resolve(requestedPath ?? process.cwd()),
     ...(values.share === true ? { share: true } : {}),
     version: values.version === true,
     walkthrough: values.walkthrough === true || (values.share === true && !planFilePath),

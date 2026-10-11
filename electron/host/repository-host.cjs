@@ -48,7 +48,8 @@
  * }} HostPtyOptions
  * @typedef {{exclusive?: boolean; mode?: number}} HostWriteFileOptions
  * @typedef {{
- *   kill: () => unknown;
+ *   kill: (signal?: NodeJS.Signals | number) => unknown;
+ *   killed?: boolean;
  *   on: (event: string, listener: (...args: Array<any>) => void) => unknown;
  *   stderr: import('node:stream').Readable;
  *   stdin: import('node:stream').Writable;

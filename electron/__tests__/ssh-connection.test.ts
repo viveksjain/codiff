@@ -28,6 +28,9 @@ const { createSshConnection, isSocketStale } = require('../host/ssh-connection.c
     alias: string;
     controlDirectory?: string;
     masterStartTimeoutMs?: number;
+    port?: number;
+    interactive?: boolean;
+    getLocalEnvironment?: () => Promise<NodeJS.ProcessEnv>;
     spawnProcess?: SpawnProcess;
     sshCommand?: string;
     sshConfigPath?: string;
@@ -475,5 +478,53 @@ describe.skipIf(!findSshd())('ssh connection', () => {
       message: expect.stringMatching(/Connection refused/),
       name: 'HostUnreachableError',
     });
+  });
+});
+
+test('resolves the local environment asynchronously before invoking ssh', async () => {
+  const environments: Array<NodeJS.ProcessEnv> = [];
+  const spawnProcess = ((
+    command: string,
+    args: ReadonlyArray<string>,
+    options: { env: NodeJS.ProcessEnv },
+  ) => {
+    environments.push(options.env);
+    return spawn(command, args, options);
+  }) as SpawnProcess;
+  const connection = createSshConnection({
+    alias: 'localhost',
+    controlDirectory: '/tmp',
+    sshCommand: '/nonexistent/ssh',
+    spawnProcess,
+    getLocalEnvironment: async () => ({ SSH_AUTH_SOCK: '/agent/socket', PATH: process.env.PATH }),
+  });
+  await connection.check();
+  expect(environments.every((env) => env.SSH_AUTH_SOCK === '/agent/socket')).toBe(true);
+});
+
+test('validates explicit SSH ports', () => {
+  for (const port of [0, -1, 65536, 1.5]) {
+    expect(() =>
+      createSshConnection({ alias: 'localhost', port, controlDirectory: '/tmp' }),
+    ).toThrow(/port/i);
+  }
+});
+
+describe.skipIf(!findSshd())('explicit connection settings', () => {
+  test('terminal masters and explicit ports reuse the same socket', async () => {
+    await using sshd = await startTestSshd();
+    const connection = createSshConnection({
+      alias: sshd.alias,
+      port: sshd.port,
+      interactive: true,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    try {
+      await connection.ensureMaster();
+      expect((await connection.run('printf ran')).stdout.toString()).toBe('ran');
+    } finally {
+      await connection.exitMaster();
+    }
   });
 });
