@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vite-plus/test';
@@ -6,16 +8,57 @@ import type { RepositoryHost } from '../host/repository-host.cjs';
 import { findSshd, startTestSshd, type TestSshd } from './helpers/test-sshd.ts';
 
 type SshHost = RepositoryHost & { close: () => Promise<void> };
+type SshResult = { code: number | null; stderr: string; stdout: Buffer };
+type SshConnection = {
+  alias: string;
+  check: () => Promise<boolean>;
+  ensureMaster: () => Promise<void>;
+  exitMaster: () => Promise<void>;
+  run: (remoteCommand: string, options?: { input?: string | Buffer }) => Promise<SshResult>;
+  spawnClient: (
+    remoteCommand: string,
+    options?: { tty?: boolean },
+  ) => import('node:child_process').ChildProcessWithoutNullStreams;
+  startMaster: () => Promise<void>;
+};
 
 const require = createRequire(import.meta.url);
 const { connectSshHost, createPidMarkerFilter } = require('../host/ssh-host.cjs') as {
   connectSshHost: (options: {
     alias: string;
+    connection?: SshConnection;
     controlDirectory?: string;
     masterCheckIntervalMs?: number;
     sshConfigPath?: string;
   }) => Promise<SshHost>;
   createPidMarkerFilter: (onPid: (pid: number) => void) => import('node:stream').Transform;
+};
+const { createSshConnection } = require('../host/ssh-connection.cjs') as {
+  createSshConnection: (options: {
+    alias: string;
+    controlDirectory?: string;
+    sshConfigPath?: string;
+  }) => SshConnection;
+};
+
+const createConnection = (sshd: TestSshd) =>
+  createSshConnection({
+    alias: sshd.alias,
+    controlDirectory: sshd.controlDirectory,
+    sshConfigPath: sshd.sshConfigPath,
+  });
+
+const listMasters = () => {
+  try {
+    return execFileSync('pgrep', ['-fl', 'ControlPersist=yes'], { encoding: 'utf8' });
+  } catch {
+    return '';
+  }
+};
+
+const readPid = (pidFile: string) => {
+  const text = existsSync(pidFile) ? readFileSync(pidFile, 'utf8').trim() : '';
+  return text ? Number(text) : null;
 };
 
 const connect = (sshd: TestSshd) =>
@@ -69,7 +112,196 @@ test('the PID marker filter removes and reports only a leading marker line', asy
   expect(pids).toEqual([42]);
 });
 
+test('the PID marker filter drops login shell noise before the marker', async () => {
+  const pids: Array<number> = [];
+  const noisy = createPidMarkerFilter((pid) => pids.push(pid));
+  const noisyOutput = readStream(noisy);
+  noisy.write('bash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)\r\n');
+  noisy.write('\nmore noise\n__codiff_pid__:9');
+  noisy.end('9\nreal stderr\n');
+  expect(await noisyOutput).toBe('real stderr\n');
+  expect(pids).toEqual([99]);
+
+  // The scan is bounded: a marker after 8 KiB of noise is not trusted.
+  const noise = `${'x'.repeat(99)}\n`.repeat(90);
+  const bounded = createPidMarkerFilter((pid) => pids.push(pid));
+  const boundedOutput = readStream(bounded);
+  bounded.end(`${noise}__codiff_pid__:7\nreal stderr\n`);
+  expect(await boundedOutput).toBe(`${noise}__codiff_pid__:7\nreal stderr\n`);
+  expect(pids).toEqual([99]);
+});
+
+describe('connecting with shell noise', () => {
+  const connectWith = (stdout: string, masterRunning: boolean) => {
+    const calls: Array<string> = [];
+    const connection: SshConnection = {
+      alias: 'fake',
+      check: async () => {
+        calls.push('check');
+        return masterRunning;
+      },
+      ensureMaster: async () => {
+        calls.push('ensureMaster');
+      },
+      exitMaster: async () => {
+        calls.push('exitMaster');
+      },
+      run: async () => ({ code: 0, stderr: '', stdout: Buffer.from(stdout) }),
+      spawnClient: () => {
+        throw new Error('Unexpected client.');
+      },
+      startMaster: async () => {},
+    };
+    return { calls, connecting: connectSshHost({ alias: 'fake', connection }) };
+  };
+
+  test.each([
+    'Welcome!\n__codiff_shell__:/bin/zsh\n',
+    '\n__codiff_shell__:/bin/zsh\n',
+    '__codiff_shell__:/bin/zsh\n\n',
+    '__codiff_shell__:/bin/zsh',
+  ])('rejects %j and stops the master it started', async (stdout) => {
+    const { calls, connecting } = connectWith(stdout, false);
+    await expect(connecting).rejects.toMatchObject({ name: 'RemoteShellNoiseError' });
+    expect(calls).toEqual(['check', 'ensureMaster', 'exitMaster']);
+  });
+
+  test('leaves a master it adopted running', async () => {
+    const { calls, connecting } = connectWith('noise\n__codiff_shell__:/bin/zsh\n', true);
+    await expect(connecting).rejects.toMatchObject({ name: 'RemoteShellNoiseError' });
+    expect(calls).toEqual(['check', 'ensureMaster']);
+  });
+});
+
 describe.skipIf(!findSshd())('SshHost commands', () => {
+  test('a failed connect stops the master it started', async () => {
+    await using sshd = await startTestSshd();
+    const connection = createConnection(sshd);
+    expect(await connection.check()).toBe(false);
+    let masterStarted = false;
+    await expect(
+      connectSshHost({
+        alias: sshd.alias,
+        connection: {
+          ...connection,
+          run: async () => {
+            masterStarted = await connection.check();
+            return {
+              code: 0,
+              stderr: '',
+              stdout: Buffer.from('Welcome!\n__codiff_shell__:/bin/sh\n'),
+            };
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'RemoteShellNoiseError' });
+    expect(masterStarted).toBe(true);
+    expect(await connection.check()).toBe(false);
+    expect(listMasters()).not.toContain(sshd.controlDirectory);
+  });
+
+  test('an exec aborted while queued for a channel rejects at once', async () => {
+    await using sshd = await startTestSshd();
+    const host = await connect(sshd);
+    const running = Array.from({ length: 6 }, () => host.exec('/bin/sh', ['-c', 'sleep 2']));
+    const controller = new AbortController();
+    const started = Date.now();
+    const queued = host.exec('/bin/sh', ['-c', 'true'], { signal: controller.signal });
+    controller.abort();
+    await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+    expect(Date.now() - started).toBeLessThan(1000);
+    await Promise.all(running);
+    await host.close();
+  });
+
+  test('killing a spawn before it announces its PID stops the remote process', async () => {
+    await using sshd = await startTestSshd();
+    const host = await connect(sshd);
+    for (const delay of [0, 5, 10]) {
+      const pidFile = join(sshd.root, `early-${delay}.pid`);
+      const child = host.spawn('/bin/sh', ['-c', `echo $$ > '${pidFile}'; exec sleep 30`]);
+      child.stdin.end();
+      child.stdout.resume();
+      child.stderr.resume();
+      const closed = new Promise((resolve) => child.on('close', () => resolve('closed')));
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      const started = Date.now();
+      child.kill();
+      const outcome = await Promise.race([
+        closed,
+        new Promise((resolve) => setTimeout(() => resolve('timed out'), 6000)),
+      ]);
+      const pid = readPid(pidFile);
+      if (outcome !== 'closed' && pid != null && isRunning(pid)) {
+        // Do not leave the sleeper behind when the assertions below fail.
+        process.kill(pid);
+      }
+      expect(outcome).toBe('closed');
+      expect(Date.now() - started).toBeLessThan(6000);
+      if (pid != null) {
+        await waitUntil(() => !isRunning(pid));
+      }
+    }
+    await host.close();
+  }, 30_000);
+
+  test('killing twice or after exit sends at most one remote kill', async () => {
+    await using sshd = await startTestSshd();
+    const connection = createConnection(sshd);
+    const killCommands: Array<string> = [];
+    const host = await connectSshHost({
+      alias: sshd.alias,
+      connection: {
+        ...connection,
+        spawnClient: (remoteCommand, options) => {
+          if (remoteCommand.includes('kill -TERM')) {
+            killCommands.push(remoteCommand);
+          }
+          return connection.spawnClient(remoteCommand, options);
+        },
+      },
+    });
+
+    const pidFile = join(sshd.root, 'twice.pid');
+    const sleeper = host.spawn('/bin/sh', ['-c', `echo $$ > '${pidFile}'; exec sleep 30`]);
+    sleeper.stdin.end();
+    sleeper.stdout.resume();
+    sleeper.stderr.resume();
+    await waitUntil(() => readPid(pidFile) != null);
+    const pid = readPid(pidFile)!;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const closed = new Promise((resolve) => sleeper.on('close', resolve));
+    sleeper.kill();
+    sleeper.kill();
+    await closed;
+    await waitUntil(() => !isRunning(pid));
+    expect(killCommands).toHaveLength(1);
+
+    const pty = host.spawnPty('/bin/sh', ['-c', 'exec sleep 30'], {
+      cols: 80,
+      name: 'xterm',
+      rows: 24,
+    });
+    pty.onData(() => {});
+    const ptyExited = new Promise((resolve) => pty.onExit(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    pty.kill();
+    pty.kill();
+    await ptyExited;
+    expect(killCommands).toHaveLength(2);
+
+    const done = host.spawn('/bin/sh', ['-c', 'exit 0']);
+    done.stdin.end();
+    done.stdout.resume();
+    done.stderr.resume();
+    await new Promise((resolve) => done.on('close', resolve));
+    done.kill();
+    sleeper.kill();
+    pty.kill();
+    expect(killCommands).toHaveLength(2);
+    await host.close();
+  });
+
   test('identifies itself by its ssh destination', async () => {
     await using sshd = await startTestSshd();
     const host = await connect(sshd);

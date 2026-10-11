@@ -38,15 +38,40 @@ const SHELL_PROBE_PREFIX = '__codiff_shell__:';
 // How long a kill waits for the command to announce its PID.
 const PID_WAIT_MS = 5000;
 
+const createAbortError = () => {
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+};
+
 /** @param {number} limit */
 const createLimiter = (limit) => {
   let active = 0;
   /** @type {Array<() => void>} */
   const waiting = [];
-  const acquire = () =>
-    active < limit
-      ? ((active += 1), Promise.resolve())
-      : new Promise((resolve) => waiting.push(() => resolve(undefined)));
+  /** @param {AbortSignal | undefined} signal @returns {Promise<void>} */
+  const acquire = (signal) => {
+    if (signal?.aborted) {
+      return Promise.reject(createAbortError());
+    }
+    if (active < limit) {
+      active += 1;
+      return Promise.resolve();
+    }
+    // An aborted waiter leaves the queue at once instead of waiting for a slot.
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        waiting.splice(waiting.indexOf(start), 1);
+        reject(createAbortError());
+      };
+      const start = () => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      waiting.push(start);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  };
   // A finished task hands its slot straight to the next waiter.
   const release = () => {
     const next = waiting.shift();
@@ -59,10 +84,11 @@ const createLimiter = (limit) => {
   /**
    * @template T
    * @param {() => Promise<T>} task
+   * @param {AbortSignal} [signal]
    * @returns {Promise<T>}
    */
-  return async (task) => {
-    await acquire();
+  return async (task, signal) => {
+    await acquire(signal);
     try {
       return await task();
     } finally {
@@ -71,20 +97,20 @@ const createLimiter = (limit) => {
   };
 };
 
-const createAbortError = () => {
-  const error = new Error('The operation was aborted.');
-  error.name = 'AbortError';
-  return error;
-};
+// Login shell startup files can print to stderr (for example bash's setlocale
+// warning) before the marker, so a bounded number of leading lines is scanned.
+const PID_MARKER_SCAN_BYTES = 8 * 1024;
 
 /**
- * Strips a leading `PID_MARKER<pid>` line (as printed by `buildCommandScript`
- * with `announcePid`) from a stream and reports the PID.
+ * Strips the `PID_MARKER<pid>` line (as printed by `buildCommandScript` with
+ * `announcePid`) and any lines before it from a stream, and reports the PID.
+ * Without a marker line in the first 8 KiB, the stream passes through as is.
  *
  * @param {(pid: number) => void} onPid
  */
 const createPidMarkerFilter = (onPid) => {
   let pending = Buffer.alloc(0);
+  let scanned = 0;
   let done = false;
   return new Transform({
     flush(callback) {
@@ -96,28 +122,31 @@ const createPidMarkerFilter = (onPid) => {
         return;
       }
       pending = Buffer.concat([pending, chunk]);
-      const newline = pending.indexOf(10);
-      if (newline === -1) {
-        if (pending.length > PID_MARKER.length + 32) {
+      let newline = pending.indexOf(10, scanned);
+      while (newline !== -1 && newline < PID_MARKER_SCAN_BYTES) {
+        const line = pending.subarray(scanned, newline).toString('utf8').replace(/\r$/, '');
+        if (line.startsWith(PID_MARKER)) {
           done = true;
-          callback(null, pending);
-        } else {
-          callback();
+          const pid = Number(line.slice(PID_MARKER.length));
+          if (Number.isSafeInteger(pid) && pid > 0) {
+            onPid(pid);
+          }
+          const rest = pending.subarray(newline + 1);
+          pending = Buffer.alloc(0);
+          callback(null, rest.length > 0 ? rest : undefined);
+          return;
         }
+        scanned = newline + 1;
+        newline = pending.indexOf(10, scanned);
+      }
+      if (pending.length >= PID_MARKER_SCAN_BYTES) {
+        done = true;
+        const buffered = pending;
+        pending = Buffer.alloc(0);
+        callback(null, buffered);
         return;
       }
-      done = true;
-      const line = pending.subarray(0, newline).toString('utf8').replace(/\r$/, '');
-      if (line.startsWith(PID_MARKER)) {
-        const pid = Number(line.slice(PID_MARKER.length));
-        if (Number.isSafeInteger(pid) && pid > 0) {
-          onPid(pid);
-        }
-        const rest = pending.subarray(newline + 1);
-        callback(null, rest.length > 0 ? rest : undefined);
-      } else {
-        callback(null, pending);
-      }
+      callback();
     },
   });
 };
@@ -144,6 +173,8 @@ const createSshHost = ({
   let closed = false;
   /** @type {Promise<void> | null} */
   let restoringMaster = null;
+  /** @type {Set<NodeJS.Timeout>} */
+  const killTimers = new Set();
 
   // A client whose master vanished connects on its own (ControlMaster=auto);
   // this restores a shared master in the background. `close` waits for it, so
@@ -187,8 +218,10 @@ const createSshHost = ({
 
   /**
    * Stops one command: its local ssh client and, by its announced PID, the
-   * remote process. Stopping is idempotent and never targets a PID after the
-   * command exited, since the PID may belong to another process by then.
+   * remote process. Stopping is idempotent and is skipped once the local client
+   * has closed, since the PID may belong to another process by then. A small
+   * window remains between the remote exit and the local 'close' in which a
+   * kill can still target a PID that was just freed.
    *
    * Killing the client while the master is still setting up the session leaves
    * that session running and holding the client's pipes until the remote
@@ -204,8 +237,15 @@ const createSshHost = ({
     let exited = false;
     /** @type {NodeJS.Timeout | undefined} */
     let timer;
+    const clearTimer = () => {
+      if (timer) {
+        clearTimeout(timer);
+        killTimers.delete(timer);
+        timer = undefined;
+      }
+    };
     const killNow = () => {
-      clearTimeout(timer);
+      clearTimer();
       child.kill();
       if (pid != null) {
         killRemote(pid);
@@ -221,7 +261,7 @@ const createSshHost = ({
       },
       exit: () => {
         exited = true;
-        clearTimeout(timer);
+        clearTimer();
       },
       kill: () => {
         if (killed || exited) {
@@ -232,6 +272,8 @@ const createSshHost = ({
           killNow();
         } else {
           timer = setTimeout(killNow, PID_WAIT_MS);
+          timer.unref();
+          killTimers.add(timer);
         }
       },
     };
@@ -339,6 +381,7 @@ const createSshHost = ({
           });
           child.stdin.end(input);
         }),
+      signal,
     );
 
   /** @type {RepositoryHost['exec']} */
@@ -503,6 +546,11 @@ const createSshHost = ({
   return Object.freeze({
     close: async () => {
       closed = true;
+      // Exiting the master ends every client, so pending fallbacks are moot.
+      for (const timer of killTimers) {
+        clearTimeout(timer);
+      }
+      killTimers.clear();
       await restoringMaster;
       await connection.exitMaster();
     },
@@ -539,44 +587,54 @@ const connectSshHost = async ({
 }) => {
   const connection = providedConnection ?? createSshConnection(options);
   const { alias } = connection;
+  // A master this call starts must not outlive a failed connect.
+  const adoptedMaster = await connection.check();
   await connection.ensureMaster();
+  try {
+    // The login shell parses this one fixed command; it is valid in every shell.
+    const shellResult = await connection.run(`printf '${SHELL_PROBE_PREFIX}%s\\n' "$SHELL"`);
+    if (shellResult.code !== 0) {
+      throw classifySshFailure(alias, shellResult.stderr, { connected: false });
+    }
+    // Anything but exactly this one line, blank lines included, would also
+    // reach the output of every command.
+    const shellOutput = shellResult.stdout.toString('utf8');
+    const shell = shellOutput.slice(SHELL_PROBE_PREFIX.length, -1);
+    if (shellOutput !== `${SHELL_PROBE_PREFIX}${shell}\n` || shell.includes('\n')) {
+      throw new RemoteShellNoiseError(alias);
+    }
+    const dialect = getShellDialect(shell);
+    if (!dialect) {
+      throw new UnsupportedRemoteShellError(alias, shell);
+    }
 
-  // The login shell parses this one fixed command; it is valid in every shell.
-  const shellResult = await connection.run(`printf '${SHELL_PROBE_PREFIX}%s\\n' "$SHELL"`);
-  if (shellResult.code !== 0) {
-    throw classifySshFailure(alias, shellResult.stderr, { connected: false });
-  }
-  const shellLines = shellResult.stdout.toString('utf8').split('\n').filter(Boolean);
-  if (shellLines.length !== 1 || !shellLines[0].startsWith(SHELL_PROBE_PREFIX)) {
-    throw new RemoteShellNoiseError(alias);
-  }
-  const shell = shellLines[0].slice(SHELL_PROBE_PREFIX.length);
-  const dialect = getShellDialect(shell);
-  if (!dialect) {
-    throw new UnsupportedRemoteShellError(alias, shell);
-  }
-
-  const probe = await connection.run(
-    wrapForLoginShell(
-      'if stat --version >/dev/null 2>&1; then echo gnu; else echo bsd; fi; for c in git realpath; do command -v "$c" >/dev/null 2>&1 || echo "missing:$c"; done',
+    const probe = await connection.run(
+      wrapForLoginShell(
+        'if stat --version >/dev/null 2>&1; then echo gnu; else echo bsd; fi; for c in git realpath; do command -v "$c" >/dev/null 2>&1 || echo "missing:$c"; done',
+        dialect,
+      ),
+    );
+    if (probe.code !== 0) {
+      throw classifySshFailure(alias, probe.stderr, { connected: false });
+    }
+    const probeLines = probe.stdout.toString('utf8').split('\n').filter(Boolean);
+    const missing = probeLines.find((line) => line.startsWith('missing:'));
+    if (missing) {
+      throw new RemoteCommandMissingError(alias, missing.slice('missing:'.length));
+    }
+    return createSshHost({
+      alias,
+      connection,
       dialect,
-    ),
-  );
-  if (probe.code !== 0) {
-    throw classifySshFailure(alias, probe.stderr, { connected: false });
+      masterCheckIntervalMs,
+      statFlavor: probeLines[0] === 'gnu' ? 'gnu' : 'bsd',
+    });
+  } catch (error) {
+    if (!adoptedMaster) {
+      await connection.exitMaster().catch(() => {});
+    }
+    throw error;
   }
-  const probeLines = probe.stdout.toString('utf8').split('\n').filter(Boolean);
-  const missing = probeLines.find((line) => line.startsWith('missing:'));
-  if (missing) {
-    throw new RemoteCommandMissingError(alias, missing.slice('missing:'.length));
-  }
-  return createSshHost({
-    alias,
-    connection,
-    dialect,
-    masterCheckIntervalMs,
-    statFlavor: probeLines[0] === 'gnu' ? 'gnu' : 'bsd',
-  });
 };
 
 module.exports = { connectSshHost, createPidMarkerFilter, createSshHost };
