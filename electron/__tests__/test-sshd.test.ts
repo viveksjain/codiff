@@ -1,9 +1,33 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
-import { describe, expect, test } from 'vite-plus/test';
+import { afterEach, describe, expect, test, vi } from 'vite-plus/test';
 import { findSshd, startTestSshd } from './helpers/test-sshd.ts';
 
+const roots = vi.hoisted(() => [] as Array<string>);
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    mkdtemp: async (...args: Parameters<typeof actual.mkdtemp>) => {
+      const path = await actual.mkdtemp(...args);
+      roots.push(path);
+      return path;
+    },
+  };
+});
+
 const execFileAsync = promisify(execFile);
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  roots.length = 0;
+});
+
+test.runIf(Boolean(process.env.CI))('sshd is installed in CI', () => {
+  expect(findSshd()).not.toBeNull();
+});
 
 describe.skipIf(!findSshd())('test sshd', () => {
   test('accepts the generated key and forwards Git variables', async () => {
@@ -42,5 +66,13 @@ describe.skipIf(!findSshd())('test sshd', () => {
         'true',
       ]),
     ).rejects.toThrow(/Connection refused/);
+  });
+
+  test('removes its temporary directory when startup fails', async () => {
+    vi.stubEnv('PATH', '/nonexistent');
+    await expect(startTestSshd()).rejects.toThrow();
+    vi.unstubAllEnvs();
+    expect(roots).toHaveLength(1);
+    expect(existsSync(roots[0]!)).toBe(false);
   });
 });

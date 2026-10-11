@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -46,15 +46,44 @@ const canConnect = (port: number) =>
     socket.once('error', () => resolve(false));
   });
 
-const waitForPort = async (port: number, timeoutMs = 5000) => {
+type ServerState = { failure: Error | null; log: string };
+
+// Resolves once sshd reports that it is listening and accepts a connection.
+// Rejects as soon as sshd exits or fails to spawn, so a port that is already
+// bound by someone else cannot be mistaken for a working server.
+const waitForServer = async (port: number, state: ServerState, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await canConnect(port)) {
+    if (state.failure) {
+      throw state.failure;
+    }
+    if (state.log.includes('Server listening') && (await canConnect(port))) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Test sshd did not start on port ${port}.`);
+};
+
+const hasExited = (child: ChildProcess) => child.exitCode != null || child.signalCode != null;
+
+const terminate = async (child: ChildProcess) => {
+  // No pid means the spawn itself failed, so there is no process and no 'exit'.
+  if (child.pid == null || hasExited(child)) {
+    return;
+  }
+  const exited = once(child, 'exit');
+  child.kill('SIGTERM');
+  const timer = setTimeout(() => {
+    if (!hasExited(child)) {
+      child.kill('SIGKILL');
+    }
+  }, 2000);
+  try {
+    await exited;
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 const generateKey = (path: string) =>
@@ -73,70 +102,84 @@ export const startTestSshd = async ({
     throw new Error('sshd is not installed. Install openssh-server to run SSH host tests.');
   }
   const root = await mkdtemp('/tmp/cdf-');
-  await Promise.all([
-    generateKey(join(root, 'host_key')),
-    generateKey(join(root, 'client_key')),
-    generateKey(join(root, 'other_key')),
-  ]);
-  const authorizedKey = await readFile(
-    join(root, authorize ? 'client_key.pub' : 'other_key.pub'),
-    'utf8',
-  );
-  await writeFile(join(root, 'authorized_keys'), authorizedKey, { mode: 0o600 });
-  const [port, unreachablePort] = await Promise.all([getFreePort(), getFreePort()]);
-  await writeFile(
-    join(root, 'sshd_config'),
-    [
-      `Port ${port}`,
-      'ListenAddress 127.0.0.1',
-      `HostKey ${join(root, 'host_key')}`,
-      `AuthorizedKeysFile ${join(root, 'authorized_keys')}`,
-      `PidFile ${join(root, 'sshd.pid')}`,
-      'UsePAM no',
-      'StrictModes no',
-      'PasswordAuthentication no',
-      'KbdInteractiveAuthentication no',
-      'AcceptEnv GIT_* CODIFF_*',
-      '',
-    ].join('\n'),
-  );
-  const user = userInfo().username;
-  const clientOptions = [
-    `  User ${user}`,
-    `  IdentityFile ${join(root, 'client_key')}`,
-    '  IdentitiesOnly yes',
-    '  StrictHostKeyChecking no',
-    `  UserKnownHostsFile ${join(root, 'known_hosts')}`,
-    '  SendEnv GIT_* CODIFF_*',
-  ];
-  const sshConfigPath = join(root, 'ssh_config');
-  await writeFile(
-    sshConfigPath,
-    [
-      'Host codiff-test',
-      '  HostName 127.0.0.1',
-      `  Port ${port}`,
-      ...clientOptions,
-      'Host codiff-unreachable',
-      '  HostName 127.0.0.1',
-      `  Port ${unreachablePort}`,
-      ...clientOptions,
-      '',
-    ].join('\n'),
-  );
-
-  const server = spawn(sshd, ['-D', '-e', '-f', join(root, 'sshd_config')], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  let log = '';
-  server.stderr.on('data', (chunk: Buffer) => {
-    log += chunk.toString('utf8');
-  });
+  const state: ServerState = { failure: null, log: '' };
+  let server: ChildProcess | undefined;
+  let port: number;
+  let sshConfigPath: string;
   try {
-    await waitForPort(port);
+    await Promise.all([
+      generateKey(join(root, 'host_key')),
+      generateKey(join(root, 'client_key')),
+      generateKey(join(root, 'other_key')),
+    ]);
+    const authorizedKey = await readFile(
+      join(root, authorize ? 'client_key.pub' : 'other_key.pub'),
+      'utf8',
+    );
+    await writeFile(join(root, 'authorized_keys'), authorizedKey, { mode: 0o600 });
+    let unreachablePort: number;
+    [port, unreachablePort] = await Promise.all([getFreePort(), getFreePort()]);
+    await writeFile(
+      join(root, 'sshd_config'),
+      [
+        `Port ${port}`,
+        'ListenAddress 127.0.0.1',
+        `HostKey ${join(root, 'host_key')}`,
+        `AuthorizedKeysFile ${join(root, 'authorized_keys')}`,
+        `PidFile ${join(root, 'sshd.pid')}`,
+        'UsePAM no',
+        'StrictModes no',
+        'PasswordAuthentication no',
+        'KbdInteractiveAuthentication no',
+        'AcceptEnv GIT_* CODIFF_*',
+        '',
+      ].join('\n'),
+    );
+    const user = userInfo().username;
+    const clientOptions = [
+      `  User ${user}`,
+      `  IdentityFile ${join(root, 'client_key')}`,
+      '  IdentitiesOnly yes',
+      '  StrictHostKeyChecking no',
+      `  UserKnownHostsFile ${join(root, 'known_hosts')}`,
+      '  SendEnv GIT_* CODIFF_*',
+    ];
+    sshConfigPath = join(root, 'ssh_config');
+    await writeFile(
+      sshConfigPath,
+      [
+        'Host codiff-test',
+        '  HostName 127.0.0.1',
+        `  Port ${port}`,
+        ...clientOptions,
+        'Host codiff-unreachable',
+        '  HostName 127.0.0.1',
+        `  Port ${unreachablePort}`,
+        ...clientOptions,
+        '',
+      ].join('\n'),
+    );
+
+    server = spawn(sshd, ['-D', '-e', '-f', join(root, 'sshd_config')], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    server.stderr?.on('data', (chunk: Buffer) => {
+      state.log += chunk.toString('utf8');
+    });
+    server.once('error', (error) => {
+      state.failure ??= error;
+    });
+    server.once('exit', (code, signal) => {
+      state.failure ??= new Error(`Test sshd exited (${signal ?? code}) before it was ready.`);
+    });
+    await waitForServer(port, state);
   } catch (error) {
-    server.kill();
-    throw new Error(`${(error as Error).message}\n${log}`);
+    if (server) {
+      await terminate(server).catch(() => {});
+    }
+    await rm(root, { force: true, recursive: true });
+    const message = (error as Error).message;
+    throw new Error(state.log ? `${message}\n${state.log}` : message, { cause: error });
   }
 
   const controlDirectory = join(root, 'cm');
@@ -155,17 +198,14 @@ export const startTestSshd = async ({
       'exit',
       'codiff-test',
     ]).catch(() => {});
-    if (server.exitCode == null) {
-      server.kill();
-      await once(server, 'exit');
-    }
+    await terminate(server);
     await rm(root, { force: true, recursive: true });
   };
 
   return {
     alias: 'codiff-test',
     controlDirectory,
-    getLog: () => log,
+    getLog: () => state.log,
     port,
     root,
     sshConfigPath,
