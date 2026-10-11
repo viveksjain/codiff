@@ -181,6 +181,31 @@ describe.skipIf(!findSshd())('ssh connection', () => {
     expect(await connection.check()).toBe(false);
   });
 
+  test('a control directory with a space works', async () => {
+    await using sshd = await startTestSshd();
+    // Under /tmp so the socket path stays below the Unix socket length limit.
+    const controlDirectory = await mkdtemp('/tmp/cdf-sp ');
+    try {
+      const connection = createSshConnection({
+        alias: sshd.alias,
+        controlDirectory,
+        sshConfigPath: sshd.sshConfigPath,
+      });
+      await connection.startMaster();
+      expect(await connection.check()).toBe(true);
+      const result = await connection.run('echo works');
+      expect(result).toMatchObject({ code: 0, stderr: '' });
+      expect(result.stdout.toString('utf8')).toBe('works\n');
+      await connection.exitMaster();
+      expect(await connection.check()).toBe(false);
+      expect(
+        await waitForMasters(controlDirectory, (masters) => masters.length === 0),
+      ).toHaveLength(0);
+    } finally {
+      await rm(controlDirectory, { force: true, recursive: true });
+    }
+  });
+
   test('client commands are multiplexed over the master', async () => {
     await using sshd = await startTestSshd();
     const connection = createSshConnection({

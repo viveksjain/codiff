@@ -82,7 +82,8 @@ const createSshConnection = ({
   const baseArgs = [
     ...(sshConfigPath ? ['-F', sshConfigPath] : []),
     '-o',
-    `ControlPath=${join(controlDirectory, '%C')}`,
+    // Quoted so that ssh keeps a directory with spaces as one value.
+    `ControlPath="${join(controlDirectory, '%C')}"`,
     '-o',
     'ConnectTimeout=10',
     '-o',
