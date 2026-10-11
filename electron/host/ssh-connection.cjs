@@ -1,7 +1,7 @@
 // @ts-check
 
 const { spawn } = require('node:child_process');
-const { mkdirSync, readFileSync, rmSync } = require('node:fs');
+const { mkdirSync, rmSync } = require('node:fs');
 const { connect } = require('node:net');
 const { homedir } = require('node:os');
 const { join } = require('node:path');
@@ -23,8 +23,7 @@ const { classifySshFailure, HostUnreachableError } = require('./host-errors.cjs'
 
 // A destination exactly as typed after `ssh`: an alias from ~/.ssh/config or
 // user@host. A leading `-` would be parsed as an option, and ssh rejects a
-// hostname starting with `-` (as in `a@-b`) before it opens the `-E` log, which
-// would lose the error.
+// hostname starting with `-` (as in `a@-b`).
 const ALIAS_PATTERN = /^(?!-)(?!.*@-)[\w.@%+-]+$/;
 
 const getDefaultControlDirectory = () => join(homedir(), '.codiff', 'ssh');
@@ -78,12 +77,12 @@ const createSshConnection = ({
     throw new Error(`Invalid SSH host: ${alias}`);
   }
   mkdirSync(controlDirectory, { mode: 0o700, recursive: true });
-  const masterLogPath = join(controlDirectory, `${alias}.log`);
   const baseArgs = [
     ...(sshConfigPath ? ['-F', sshConfigPath] : []),
-    '-o',
-    // Quoted so that ssh keeps a directory with spaces as one value.
-    `ControlPath="${join(controlDirectory, '%C')}"`,
+    // -S takes the path directly, without ssh_config's quote parsing. Only the
+    // final %C is a token; percent signs in the directory are literal.
+    '-S',
+    join(controlDirectory.replaceAll('%', '%%'), '%C'),
     '-o',
     'ConnectTimeout=10',
     '-o',
@@ -93,24 +92,29 @@ const createSshConnection = ({
     '-o',
     'BatchMode=yes',
     '-o',
-    'LogLevel=ERROR',
-  ];
-  // A `RemoteCommand`, forwarding or `LocalCommand` from the user's config
-  // would break or hijack every command.
-  const clientArgs = [
-    ...baseArgs,
-    '-o',
-    'ControlMaster=no',
-    '-o',
-    'ControlPersist=no',
-    '-o',
-    'ProxyCommand=false',
+    // Preserve transport diagnostics, including mux-only and proxy failures.
+    'LogLevel=INFO',
+    // These settings must apply to the master as well as clients.
     '-o',
     'RemoteCommand=none',
     '-o',
     'ClearAllForwardings=yes',
     '-o',
     'PermitLocalCommand=no',
+  ];
+  /** @type {string | null} */
+  let resolvedControlPath = null;
+  const getClientArgs = () => [
+    ...baseArgs,
+    // %C includes ProxyJump on newer OpenSSH. ProxyCommand=false clears that
+    // setting, so clients must use the path expanded from the master's config.
+    ...(resolvedControlPath ? ['-S', resolvedControlPath.replaceAll('%', '%%')] : []),
+    '-o',
+    'ControlMaster=no',
+    '-o',
+    'ControlPersist=no',
+    '-o',
+    'ProxyCommand=false',
   ];
 
   /**
@@ -151,32 +155,38 @@ const createSshConnection = ({
       child.stdin.end(input);
     });
 
-  const check = async () => (await runSsh([...baseArgs, '-O', 'check', '--', alias])).code === 0;
-
-  const readMasterLog = () => {
-    try {
-      return readFileSync(masterLogPath, 'utf8');
-    } catch {
-      return '';
-    }
-  };
-
   // ssh expands `%C` itself, so ask it for the exact socket path.
-  const getControlPath = async () => {
-    const { stdout } = await runSsh([...baseArgs, '-G', '--', alias]);
-    const line = stdout
-      .toString('utf8')
-      .split('\n')
-      .find((entry) => entry.startsWith('controlpath '));
-    return line ? line.slice('controlpath '.length).trim() : null;
+  /** @type {Promise<string | null> | null} */
+  let pendingControlPath = null;
+  const getControlPath = () => {
+    if (resolvedControlPath) {
+      return Promise.resolve(resolvedControlPath);
+    }
+    pendingControlPath ??= (async () => {
+      try {
+        const { stdout } = await runSsh([...baseArgs, '-G', '--', alias]);
+        const line = stdout
+          .toString('utf8')
+          .split('\n')
+          .find((entry) => entry.startsWith('controlpath '));
+        resolvedControlPath = line ? line.slice('controlpath '.length).trim() : null;
+        return resolvedControlPath;
+      } finally {
+        pendingControlPath = null;
+      }
+    })();
+    return pendingControlPath;
   };
 
-  // `ssh -f` forks a master that keeps any inherited output pipes open, so the
-  // master gets no pipes and writes its errors to a log file (`-E`) instead.
-  // Starts from different Codiff instances for the same alias and control
-  // directory are not coordinated. A start that loses the socket logs "already
-  // exists, disabling multiplexing" and stays connected on its own; the check
-  // after the start passes because the winner answers it.
+  const check = async () => {
+    await getControlPath();
+    return (await runSsh([...baseArgs, '-O', 'check', '--', alias])).code === 0;
+  };
+
+  // ControlPersist backgrounds a master only after it binds the mux socket,
+  // and closes its inherited pipes. Without explicit -f, a start that loses
+  // the socket stays our child: stop that child and adopt the winning master.
+  // This preserves process ownership even when separate Codiff instances race.
   const startMaster = async () => {
     if (!(await check())) {
       // A killed master leaves its socket behind. ssh would then log "already
@@ -188,28 +198,35 @@ const createSshConnection = ({
         rmSync(controlPath, { force: true });
       }
     }
-    rmSync(masterLogPath, { force: true });
+    let stderr = '';
+    let lostSocket = false;
     /** @type {{code?: number | null; error?: string; timedOut?: boolean}} */
     const outcome = await new Promise((resolve) => {
       const child = spawnProcess(
         sshCommand,
         [
           ...baseArgs,
-          '-E',
-          masterLogPath,
           '-o',
           'ControlMaster=yes',
           '-o',
           'ControlPersist=yes',
           '-o',
-          'RemoteCommand=none',
-          '-f',
+          // Override ForkAfterAuthentication from config, too, so a loser
+          // cannot daemonize before we stop it by its direct child handle.
+          'ForkAfterAuthentication=no',
           '-N',
           '--',
           alias,
         ],
-        { env: getLocalEnvironment(), stdio: 'ignore' },
+        { env: getLocalEnvironment(), stdio: ['ignore', 'ignore', 'pipe'] },
       );
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString('utf8');
+        if (!lostSocket && /ControlSocket .* already exists, disabling multiplexing/.test(stderr)) {
+          lostSocket = true;
+          child.kill();
+        }
+      });
       const timer = setTimeout(() => {
         child.kill();
         resolve({ timedOut: true });
@@ -218,7 +235,8 @@ const createSshConnection = ({
         clearTimeout(timer);
         resolve({ error: error.message });
       });
-      child.on('exit', (code) => {
+      // close drains ssh's transport diagnostics before classification.
+      child.on('close', (code) => {
         clearTimeout(timer);
         resolve({ code });
       });
@@ -229,15 +247,13 @@ const createSshConnection = ({
     if (outcome.error) {
       throw classifySshFailure(alias, outcome.error, { connected: false });
     }
-    if (outcome.code !== 0) {
-      throw classifySshFailure(alias, readMasterLog(), { connected: false });
+    if (outcome.code !== 0 && !lostSocket) {
+      throw classifySshFailure(alias, stderr, { connected: false });
     }
     if (!(await check())) {
-      throw classifySshFailure(
-        alias,
-        readMasterLog() || 'The SSH master connection did not start.',
-        { connected: false },
-      );
+      throw classifySshFailure(alias, stderr || 'The SSH master connection did not start.', {
+        connected: false,
+      });
     }
   };
 
@@ -261,12 +277,17 @@ const createSshConnection = ({
   };
 
   /** @param {string} remoteCommand @param {{input?: string | Buffer}} [options] */
-  const run = (remoteCommand, options) =>
-    runSsh([...clientArgs, '-T', '--', alias, remoteCommand], options);
+  const run = async (remoteCommand, options) => {
+    await getControlPath();
+    return runSsh([...getClientArgs(), '-T', '--', alias, remoteCommand], options);
+  };
 
-  /** @param {string} remoteCommand @param {{tty?: boolean}} [options] */
+  /**
+   * The host checks/starts the connection before synchronously spawning clients.
+   * @param {string} remoteCommand @param {{tty?: boolean}} [options]
+   */
   const spawnClient = (remoteCommand, { tty = false } = {}) =>
-    spawnProcess(sshCommand, [...clientArgs, tty ? '-tt' : '-T', '--', alias, remoteCommand], {
+    spawnProcess(sshCommand, [...getClientArgs(), tty ? '-tt' : '-T', '--', alias, remoteCommand], {
       env: getLocalEnvironment(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });

@@ -24,7 +24,7 @@ class HostDisconnectedError extends Error {
     super(`Lost connection to ${alias}.`);
     this.name = 'HostDisconnectedError';
     this.alias = alias;
-    this.detail = detail.trim();
+    this.detail = detail.trim() || 'The SSH master connection is no longer available.';
   }
 }
 

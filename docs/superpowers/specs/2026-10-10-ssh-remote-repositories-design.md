@@ -131,24 +131,36 @@ distinct.
 All SSH invocations share:
 
 ```
--o ControlPath=~/.codiff/ssh/%C
+-S ~/.codiff/ssh/%C
 -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
 ```
 
-`%C` keeps the socket path below the 104-byte macOS limit.
+`%C` keeps the filename short; the full socket path must still fit the 104-byte macOS limit.
+Pass the path via `-S` to preserve quotes and spaces, and escape literal `%` in the directory
+as `%%` while retaining the final `%C` token. Every invocation disables `RemoteCommand`,
+forwardings and `LocalCommand` with `RemoteCommand=none`, `ClearAllForwardings=yes` and
+`PermitLocalCommand=no`.
 
 - **CLI with a TTY**: `codiff devbox:~/app` runs `ssh -O check` on the ControlPath. If no master
   is running, it runs `ssh -M -f -N -o ControlPersist=yes ...` in the terminal so password, 2FA
   and host-key prompts appear there. `-f` backgrounds the master after authentication, so it
   outlives the CLI process. The CLI then hands off to the app.
 - **App `SshHost.open()`**: if `ssh -O check` finds a live master, the host adopts it. Otherwise it
-  spawns its own background master with `-M -N -o ControlMaster=yes -o ControlPersist=yes -o BatchMode=yes`.
+  spawns a master with `-N -o ControlMaster=yes -o ControlPersist=yes -o ForkAfterAuthentication=no -o BatchMode=yes`.
+  `ControlPersist` backgrounds it after it binds the socket. A start that loses the socket to
+  another instance stays a direct child; the app stops that child and adopts the winner.
+  The app captures startup stderr at `LogLevel=INFO`, with a 30-second startup timeout.
 - **All other operations** run as clients with
-  `-o ControlMaster=auto -o ControlPersist=no -o BatchMode=yes`. Normally they multiplex over the
-  master. If the master is gone, `ControlMaster=auto` lets a client open its own connection
-  instead of failing; `BatchMode` prevents it from hanging on a prompt. When the host detects a
-  dead master (via `-O check` after a client falls back or fails), it respawns the master in the
-  background.
+  `-o ControlMaster=no -o ControlPersist=no -o ProxyCommand=false -o BatchMode=yes`. They only
+  multiplex over the persistent master. Without it, `ProxyCommand=false` blocks an independent
+  connection and the operation fails promptly. Exit 255 plus a failed `-O check` produces
+  `HostDisconnectedError` and starts master recovery in the background. The failed operation
+  is never automatically retried; later operations can use the restored master. The master
+  still honors the user’s `ProxyJump` or `ProxyCommand` settings. Resolve `%C` from the master’s
+  config once and pass that socket path to clients explicitly: newer OpenSSH includes the jump
+  host in `%C`, and the client’s `ProxyCommand=false` otherwise changes the hash.
+  OpenSSH suppresses its proxy subprocess’s stderr when `ControlPersist` is enabled; the app
+  preserves the parent SSH transport diagnostic, which can be less specific than the proxy’s error.
 - **Closing** runs `ssh -O exit`, regardless of whether the CLI or the app started the master, so
   `ControlPersist=yes` masters are never orphaned.
 - ssh is run with the local login-shell environment from `electron/login-shell-environment.cjs` so

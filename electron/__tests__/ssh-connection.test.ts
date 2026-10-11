@@ -1,10 +1,11 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vite-plus/test';
 import { findSshd, startTestSshd } from './helpers/test-sshd.ts';
@@ -17,6 +18,7 @@ type SshConnection = {
   ensureMaster: () => Promise<void>;
   exitMaster: () => Promise<void>;
   run: (remoteCommand: string, options?: { input?: string | Buffer }) => Promise<SshResult>;
+  spawnClient: (remoteCommand: string) => ReturnType<typeof spawn>;
   startMaster: () => Promise<void>;
 };
 
@@ -51,7 +53,7 @@ const pgrepMasters = async (controlDirectory: string) => {
   try {
     const { stdout } = await execFileAsync('pgrep', [
       '-f',
-      `${controlDirectory}.*ControlPersist=yes`,
+      `${controlDirectory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*ControlPersist=yes`,
     ]);
     return stdout.split('\n').filter(Boolean);
   } catch {
@@ -100,7 +102,11 @@ test('a master start that never finishes times out and is killed', async () => {
   let killed = false;
   const spawnProcess = ((command: string, args: ReadonlyArray<string>, options: object) => {
     if (args.includes('ControlMaster=yes')) {
-      const child = new EventEmitter() as EventEmitter & { kill: () => boolean };
+      const child = new EventEmitter() as EventEmitter & {
+        kill: () => boolean;
+        stderr: PassThrough;
+      };
+      child.stderr = new PassThrough();
       child.kill = () => {
         killed = true;
         return true;
@@ -181,29 +187,121 @@ describe.skipIf(!findSshd())('ssh connection', () => {
     expect(await connection.check()).toBe(false);
   });
 
-  test('a control directory with a space works', async () => {
+  test.each(['space ', 'quote"', 'backslash\\', 'percent%test'])(
+    'a control directory with %s works',
+    async (suffix) => {
+      await using sshd = await startTestSshd();
+      // Under /tmp so the socket path stays below the Unix socket length limit.
+      const controlDirectory = await mkdtemp(`/tmp/cdf-${suffix}`);
+      try {
+        const connection = createSshConnection({
+          alias: sshd.alias,
+          controlDirectory,
+          sshConfigPath: sshd.sshConfigPath,
+        });
+        await connection.startMaster();
+        expect(await connection.check()).toBe(true);
+        const result = await connection.run('echo works');
+        expect(result).toMatchObject({ code: 0, stderr: '' });
+        expect(result.stdout.toString('utf8')).toBe('works\n');
+        await connection.exitMaster();
+        expect(await connection.check()).toBe(false);
+        expect(
+          await waitForMasters(controlDirectory, (masters) => masters.length === 0),
+        ).toHaveLength(0);
+      } finally {
+        await rm(controlDirectory, { force: true, recursive: true });
+      }
+    },
+  );
+
+  test('a start that loses the socket adopts the winner without leaking a connection', async () => {
     await using sshd = await startTestSshd();
-    // Under /tmp so the socket path stays below the Unix socket length limit.
-    const controlDirectory = await mkdtemp('/tmp/cdf-sp ');
+    // Start a competing, real master just after this connection's preflight
+    // check, so it wins the socket before this start binds it.
+    const spawnProcess = ((command: string, args: ReadonlyArray<string>, options: object) => {
+      if (args.includes('ControlMaster=yes')) {
+        execFileSync(command, args, { ...options, stdio: 'pipe' });
+      }
+      return spawn(command, args, options);
+    }) as SpawnProcess;
+    const connection = createSshConnection({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      masterStartTimeoutMs: 1000,
+      spawnProcess,
+      sshConfigPath: sshd.sshConfigPath,
+    });
     try {
-      const connection = createSshConnection({
-        alias: sshd.alias,
-        controlDirectory,
-        sshConfigPath: sshd.sshConfigPath,
-      });
       await connection.startMaster();
       expect(await connection.check()).toBe(true);
-      const result = await connection.run('echo works');
-      expect(result).toMatchObject({ code: 0, stderr: '' });
-      expect(result.stdout.toString('utf8')).toBe('works\n');
-      await connection.exitMaster();
-      expect(await connection.check()).toBe(false);
+      expect((await connection.run('printf winner')).stdout.toString('utf8')).toBe('winner');
       expect(
-        await waitForMasters(controlDirectory, (masters) => masters.length === 0),
+        await waitForMasters(sshd.controlDirectory, (masters) => masters.length === 1),
+      ).toHaveLength(1);
+      await connection.exitMaster();
+      expect(
+        await waitForMasters(sshd.controlDirectory, (masters) => masters.length === 0),
       ).toHaveLength(0);
     } finally {
-      await rm(controlDirectory, { force: true, recursive: true });
+      await connection.exitMaster();
+      // Reap the losing connection too when running against the broken code.
+      for (const pid of await pgrepMasters(sshd.controlDirectory)) {
+        try {
+          process.kill(Number(pid), 'SIGTERM');
+        } catch {}
+      }
     }
+  });
+
+  test('a failed ProxyJump preserves ssh transport diagnostics', async () => {
+    await using sshd = await startTestSshd();
+    await appendFile(sshd.sshConfigPath, 'Host codiff-test\n  ProxyJump codiff-unreachable\n');
+    const connection = createSshConnection({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    await expect(connection.startMaster()).rejects.toMatchObject({
+      message: expect.stringContaining('Connection closed'),
+      name: 'HostUnreachableError',
+    });
+  });
+
+  test('a master through ProxyJump detaches and serves multiplexed clients', async () => {
+    await using sshd = await startTestSshd();
+    const config = await readFile(sshd.sshConfigPath, 'utf8');
+    await writeFile(
+      sshd.sshConfigPath,
+      `${config.replace('Host codiff-test\n', 'Host codiff-test codiff-jump\n')}\nHost codiff-test\n  ProxyJump codiff-jump\n`,
+    );
+    const connection = createSshConnection({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    try {
+      await connection.startMaster();
+      const first = await connection.run('echo "$SSH_CONNECTION"');
+      const second = await connection.run('echo "$SSH_CONNECTION"');
+      expect(first.code).toBe(0);
+      expect(second.code).toBe(0);
+      expect(first.stdout.toString('utf8')).toMatch(/\S/);
+      expect(second.stdout).toEqual(first.stdout);
+      const client = connection.spawnClient('printf spawned');
+      let output = '';
+      client.stdout?.on('data', (chunk: Buffer) => {
+        output += chunk.toString('utf8');
+      });
+      const [code] = await once(client, 'close');
+      expect(code).toBe(0);
+      expect(output).toBe('spawned');
+    } finally {
+      await connection.exitMaster();
+    }
+    expect(
+      await waitForMasters(sshd.controlDirectory, (masters) => masters.length === 0),
+    ).toHaveLength(0);
   });
 
   test('client commands are multiplexed over the master', async () => {

@@ -97,3 +97,11 @@ test('a lost connection keeps the trimmed ssh output as its detail', () => {
   expect(error.name).toBe('HostDisconnectedError');
   expect(error.detail).toBe('client_loop: send disconnect: Broken pipe');
 });
+
+test('a lost connection without ssh output still explains the missing master', () => {
+  expect(errors.classifySshFailure('devbox', ' \n')).toMatchObject({
+    detail: 'The SSH master connection is no longer available.',
+    message: 'Lost connection to devbox.',
+    name: 'HostDisconnectedError',
+  });
+});

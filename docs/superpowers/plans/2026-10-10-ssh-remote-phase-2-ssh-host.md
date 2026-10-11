@@ -21,9 +21,10 @@ Tests start a non-root `sshd` on `127.0.0.1` with a generated key. `SshHost` is 
 
 - Platforms: macOS and Linux only. Use the system `ssh` binary. Add no new dependencies.
 - SSH options, copied from the spec:
-  - Every invocation passes `-o ControlPath=<controlDirectory>/%C -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o BatchMode=yes`. `controlDirectory` defaults to `~/.codiff/ssh`, created with mode `0700`.
-  - The master passes `-o ControlMaster=yes -o ControlPersist=yes -f -N`.
-  - Clients pass `-o ControlMaster=auto -o ControlPersist=no`.
+  - Every invocation passes `-S <controlDirectory>/%C -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o BatchMode=yes`. `controlDirectory` defaults to `~/.codiff/ssh`, created with mode `0700`.
+  - The master passes `-o ControlMaster=yes -o ControlPersist=yes -o ForkAfterAuthentication=no -N`. ControlPersist backgrounds only the socket owner; a losing start stays a direct child and is stopped before adopting the winner.
+  - Clients pass `-o ControlMaster=no -o ControlPersist=no -o ProxyCommand=false`: only the persistent master connects. With no master, the operation fails promptly and background recovery starts; operations are never automatically retried.
+  - Pass the control path directly with `-S`, escaping literal directory `%` as `%%`. Resolve the client socket path with `ssh -G` using the master’s config, since `%C` includes ProxyJump while mux-only clients override it. All invocations set `RemoteCommand=none`, `ClearAllForwardings=yes`, `PermitLocalCommand=no` and `LogLevel=INFO`.
   - The app never prompts: `BatchMode=yes` is always set.
 - Connect sequence:
   1. Adopt a live master (`ssh -O check`) or start one.
@@ -60,9 +61,9 @@ Tests start a non-root `sshd` on `127.0.0.1` with a generated key. `SshHost` is 
 
 1. **Channel limit 6, not 8.** sshd's default `MaxSessions` is 10.
    - Queued operations (`exec` and file operations) use at most 6 channels.
-   - That leaves room for a long-lived `git grep` spawn, a commit PTY, remote kill requests and a fallback session.
+   - That leaves room for a long-lived `git grep` spawn, a commit PTY, remote kill requests and background recovery.
    - At 8 queued channels plus those, a kill request could be refused at exactly the moment it is needed.
-2. **The app-started master logs to a file** (`ssh -E <controlDirectory>/<alias>.log`). `ssh -f` keeps a forked master that holds any output pipes open, so its stderr cannot be piped. The log file still captures auth and connect errors for classification.
+2. **The app-started master captures startup stderr.** Without explicit `-f`, ControlPersist backgrounds only a master that owns the control socket and closes inherited pipes. A losing start remains a direct child and is stopped without a process sweep. Startup errors are drained from stderr before classification; starts time out after 30 seconds.
 3. **Noisy shell startup files are detected at connect.**
    - If the remote login shell prints output in non-interactive sessions, every command's stdout would be corrupted. (Common causes are an `echo` in `.bashrc` or `.zshenv`.)
    - `connectSshHost` checks that a probe prints exactly one line and otherwise throws `RemoteShellNoiseError`: "<alias>'s shell startup files print output in non-interactive sessions, which breaks Codiff. Only print output in interactive shells."
@@ -82,7 +83,7 @@ Tests start a non-root `sshd` on `127.0.0.1` with a generated key. `SshHost` is 
 2. **A file name containing a newline inside a batched `lstatMany` or `readFiles`:** results must stay aligned with the input order. Pinned by a contract test (Task 1) on both hosts (Task 8).
 3. **A remote shell whose startup files print text** (very common in `.bashrc`): connect must fail with `RemoteShellNoiseError` instead of corrupting diffs. Pinned in Task 9.
 4. **A remote command that itself exits 255** (for example a `git` hook): it must be reported as that command's failure, not as a lost connection. Pinned in Task 9.
-5. **The master connection dies mid-session** (laptop sleep, network change): the next operation must still succeed through the client fallback, and the master must come back on its own. Pinned in Task 9.
+5. **The master connection dies mid-session** (laptop sleep, network change): the next operation fails promptly with `HostDisconnectedError`, is never automatically retried, and the master comes back in the background. A later operation succeeds. Pinned in Task 9.
 
 ---
 
@@ -1470,16 +1471,18 @@ Create `electron/host/ssh-connection.cjs`:
 // @ts-check
 
 const { spawn } = require('node:child_process');
-const { mkdirSync, readFileSync, rmSync } = require('node:fs');
+const { mkdirSync, rmSync } = require('node:fs');
+const { connect } = require('node:net');
 const { homedir } = require('node:os');
 const { join } = require('node:path');
-const { classifySshFailure } = require('./host-errors.cjs');
+const { classifySshFailure, HostUnreachableError } = require('./host-errors.cjs');
 
 /**
  * @typedef {{
  *   alias: string;
  *   controlDirectory?: string;
  *   getLocalEnvironment?: () => NodeJS.ProcessEnv;
+ *   masterStartTimeoutMs?: number;
  *   spawnProcess?: typeof spawn;
  *   sshCommand?: string;
  *   sshConfigPath?: string;
@@ -1489,16 +1492,45 @@ const { classifySshFailure } = require('./host-errors.cjs');
  */
 
 // A destination exactly as typed after `ssh`: an alias from ~/.ssh/config or
-// user@host. A leading `-` would be parsed as an option.
-const ALIAS_PATTERN = /^(?!-)[\w.@%+-]+$/;
+// user@host. A leading `-` would be parsed as an option, and ssh rejects a
+// hostname starting with `-` (as in `a@-b`).
+const ALIAS_PATTERN = /^(?!-)(?!.*@-)[\w.@%+-]+$/;
 
 const getDefaultControlDirectory = () => join(homedir(), '.codiff', 'ssh');
 
 /**
+ * A control socket is stale only when nothing listens on it or it is gone.
+ * Any other error, or no answer in time, leaves it alone, since it may still
+ * belong to a live master.
+ *
+ * @param {string} path
+ * @param {number} [timeoutMs]
+ * @returns {Promise<boolean>}
+ */
+const isSocketStale = (path, timeoutMs = 1500) =>
+  new Promise((resolve) => {
+    const socket = connect(path);
+    /** @param {boolean} stale */
+    const finish = (stale) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(stale);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    socket.once('connect', () => finish(false));
+    socket.once('error', (/** @type {NodeJS.ErrnoException} */ error) =>
+      finish(error.code === 'ECONNREFUSED' || error.code === 'ENOENT'),
+    );
+  });
+
+/**
  * One multiplexed connection to an ssh destination. The master runs in the
- * background (`ControlPersist=yes`); every other invocation is a client with
- * `ControlMaster=auto`, so if the master is gone a client connects on its own
- * instead of failing. `BatchMode=yes` keeps every invocation from prompting.
+ * background (`ControlPersist=yes`) and is the only invocation that connects
+ * or reads the user's proxy settings. Every other invocation is a client that
+ * only talks to the master: with no master, ssh falls back to connecting
+ * itself, and the command-line `ProxyCommand=false` (which overrides any
+ * configured `ProxyCommand` or `ProxyJump`) makes that fail at once with exit
+ * 255. `BatchMode=yes` keeps every invocation from prompting.
  *
  * @param {SshConnectionOptions} options
  */
@@ -1506,6 +1538,7 @@ const createSshConnection = ({
   alias,
   controlDirectory = getDefaultControlDirectory(),
   getLocalEnvironment = () => process.env,
+  masterStartTimeoutMs = 30_000,
   spawnProcess = spawn,
   sshCommand = 'ssh',
   sshConfigPath,
@@ -1514,11 +1547,12 @@ const createSshConnection = ({
     throw new Error(`Invalid SSH host: ${alias}`);
   }
   mkdirSync(controlDirectory, { mode: 0o700, recursive: true });
-  const masterLogPath = join(controlDirectory, `${alias}.log`);
   const baseArgs = [
     ...(sshConfigPath ? ['-F', sshConfigPath] : []),
-    '-o',
-    `ControlPath=${join(controlDirectory, '%C')}`,
+    // -S takes the path directly, without ssh_config's quote parsing. Only the
+    // final %C is a token; percent signs in the directory are literal.
+    '-S',
+    join(controlDirectory.replaceAll('%', '%%'), '%C'),
     '-o',
     'ConnectTimeout=10',
     '-o',
@@ -1528,9 +1562,30 @@ const createSshConnection = ({
     '-o',
     'BatchMode=yes',
     '-o',
-    'LogLevel=ERROR',
+    // Preserve transport diagnostics, including mux-only and proxy failures.
+    'LogLevel=INFO',
+    // These settings must apply to the master as well as clients.
+    '-o',
+    'RemoteCommand=none',
+    '-o',
+    'ClearAllForwardings=yes',
+    '-o',
+    'PermitLocalCommand=no',
   ];
-  const clientArgs = [...baseArgs, '-o', 'ControlMaster=auto', '-o', 'ControlPersist=no'];
+  /** @type {string | null} */
+  let resolvedControlPath = null;
+  const getClientArgs = () => [
+    ...baseArgs,
+    // %C includes ProxyJump on newer OpenSSH. ProxyCommand=false clears that
+    // setting, so clients must use the path expanded from the master's config.
+    ...(resolvedControlPath ? ['-S', resolvedControlPath.replaceAll('%', '%%')] : []),
+    '-o',
+    'ControlMaster=no',
+    '-o',
+    'ControlPersist=no',
+    '-o',
+    'ProxyCommand=false',
+  ];
 
   /**
    * @param {ReadonlyArray<string>} args
@@ -1570,43 +1625,105 @@ const createSshConnection = ({
       child.stdin.end(input);
     });
 
-  const check = async () => (await runSsh([...baseArgs, '-O', 'check', alias])).code === 0;
-
-  const readMasterLog = () => {
-    try {
-      return readFileSync(masterLogPath, 'utf8');
-    } catch {
-      return '';
+  // ssh expands `%C` itself, so ask it for the exact socket path.
+  /** @type {Promise<string | null> | null} */
+  let pendingControlPath = null;
+  const getControlPath = () => {
+    if (resolvedControlPath) {
+      return Promise.resolve(resolvedControlPath);
     }
+    pendingControlPath ??= (async () => {
+      try {
+        const { stdout } = await runSsh([...baseArgs, '-G', '--', alias]);
+        const line = stdout
+          .toString('utf8')
+          .split('\n')
+          .find((entry) => entry.startsWith('controlpath '));
+        resolvedControlPath = line ? line.slice('controlpath '.length).trim() : null;
+        return resolvedControlPath;
+      } finally {
+        pendingControlPath = null;
+      }
+    })();
+    return pendingControlPath;
   };
 
-  // `ssh -f` forks a master that keeps any inherited output pipes open, so the
-  // master gets no pipes and writes its errors to a log file (`-E`) instead.
+  const check = async () => {
+    await getControlPath();
+    return (await runSsh([...baseArgs, '-O', 'check', '--', alias])).code === 0;
+  };
+
+  // ControlPersist backgrounds a master only after it binds the mux socket,
+  // and closes its inherited pipes. Without explicit -f, a start that loses
+  // the socket stays our child: stop that child and adopt the winning master.
+  // This preserves process ownership even when separate Codiff instances race.
   const startMaster = async () => {
-    rmSync(masterLogPath, { force: true });
-    /** @type {number | null} */
-    const code = await new Promise((resolve) => {
+    if (!(await check())) {
+      // A killed master leaves its socket behind. ssh would then log "already
+      // exists, disabling multiplexing" and still exit 0 with a lone `ssh -N`.
+      const controlPath = await getControlPath();
+      // Another master may have claimed the socket since the check, so only
+      // remove one that nothing listens on.
+      if (controlPath && (await isSocketStale(controlPath))) {
+        rmSync(controlPath, { force: true });
+      }
+    }
+    let stderr = '';
+    let lostSocket = false;
+    /** @type {{code?: number | null; error?: string; timedOut?: boolean}} */
+    const outcome = await new Promise((resolve) => {
       const child = spawnProcess(
         sshCommand,
         [
           ...baseArgs,
-          '-E',
-          masterLogPath,
           '-o',
           'ControlMaster=yes',
           '-o',
           'ControlPersist=yes',
-          '-f',
+          '-o',
+          // Override ForkAfterAuthentication from config, too, so a loser
+          // cannot daemonize before we stop it by its direct child handle.
+          'ForkAfterAuthentication=no',
           '-N',
+          '--',
           alias,
         ],
-        { env: getLocalEnvironment(), stdio: 'ignore' },
+        { env: getLocalEnvironment(), stdio: ['ignore', 'ignore', 'pipe'] },
       );
-      child.on('error', () => resolve(null));
-      child.on('exit', resolve);
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString('utf8');
+        if (!lostSocket && /ControlSocket .* already exists, disabling multiplexing/.test(stderr)) {
+          lostSocket = true;
+          child.kill();
+        }
+      });
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve({ timedOut: true });
+      }, masterStartTimeoutMs);
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        resolve({ error: error.message });
+      });
+      // close drains ssh's transport diagnostics before classification.
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        resolve({ code });
+      });
     });
-    if (code !== 0) {
-      throw classifySshFailure(alias, readMasterLog(), { connected: false });
+    if (outcome.timedOut) {
+      throw new HostUnreachableError(alias, `Timed out connecting to ${alias}.`);
+    }
+    if (outcome.error) {
+      throw classifySshFailure(alias, outcome.error, { connected: false });
+    }
+    if (outcome.code !== 0 && !lostSocket) {
+      throw classifySshFailure(alias, stderr, { connected: false });
+    }
+    if (!(await check())) {
+      throw classifySshFailure(alias, stderr || 'The SSH master connection did not start.', {
+        connected: false,
+      });
     }
   };
 
@@ -1626,16 +1743,21 @@ const createSshConnection = ({
   };
 
   const exitMaster = async () => {
-    await runSsh([...baseArgs, '-O', 'exit', alias]);
+    await runSsh([...baseArgs, '-O', 'exit', '--', alias]);
   };
 
   /** @param {string} remoteCommand @param {{input?: string | Buffer}} [options] */
-  const run = (remoteCommand, options) =>
-    runSsh([...clientArgs, '-T', alias, remoteCommand], options);
+  const run = async (remoteCommand, options) => {
+    await getControlPath();
+    return runSsh([...getClientArgs(), '-T', '--', alias, remoteCommand], options);
+  };
 
-  /** @param {string} remoteCommand @param {{tty?: boolean}} [options] */
+  /**
+   * The host checks/starts the connection before synchronously spawning clients.
+   * @param {string} remoteCommand @param {{tty?: boolean}} [options]
+   */
   const spawnClient = (remoteCommand, { tty = false } = {}) =>
-    spawnProcess(sshCommand, [...clientArgs, tty ? '-tt' : '-T', alias, remoteCommand], {
+    spawnProcess(sshCommand, [...getClientArgs(), tty ? '-tt' : '-T', '--', alias, remoteCommand], {
       env: getLocalEnvironment(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -1643,7 +1765,7 @@ const createSshConnection = ({
   return { alias, check, ensureMaster, exitMaster, run, spawnClient, startMaster };
 };
 
-module.exports = { createSshConnection, getDefaultControlDirectory };
+module.exports = { createSshConnection, getDefaultControlDirectory, isSocketStale };
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -1919,7 +2041,7 @@ const { createSshConnection } = require('./ssh-connection.cjs');
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 64;
 // sshd allows 10 sessions per connection by default (MaxSessions). Queued
 // operations use at most 6, leaving room for long-lived spawns, a commit PTY,
-// remote kill requests and a fallback session.
+// remote kill requests and background recovery.
 const MAX_QUEUED_CHANNELS = 6;
 const SHELL_PROBE_PREFIX = '__codiff_shell__:';
 
@@ -2024,8 +2146,8 @@ const createSshHost = ({
   const limit = createLimiter(MAX_QUEUED_CHANNELS);
   let lastMasterCheck = 0;
 
-  // A client whose master vanished connects on its own (ControlMaster=auto);
-  // this restores a shared master in the background.
+  // Clients only use the persistent master; a lost master fails the operation
+  // and this restores the shared master in the background without retrying it.
   const keepMasterAlive = () => {
     const now = Date.now();
     if (now - lastMasterCheck >= masterCheckIntervalMs) {
@@ -3001,29 +3123,42 @@ describe.skipIf(!findSshd())('SshHost connection failures', () => {
     await host.close();
   });
 
-  test('operations survive a lost master and the master comes back', async () => {
+  test('an operation after a lost master fails at once and the master comes back', async () => {
     await using sshd = await startTestSshd();
     const options = {
       alias: sshd.alias,
       controlDirectory: sshd.controlDirectory,
       sshConfigPath: sshd.sshConfigPath,
     };
-    const host = await connectSshHost({ ...options, masterCheckIntervalMs: 0 });
-    const connection = createSshConnection(options);
-    await connection.exitMaster();
-    expect(await connection.check()).toBe(false);
+    const host = await connectSshHost(options);
+    try {
+      // This first operation runs the periodic master check, so the failure
+      // below is the only thing that restores the master.
+      expect((await host.exec('printf', ['before'])).toString('utf8')).toBe('before');
+      const connection = createSshConnection(options);
+      await connection.exitMaster();
+      expect(await connection.check()).toBe(false);
 
-    expect((await host.exec('printf', ['still here'])).toString('utf8')).toBe('still here');
+      const started = Date.now();
+      await expect(host.exec('printf', ['lost'])).rejects.toMatchObject({
+        detail: expect.stringMatching(/\S/),
+        message: 'Lost connection to codiff-test.',
+        name: 'HostDisconnectedError',
+      });
+      expect(Date.now() - started).toBeLessThan(2000);
 
-    const deadline = Date.now() + 10_000;
-    while (!(await connection.check())) {
-      if (Date.now() > deadline) {
-        throw new Error('The master did not come back.');
+      const deadline = Date.now() + 10_000;
+      while (!(await connection.check())) {
+        if (Date.now() > deadline) {
+          throw new Error('The master did not come back.');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      await host.exec('true', []);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect((await host.exec('printf', ['back'])).toString('utf8')).toBe('back');
+    } finally {
+      await host.close();
     }
-    await host.close();
+    expect(await waitForMasterCount(sshd.controlDirectory, 0)).toBe(0);
   });
 
   test('a stopped server is a lost connection', async () => {
@@ -3047,7 +3182,7 @@ describe.skipIf(!findSshd())('SshHost connection failures', () => {
 Run: `vp test electron/__tests__/ssh-host-failures.test.ts`
 Expected: PASS. These pin behavior that Tasks 6–8 built. If one fails, find the defect in `ssh-host.cjs` or `ssh-connection.cjs`, fix it there, and record the RED/GREEN evidence. Do not weaken an expectation.
 
-One known risk: after the master is killed, the very next client may itself become a temporary master (`ControlMaster=auto`). `connection.check()` can then briefly report `true` before the persistent master returns. That is acceptable; the test only requires that the master comes back.
+Clients cannot become temporary masters. The lost-master regression must show prompt failure, no automatic retry, background recovery, a successful later operation, and no master remaining after close.
 
 - [ ] **Step 3: Gate, check, build and commit**
 
@@ -3216,6 +3351,16 @@ git commit -m "Run the repository suites over SSH."
 ---
 
 ## Follow-on plans
+
+Carried from Phase 2 final review before the transport is exposed to users:
+
+- Put spawn, PTY and remote-kill sessions under a common channel budget.
+- Reject work after close and stop outstanding remote processes when closing.
+- Define connection state/reconnect APIs; classify spawn exit 255; expose master options for the interactive CLI.
+- Resolve login environment asynchronously, including SSH_AUTH_SOCK precedence; add explicit port support.
+- Align window-launch and master-start timeouts, and specify HostProcess.kill signal/killed semantics.
+- Detect unsupported BusyBox stat rather than assuming GNU stat compatibility.
+- Run Ubuntu CI to validate GNU stat, dash and the Linux sshd harness before declaring Phase 2 complete.
 
 - **Phase 3, entry points:**
   - CLI remote targets, with the master started in the terminal and adopted by the app.

@@ -1,6 +1,10 @@
 import { execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { existsSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:net';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, test } from 'vite-plus/test';
 import type { RepositoryHost } from '../host/repository-host.cjs';
@@ -150,6 +154,39 @@ describe.skipIf(!findSshd())('SshHost connection failures', () => {
     }
   });
 
+  test('configured forwarding and LocalCommand are ignored by master and clients', async () => {
+    await using sshd = await startTestSshd();
+    const occupied = createServer();
+    occupied.listen(0, '127.0.0.1');
+    await once(occupied, 'listening');
+    const address = occupied.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Expected a TCP listener.');
+    }
+    const marker = join(sshd.root, 'local-command-ran');
+    try {
+      await appendFile(
+        sshd.sshConfigPath,
+        `Host codiff-test\n  LocalForward 127.0.0.1:${address.port} 127.0.0.1:${sshd.port}\n  ExitOnForwardFailure yes\n  PermitLocalCommand yes\n  LocalCommand touch ${marker}\n`,
+      );
+      const host = await connectSshHost({
+        alias: sshd.alias,
+        controlDirectory: sshd.controlDirectory,
+        sshConfigPath: sshd.sshConfigPath,
+      });
+      try {
+        expect((await host.exec('printf', ['ran'])).toString('utf8')).toBe('ran');
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        await host.close();
+      }
+    } finally {
+      const closed = once(occupied, 'close');
+      occupied.close();
+      await closed;
+    }
+  });
+
   test('a command that exits 255 is a command failure, not a lost connection', async () => {
     await using sshd = await startTestSshd();
     const host = await connectSshHost({
@@ -189,6 +226,7 @@ describe.skipIf(!findSshd())('SshHost connection failures', () => {
 
       const started = Date.now();
       await expect(host.exec('printf', ['lost'])).rejects.toMatchObject({
+        detail: expect.stringMatching(/\S/),
         message: 'Lost connection to codiff-test.',
         name: 'HostDisconnectedError',
       });
