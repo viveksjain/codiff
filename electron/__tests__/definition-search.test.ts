@@ -3,15 +3,12 @@ import { createRequire } from 'node:module';
 import { PassThrough } from 'node:stream';
 import { expect, test, vi } from 'vite-plus/test';
 import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
+import { host } from '../../core/__tests__/helpers/test-host.ts';
 import type { DefinitionSearchRequest, DefinitionSearchResult } from '../../core/types.ts';
 import { createDefinitionNavigationRepository } from '../../examples/definition-navigation/create-repository.mjs';
 import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
-const { createLocalHost } = require('../host/local-host.cjs') as {
-  createLocalHost: () => RepositoryHost;
-};
-const host = createLocalHost();
 const {
   classifyDefinition,
   createDefinitionSearchCoordinator,

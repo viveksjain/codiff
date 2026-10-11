@@ -8,6 +8,7 @@ import { afterAll, beforeAll, expect, test } from 'vite-plus/test';
 import type { RepositoryHost } from '../../electron/host/repository-host.cjs';
 import { removeGitTestDirectory } from './helpers/git.ts';
 import { createTemporaryEnvironment } from './helpers/resources.ts';
+import { host } from './helpers/test-host.ts';
 
 type FileContentResult = {
   binary: boolean;
@@ -36,10 +37,6 @@ type GitFilesModule = {
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
-const { createLocalHost } = require('../../electron/host/local-host.cjs') as {
-  createLocalHost: () => RepositoryHost;
-};
-const host = createLocalHost();
 const { readGitFiles } = require('../../electron/git-state/git-files.cjs') as GitFilesModule;
 const batchCases = [
   { fileCount: 20, maximumProcesses: 6 },

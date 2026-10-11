@@ -8,13 +8,10 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import { host } from '../../core/__tests__/helpers/test-host.ts';
 import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
-const { createLocalHost } = require('../host/local-host.cjs') as {
-  createLocalHost: () => RepositoryHost;
-};
-const host = createLocalHost();
 const { readGitIdentity } = require('../git-state/working-tree.cjs') as {
   readGitIdentity: (host: RepositoryHost, path: string) => Promise<{ email: string; name: string }>;
 };

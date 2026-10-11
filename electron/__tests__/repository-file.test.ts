@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { expect, test } from 'vite-plus/test';
 import { createRecordingHost } from '../../core/__tests__/helpers/recording-host.ts';
 import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
+import { host } from '../../core/__tests__/helpers/test-host.ts';
 import type {
   RepositoryFileDocument,
   SaveRepositoryFileRequest,
@@ -21,10 +22,6 @@ import type {
 import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
-const { createLocalHost } = require('../host/local-host.cjs') as {
-  createLocalHost: () => RepositoryHost;
-};
-const host = createLocalHost();
 const { readRepositoryFile, writeRepositoryFile } = require('../repository-file.cjs') as {
   readRepositoryFile: (
     host: RepositoryHost,

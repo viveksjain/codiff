@@ -4,13 +4,10 @@ import { promisify } from 'node:util';
 import { expect, test } from 'vite-plus/test';
 import { getGitTestEnvironment } from '../../core/__tests__/helpers/git.ts';
 import { createTemporaryDirectory } from '../../core/__tests__/helpers/resources.ts';
+import { host } from '../../core/__tests__/helpers/test-host.ts';
 import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
-const { createLocalHost } = require('../host/local-host.cjs') as {
-  createLocalHost: () => RepositoryHost;
-};
-const host = createLocalHost();
 
 type ReviewRemote = {
   direction: string;

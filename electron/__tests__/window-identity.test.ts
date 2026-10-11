@@ -9,6 +9,7 @@ import {
   createTemporaryDirectory,
   createTemporaryEnvironment,
 } from '../../core/__tests__/helpers/resources.ts';
+import { host } from '../../core/__tests__/helpers/test-host.ts';
 import type { RepositoryHost } from '../host/repository-host.cjs';
 
 const require = createRequire(import.meta.url);
@@ -60,10 +61,6 @@ const {
     source: { ref: string; type: 'commit' },
   ) => Promise<{ key: string; repositoryRoot: string; sourceKey: string } | null>;
 };
-const { createLocalHost } = require('../host/local-host.cjs') as {
-  createLocalHost: () => RepositoryHost;
-};
-const host = createLocalHost();
 
 const execFileAsync = promisify(execFile);
 

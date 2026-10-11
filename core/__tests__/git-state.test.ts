@@ -16,6 +16,7 @@ import type {
 import { getGitTestEnvironmentForSubprocess, withGitTestEnvironment } from './helpers/git.ts';
 import { createRecordingHost } from './helpers/recording-host.ts';
 import { createTemporaryDirectory, createTemporaryEnvironment } from './helpers/resources.ts';
+import { host } from './helpers/test-host.ts';
 
 type StatusEntry = {
   conflictStage?: 1 | 2 | 3;
@@ -152,10 +153,6 @@ type GitStateModule = {
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
-const { createLocalHost } = require('../../electron/host/local-host.cjs') as {
-  createLocalHost: () => RepositoryHost;
-};
-const host = createLocalHost();
 const { readGeneratedAttributeStates } =
   require('../../electron/generated-files.cjs') as GeneratedFilesModule;
 const {

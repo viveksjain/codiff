@@ -38,5 +38,8 @@ jobs:
           vpr build
       - run: |
           vp run test:all
+      - name: Test repository code over SSH
+        run: |
+          CODIFF_TEST_HOST=ssh vp test core/__tests__/git-state.test.ts core/__tests__/git-files.test.ts electron/__tests__/repository-watcher.test.ts electron/__tests__/definition-search.test.ts electron/__tests__/walkthrough-commit.test.ts electron/__tests__/repository-file.test.ts electron/__tests__/window-identity.test.ts electron/__tests__/review-source.test.ts electron/__tests__/git-identity.test.ts
       - run: |
           vp run --filter '@nkzw/codiff-integration-tests' test
