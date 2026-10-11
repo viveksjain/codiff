@@ -103,6 +103,8 @@ const parseTrailers = (raw) =>
  * @param {string} body
  */
 const readCommitMessageParts = async (host, repoRoot, subject, body) => {
+  // A subject-only message has no trailer paragraph to interpret.
+  if (!body.trim()) return { body, trailers: [] };
   const message = `${subject}\n\n${body}`;
   const [rawTrailerBlock, parsedTrailerBlock] = await Promise.all([
     gitBufferWithInput(

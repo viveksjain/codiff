@@ -201,7 +201,7 @@ end
 # The ref is only completable while it is still the argument being typed: once it
 # is given, as a word or through a flag, the repository path is all that is left.
 function __codiff_expects_ref
-    set -l tokens (commandline --current-process --tokens-expanded --cut-at-cursor)
+    set -l tokens (commandline --current-process --tokenize --cut-at-cursor)
     set -e tokens[1]
     set -l skip 0
     for token in $tokens
