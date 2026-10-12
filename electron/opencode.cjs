@@ -3,7 +3,7 @@
 const { createServer } = require('node:net');
 const { homedir } = require('node:os');
 const { join } = require('node:path');
-const { resolveAgentCommandTransport } = require('./agent-command.cjs');
+const { getAgentKillSignal, resolveAgentCommandTransport } = require('./agent-command.cjs');
 const { getCommandEnvironment } = require('./login-shell-environment.cjs');
 const {
   buildSchemaReminder,
@@ -401,11 +401,7 @@ const runOpenCode = async (
         const timer = setTimeout(() => {
           if (!finished) {
             finished = true;
-            child.kill(
-              options.repositoryHost?.id !== 'local' && options.repositoryHost
-                ? 'SIGKILL'
-                : 'SIGTERM',
-            );
+            child.kill(getAgentKillSignal(options.repositoryHost));
             reject(new Error(timeoutMessage));
           }
         }, timeoutMs);
@@ -655,9 +651,7 @@ const runOpenCode = async (
       }
       abortController.abort();
       if (!child.killed) {
-        child.kill(
-          options.repositoryHost?.id !== 'local' && options.repositoryHost ? 'SIGKILL' : 'SIGTERM',
-        );
+        child.kill(getAgentKillSignal(options.repositoryHost));
       }
     }
   };

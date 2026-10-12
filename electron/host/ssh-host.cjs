@@ -778,10 +778,50 @@ const createSshHost = ({
       child.stdin.end(input);
     });
 
+  /** @type {{directory: string; environment: Readonly<Record<string, string>>; path: string} | null} */
+  let environmentLauncher = null;
+
+  /**
+   * Builds a command script that announces its PID. The login environment
+   * (often tens of KB) would not fit into the one remote command argument that
+   * Linux caps at 128 KiB, so an `env` that contains it runs through the remote
+   * launcher script from `getEnvironment`; only the other variables are inlined.
+   *
+   * @param {{args: ReadonlyArray<string>; command: string; cwd?: string; env?: Readonly<Record<string, string>>}} options
+   */
+  const buildHostCommandScript = ({ args, command, cwd, env }) => {
+    const launcher = environmentLauncher;
+    if (
+      !env ||
+      !launcher ||
+      !Object.entries(launcher.environment).every(([name, value]) => env[name] === value)
+    ) {
+      return buildCommandScript({ announcePid: true, args, command, cwd, env });
+    }
+    // `env` would parse these as options or assignments, as in buildCommandScript.
+    if (command.startsWith('-') || command.includes('=')) {
+      throw new Error(`Commands cannot start with "-" or contain "=": ${command}`);
+    }
+    const assignments = Object.entries(env)
+      .filter(([name, value]) => launcher.environment[name] !== value)
+      .map(([name, value]) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          throw new Error(`Invalid environment variable name: ${name}`);
+        }
+        return `${name}=${value}`;
+      });
+    return buildCommandScript({
+      announcePid: true,
+      args: [launcher.path, ...assignments, command, ...args],
+      command: '/bin/sh',
+      cwd,
+    });
+  };
+
   /** @type {RepositoryHost['exec']} */
   const exec = async (command, args, options = {}) => {
     const result = await runScript(
-      buildCommandScript({ announcePid: true, args, command, cwd: options.cwd, env: options.env }),
+      buildHostCommandScript({ args, command, cwd: options.cwd, env: options.env }),
       {
         input: options.input,
         label: command,
@@ -807,13 +847,7 @@ const createSshHost = ({
   const spawn = (command, args, options = {}) => {
     const child = queueClient(
       toRemoteCommand(
-        buildCommandScript({
-          announcePid: true,
-          args,
-          command,
-          cwd: options.cwd,
-          env: options.env,
-        }),
+        buildHostCommandScript({ args, command, cwd: options.cwd, env: options.env }),
       ),
     );
     const remote = createRemoteProcess(child);
@@ -879,9 +913,8 @@ const createSshHost = ({
   /** @type {RepositoryHost['spawnPty']} */
   const spawnPty = (command, args, options) => {
     assertOpen();
-    const script = `stty cols ${Math.trunc(options.cols)} rows ${Math.trunc(options.rows)} 2>/dev/null; ${buildCommandScript(
+    const script = `stty cols ${Math.trunc(options.cols)} rows ${Math.trunc(options.rows)} 2>/dev/null; ${buildHostCommandScript(
       {
-        announcePid: true,
         args,
         command,
         cwd: options.cwd,
@@ -1101,7 +1134,21 @@ const createSshHost = ({
     environmentPromise ??= exec(loginShell, ['-l', '-i', '-c', ENVIRONMENT_COMMAND], {
       signal: AbortSignal.timeout(10_000),
     })
-      .then((output) => Object.freeze(parseEnvironment(output.toString('utf8'))))
+      .then(async (output) => {
+        const environment = Object.freeze(parseEnvironment(output.toString('utf8')));
+        const directory = await mkdtemp('codiff-environment-');
+        const path = `${directory}/launch.sh`;
+        // The file is read by `sh`, so its size is not bound by argument limits.
+        await writeFile(
+          path,
+          `exec env ${Object.entries(environment)
+            .map(([name, value]) => quotePosix(`${name}=${value}`))
+            .join(' ')} "$@"\n`,
+          { exclusive: true, mode: 0o600 },
+        );
+        environmentLauncher = { directory, environment, path };
+        return environment;
+      })
       .catch((error) => {
         environmentPromise = null;
         throw error;
@@ -1161,6 +1208,13 @@ const createSshHost = ({
     },
     close: () => {
       closePromise ??= (async () => {
+        const launcher = environmentLauncher;
+        environmentLauncher = null;
+        if (launcher) {
+          await runScript(`exec rm -rf ${quotePosix(launcher.directory)}`, {
+            signal: AbortSignal.timeout(5000),
+          }).catch(() => {});
+        }
         closed = true;
         setState('closed');
         closing.abort();

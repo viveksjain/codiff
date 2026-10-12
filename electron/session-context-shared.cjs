@@ -7,7 +7,11 @@ const hostPath = (host) => (host.id === 'local' ? { join } : posix);
 /** @param {RepositoryHost} host @param {string} override @param {string} defaultDirectory */
 const getSessionHome = async (host, override, defaultDirectory) => {
   const environment = await host.getEnvironment();
-  const home = environment.HOME || environment.USERPROFILE;
+  // Like os.homedir(), Windows prefers USERPROFILE over HOME (set by MSYS and Git Bash).
+  const home =
+    host.id === 'local' && process.platform === 'win32'
+      ? environment.USERPROFILE || environment.HOME
+      : environment.HOME || environment.USERPROFILE;
   if (environment[override]) return environment[override];
   if (!home) throw new Error(`HOME is unavailable on ${host.label || 'this machine'}.`);
   return hostPath(host).join(home, defaultDirectory);

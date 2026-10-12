@@ -59,6 +59,8 @@ export function useRepositoryHost(store: CodeEditingStore) {
       .finally(() => setReconnecting(false));
   }, [accept]);
   const openRemoteDialog = useCallback(() => setDialogOpen(true), []);
+  // Remote repositories need macOS or Linux, matching the main-process menu.
+  const remoteSupported = document.documentElement.dataset.codiffPlatform !== 'win32';
   const disconnected = hostInfo.remote && hostInfo.state !== 'connected';
   return {
     connectionBanner: disconnected ? (
@@ -71,7 +73,7 @@ export function useRepositoryHost(store: CodeEditingStore) {
     ) : null,
     disconnected,
     hostInfo,
-    openRemoteDialog,
+    openRemoteDialog: remoteSupported ? openRemoteDialog : undefined,
     remoteDialog: dialogOpen ? (
       <OpenRemoteRepositoryDialog
         onClose={() => setDialogOpen(false)}

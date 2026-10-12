@@ -2,7 +2,7 @@
 
 const { homedir } = require('node:os');
 const { join } = require('node:path');
-const { resolveAgentCommandTransport } = require('./agent-command.cjs');
+const { getAgentKillSignal, resolveAgentCommandTransport } = require('./agent-command.cjs');
 const { getCommandEnvironment } = require('./login-shell-environment.cjs');
 const {
   findExecutableOnPath,
@@ -280,11 +280,7 @@ const runClaude = async (
         const timer = setTimeout(() => {
           if (!finished) {
             finished = true;
-            child.kill(
-              options.repositoryHost?.id !== 'local' && options.repositoryHost
-                ? 'SIGKILL'
-                : 'SIGTERM',
-            );
+            child.kill(getAgentKillSignal(options.repositoryHost));
             reject(new Error(timeoutMessage));
           }
         }, timeoutMs);

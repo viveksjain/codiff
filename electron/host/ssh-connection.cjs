@@ -264,10 +264,13 @@ const createSshConnection = ({
           child.kill();
         }
       });
-      const timer = setTimeout(() => {
-        child.kill();
-        resolve({ timedOut: true });
-      }, masterStartTimeoutMs);
+      // An interactive login waits on the user (passwords, 2FA, host keys).
+      const timer = interactive
+        ? undefined
+        : setTimeout(() => {
+            child.kill();
+            resolve({ timedOut: true });
+          }, masterStartTimeoutMs);
       child.on('error', (error) => {
         clearTimeout(timer);
         resolve({ error: error.message });

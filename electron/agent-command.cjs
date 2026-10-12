@@ -18,4 +18,13 @@ const resolveAgentCommandTransport = (transport, getCommand) => ({
   spawn: transport?.spawn || spawn,
 });
 
-module.exports = { resolveAgentCommandTransport };
+/**
+ * Remote agents are killed outright: SIGTERM to a remote wrapper can leave its
+ * workers running on the host.
+ *
+ * @param {import('./host/repository-host.cjs').RepositoryHost | undefined} host
+ * @returns {NodeJS.Signals}
+ */
+const getAgentKillSignal = (host) => (host && host.id !== 'local' ? 'SIGKILL' : 'SIGTERM');
+
+module.exports = { getAgentKillSignal, resolveAgentCommandTransport };

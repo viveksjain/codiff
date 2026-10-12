@@ -210,6 +210,10 @@ const refreshInstalledAgentFiles = () => {
 
 const getActiveAgent = () => getAgent(config.settings.agentBackend);
 
+/** @param {RepositoryHost} host @param {RepositoryState} state @returns {RepositoryState} */
+const withRepositoryHost = (host, state) =>
+  host.id === 'local' ? state : { ...state, hostId: host.id, hostLabel: host.label };
+
 /** @param {RepositoryHost} host @param {string} repositoryPath @param {ReviewSource} [source] */
 const readRepositoryStateWithConfig = async (host, repositoryPath, source) => {
   if (host.id !== 'local' && source?.type === 'pull-request') {
@@ -218,18 +222,18 @@ const readRepositoryStateWithConfig = async (host, repositoryPath, source) => {
   const state = await readRepositoryState(host, repositoryPath, source, {
     showWhitespace: config.settings.showWhitespace,
   });
-  return host.id === 'local' ? state : { ...state, hostId: host.id, hostLabel: host.label };
+  return withRepositoryHost(host, state);
 };
 
 /** @param {RepositoryHost} host @param {string} repositoryPath @param {CodiffLaunchOptions} launchOptions */
 const readInitialRepositoryStateWithConfig = async (host, repositoryPath, launchOptions) => {
-  const state =
-    launchOptions.walkthrough && !launchOptions.walkthroughFile
-      ? await readWalkthroughRepositoryState(host, repositoryPath, launchOptions.source, {
-          showWhitespace: config.settings.showWhitespace,
-        })
-      : await readRepositoryStateWithConfig(host, repositoryPath, launchOptions.source);
-  return host.id === 'local' ? state : { ...state, hostId: host.id, hostLabel: host.label };
+  if (!launchOptions.walkthrough || launchOptions.walkthroughFile) {
+    return readRepositoryStateWithConfig(host, repositoryPath, launchOptions.source);
+  }
+  const state = await readWalkthroughRepositoryState(host, repositoryPath, launchOptions.source, {
+    showWhitespace: config.settings.showWhitespace,
+  });
+  return withRepositoryHost(host, state);
 };
 
 /** @param {number} webContentsId */
@@ -730,6 +734,7 @@ const buildApplicationMenu = () =>
                 {
                   click: (_menuItem, browserWindow) =>
                     requestOpenReviewSource(browserWindow, 'pull-request'),
+                  id: 'open-pr',
                   label: 'Open PR',
                   visible: isFocusedWindowLocal(),
                 },
@@ -1268,7 +1273,12 @@ const createWindow = (host, repositoryPath, launchOptions, identity) => {
   } else {
     window.loadURL(pathToFileURL(join(root, 'dist/index.html')).toString());
   }
-  window.on('focus', () => Menu.setApplicationMenu(buildApplicationMenu()));
+  window.on('focus', () => {
+    const openPullRequestItem = Menu.getApplicationMenu()?.getMenuItemById('open-pr');
+    if (openPullRequestItem) {
+      openPullRequestItem.visible = isFocusedWindowLocal();
+    }
+  });
   return window;
 };
 
@@ -1418,11 +1428,18 @@ const focusOrCreateWindowNow = async (host, repositoryPath, launchOptions) => {
 
 /** @param {unknown} error */
 const reportLaunchError = (error) => {
-  void dialog.showMessageBox({
-    type: 'error',
-    message: 'Could not open repository',
-    detail: error instanceof Error ? error.message : String(error),
-  });
+  void dialog
+    .showMessageBox({
+      type: 'error',
+      message: 'Could not open repository',
+      detail: error instanceof Error ? error.message : String(error),
+    })
+    .then(() => {
+      // A failed launch creates no window, so window-all-closed never quits.
+      if (BrowserWindow.getAllWindows().length === 0 && !windowLaunchQueue.hasPending()) {
+        app.quit();
+      }
+    });
 };
 
 /** @param {string} path @param {CodiffLaunchOptions} [launchOptions] */

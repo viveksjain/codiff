@@ -73,6 +73,10 @@ const createHostRegistry = ({
     };
     try {
       const host = await entry.host;
+      // A shared host may have lost its master since another window opened it.
+      if (!closed && host.getConnectionState?.() === 'disconnected') {
+        await host.reconnect();
+      }
       if (closed) {
         await release();
         throw new Error('Host registry is closed.');
