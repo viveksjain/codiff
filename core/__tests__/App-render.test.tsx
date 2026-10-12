@@ -4037,6 +4037,85 @@ test('remote review identifies the host, keeps its diff on loss, and reconnects'
   expect(window.codiff.reconnectRepositoryHost).toHaveBeenCalledOnce();
 });
 
+test.each([true, false])(
+  'remote history selection preserves the review when disconnected before selection=%s',
+  async (disconnectBeforeSelection) => {
+    let info: RepositoryHostInfo = {
+      id: 'ssh://devbox',
+      label: 'devbox',
+      recentTargets: [],
+      remote: true,
+      state: 'connected',
+    };
+    let changed!: (info: RepositoryHostInfo) => void;
+    let available = true;
+    const remoteState = {
+      ...repositoryState,
+      files: [createChangedFile('src/app.ts')],
+      hostId: info.id,
+      hostLabel: info.label,
+    };
+    window.codiff = createCodiffMock({
+      getRepositoryHistory: vi.fn(async () => ({
+        entries: [
+          { author: 'Ada', committedAt: 1, parents: [], ref: 'abc1234', subject: 'Past change' },
+        ],
+        root: '/repo',
+      })),
+      getRepositoryHost: vi.fn(async () => info),
+      getRepositoryState: vi.fn(async (source) => {
+        if (source?.type === 'commit' && !available) {
+          info = { ...info, state: 'disconnected' };
+          changed(info);
+          throw new Error('Lost connection to devbox.');
+        }
+        return source?.type === 'commit' ? { ...remoteState, source } : remoteState;
+      }),
+      onRepositoryHostChanged: vi.fn((listener) => {
+        changed = listener;
+        return () => {};
+      }),
+      reconnectRepositoryHost: vi.fn(async () => {
+        available = true;
+        info = { ...info, state: 'connected' };
+        return info;
+      }),
+    });
+    await using app = await renderReact(<App />);
+    const button = (label: string) =>
+      [...app.container.querySelectorAll<HTMLButtonElement>('button')].find((item) =>
+        item.textContent?.includes(label),
+      );
+    await waitFor(() => expect(app.container.querySelector('.review-top-bar')).not.toBeNull());
+    await act(async () => button('History')!.click());
+    await waitFor(() => expect(button('Past change')).toBeDefined());
+    available = false;
+    if (disconnectBeforeSelection) {
+      await act(async () => {
+        info = { ...info, state: 'disconnected' };
+        changed(info);
+      });
+    }
+    await act(async () => button('Past change')!.click());
+    await waitFor(() => expect(button('Reconnect')).toBeDefined());
+    expect(app.container.querySelector('.review-top-bar')).not.toBeNull();
+    expect(app.container.textContent).toContain('src/app.ts');
+    await act(async () => button('Reconnect')!.click());
+    await waitFor(() => expect(button('Reconnect')).toBeUndefined());
+    expect(app.container.querySelector('.review-top-bar')).not.toBeNull();
+    await act(async () => button('History')!.click());
+    await waitFor(() => expect(button('Past change')).toBeDefined());
+    await act(async () => button('Past change')!.click());
+    await waitFor(() =>
+      expect(window.codiff.getRepositoryState).toHaveBeenLastCalledWith({
+        ref: 'abc1234',
+        type: 'commit',
+      }),
+    );
+    expect(app.container.querySelector('.review-top-bar')).not.toBeNull();
+  },
+);
+
 test('remote dialog opens from a native menu request and lists recent targets', async () => {
   let open!: () => void;
   window.codiff = createCodiffMock({

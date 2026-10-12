@@ -133,11 +133,15 @@ distinct.
 All SSH invocations share:
 
 ```
--S ~/.codiff/ssh/%C
+-S ~/.codiff/ssh/<destination-hash>
 -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
 ```
 
-`%C` keeps the filename short; the full socket path must still fit the 104-byte macOS limit.
+The 40-character destination hash combines the typed alias, explicit port, and SSH-expanded
+`%C` control path, matching registry leases without lengthening socket filenames. Different
+aliases for one endpoint cannot close each other's masters; the CLI and GUI still share a master
+for the same target. The full socket path, including OpenSSH's temporary bind suffix, must fit
+the 104-byte macOS limit.
 Pass the path via `-S` to preserve quotes and spaces, and escape literal `%` in the directory
 as `%%` while retaining the final `%C` token. Every invocation disables `RemoteCommand`,
 forwardings and `LocalCommand` with `RemoteCommand=none`, `ClearAllForwardings=yes` and

@@ -1406,6 +1406,11 @@ export default function App() {
       source: ReviewSource,
       { throwOnError = false }: { throwOnError?: boolean } = {},
     ): Promise<void> => {
+      if (disconnected) {
+        return throwOnError
+          ? Promise.reject(new Error('Reconnect before changing the review source.'))
+          : Promise.resolve();
+      }
       const currentState = stateRef.current;
       const sourceKey = getSourceKey(source);
       const currentDisplayKey = getSourceKey(pendingSource ?? currentState?.source ?? source);
@@ -1481,7 +1486,15 @@ export default function App() {
         })
         .catch((error: unknown) => {
           if (sourceRequestRef.current === request) {
-            if (!throwOnError) {
+            // A source read can discover the loss before the host event arrives,
+            // or fail just as the master recovers. Keep the already loaded review
+            // in either case; Electron IPC preserves the error message, not its type.
+            const connectionLost =
+              hostInfo.remote &&
+              currentState != null &&
+              error instanceof Error &&
+              error.message.includes('Lost connection to ');
+            if (!throwOnError && !connectionLost) {
               setLoadError(getRepositoryLoadError(error));
             }
             setWalkthroughLoading(false);
@@ -1493,7 +1506,9 @@ export default function App() {
         });
     },
     [
+      disconnected,
       historySource,
+      hostInfo.remote,
       pendingSource,
       refreshWalkthroughForState,
       resetCommentFocus,

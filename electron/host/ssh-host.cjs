@@ -749,7 +749,11 @@ const createSshHost = ({
         stdoutBytes += chunk.length;
         if (stdoutBytes > maxBuffer) {
           remote.kill('SIGKILL');
-          fail(new Error(`${label} output exceeded ${maxBuffer} bytes.`));
+          fail(
+            Object.assign(new Error(`${label} output exceeded ${maxBuffer} bytes.`), {
+              code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+            }),
+          );
           return;
         }
         stdout.push(chunk);
@@ -1027,20 +1031,31 @@ const createSshHost = ({
   const readFiles = async (paths) => {
     assertOpen();
     const chunks = chunkByScriptSize(paths.map(assertAbsolute));
+    /** @param {ReadonlyArray<string>} chunk @returns {Promise<Array<Buffer | Error>>} */
+    const readChunk = async (chunk) => {
+      try {
+        const output = await run('readFile', `${chunk.length} paths`, buildReadFilesScript(chunk));
+        return parseReadFilesOutput(output, chunk);
+      } catch (error) {
+        if (
+          /** @type {NodeJS.ErrnoException} */ (error).code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+        ) {
+          throw error;
+        }
+        // Path length does not bound response size. Retry only these read-only
+        // batches, keeping the normal fast path free of an extra stat round trip.
+        if (chunk.length === 1) {
+          return [/** @type {Error} */ (error)];
+        }
+        const middle = Math.ceil(chunk.length / 2);
+        return (
+          await Promise.all([readChunk(chunk.slice(0, middle)), readChunk(chunk.slice(middle))])
+        ).flat();
+      }
+    };
     // run() uses the host's shared channel limiter, so parallel batches remain
     // bounded alongside Git, agents and terminal sessions. Promise.all keeps order.
-    return (
-      await Promise.all(
-        chunks.map(async (chunk) => {
-          const output = await run(
-            'readFile',
-            `${chunk.length} paths`,
-            buildReadFilesScript(chunk),
-          );
-          return parseReadFilesOutput(output, chunk);
-        }),
-      )
-    ).flat();
+    return (await Promise.all(chunks.map(readChunk))).flat();
   };
 
   /** @param {Buffer} output */

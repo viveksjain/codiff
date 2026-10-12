@@ -1,7 +1,7 @@
 import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -91,7 +91,7 @@ const generateKey = (path: string) =>
 
 /**
  * Starts a non-root sshd on 127.0.0.1 that accepts one generated key for the
- * current user. The root lives under /tmp so `<root>/cm/%C` stays below the
+ * current user. The root lives under /tmp so the scoped control sockets stay below the
  * 104-byte Unix socket path limit on macOS.
  */
 export const startTestSshd = async ({
@@ -189,15 +189,22 @@ export const startTestSshd = async ({
       return;
     }
     stopped = true;
-    await execFileAsync('ssh', [
-      '-F',
-      sshConfigPath,
-      '-o',
-      `ControlPath=${join(controlDirectory, '%C')}`,
-      '-O',
-      'exit',
-      'codiff-test',
-    ]).catch(() => {});
+    const sockets = await readdir(controlDirectory, { withFileTypes: true }).catch(() => []);
+    await Promise.all(
+      sockets
+        .filter((entry) => entry.isSocket())
+        .map((entry) =>
+          execFileAsync('ssh', [
+            '-F',
+            sshConfigPath,
+            '-S',
+            join(controlDirectory, entry.name).replaceAll('%', '%%'),
+            '-O',
+            'exit',
+            'codiff-test',
+          ]).catch(() => {}),
+        ),
+    );
     await terminate(server);
     await rm(root, { force: true, recursive: true });
   };

@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { appendFile, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
@@ -168,6 +168,56 @@ test('only a socket that nothing listens on is stale', async () => {
 });
 
 describe.skipIf(!findSshd())('ssh connection', () => {
+  test('scoped sockets fit in a longer control directory', async () => {
+    await using sshd = await startTestSshd();
+    const controlDirectory = await mkdtemp(`/tmp/${'x'.repeat(27)}`);
+    const connection = createSshConnection({
+      alias: sshd.alias,
+      controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    try {
+      await connection.ensureMaster();
+      const result = await connection.run('printf connected');
+      expect(result.code).toBe(0);
+      expect(result.stdout.toString()).toBe('connected');
+    } finally {
+      await connection.exitMaster();
+      await rm(controlDirectory, { force: true, recursive: true });
+    }
+  });
+
+  test('closing one alias keeps another alias for the same endpoint usable', async () => {
+    await using sshd = await startTestSshd();
+    const config = await readFile(sshd.sshConfigPath, 'utf8');
+    await writeFile(
+      sshd.sshConfigPath,
+      config.replace('Host codiff-test\n', 'Host codiff-test codiff-second\n'),
+    );
+    const first = createSshConnection({
+      alias: sshd.alias,
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    const second = createSshConnection({
+      alias: 'codiff-second',
+      controlDirectory: sshd.controlDirectory,
+      sshConfigPath: sshd.sshConfigPath,
+    });
+    try {
+      await first.ensureMaster();
+      await second.ensureMaster();
+      expect((await second.run('printf before')).stdout.toString()).toBe('before');
+      await first.exitMaster();
+      const result = await second.run('printf after');
+      expect(result.code).toBe(0);
+      expect(result.stdout.toString()).toBe('after');
+    } finally {
+      await first.exitMaster();
+      await second.exitMaster();
+    }
+  });
+
   test('starts, checks, uses and exits a master connection', async () => {
     await using sshd = await startTestSshd();
     const connection = createSshConnection({
@@ -346,11 +396,12 @@ describe.skipIf(!findSshd())('ssh connection', () => {
       sshConfigPath: sshd.sshConfigPath,
     });
     await connection.startMaster();
+    const [socket] = await readdir(sshd.controlDirectory);
     const checkArgs = [
       '-F',
       sshd.sshConfigPath,
-      '-o',
-      `ControlPath=${sshd.controlDirectory}/%C`,
+      '-S',
+      join(sshd.controlDirectory, socket),
       '-O',
       'check',
       '--',

@@ -9,6 +9,42 @@ const { buildReadFilesScript, parseReadFilesOutput } = createRequire(import.meta
   '../host/ssh-host.cjs',
 );
 const execFileAsync = promisify(execFile);
+
+test('file batches larger than the command output limit preserve every file', async () => {
+  const { createSshHost } = createRequire(import.meta.url)('../host/ssh-host.cjs');
+  const root = await mkdtemp(join(tmpdir(), 'codiff-large-batch-'));
+  const host = createSshHost({
+    alias: 'loopback',
+    dialect: 'posix',
+    statFlavor: process.platform === 'darwin' ? 'bsd' : 'gnu',
+    connection: {
+      ensureMaster: async () => {},
+      check: async () => true,
+      exitMaster: async () => {},
+      spawnClient: (command: string) =>
+        spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'pipe', 'pipe'] }),
+    },
+  });
+  try {
+    const paths = Array.from({ length: 65 }, (_, index) => join(root, `file-${index}`));
+    await Promise.all(
+      paths.map((path, index) => writeFile(path, Buffer.alloc(1024 * 1024, index))),
+    );
+    paths.splice(32, 0, join(root, 'missing'));
+    const contents: Array<Buffer | Error> = await host.readFiles(paths);
+    expect(contents).toHaveLength(66);
+    expect(contents[32]).toBeInstanceOf(Error);
+    contents.splice(32, 1);
+    contents.forEach((content, index) => {
+      expect(Buffer.isBuffer(content)).toBe(true);
+      expect((content as Buffer).equals(Buffer.alloc(1024 * 1024, index))).toBe(true);
+    });
+  } finally {
+    await host.close();
+    await rm(root, { force: true, recursive: true });
+  }
+}, 15000);
+
 for (const accelerated of [true, false]) {
   test(`batch reads keep binary/error frames with optional acceleration=${accelerated}`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'codiff-batch-read-'));

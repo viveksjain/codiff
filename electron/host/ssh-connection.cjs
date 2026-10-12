@@ -1,6 +1,7 @@
 // @ts-check
 
 const { spawn } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const { mkdirSync, rmSync } = require('node:fs');
 const { connect } = require('node:net');
 const { homedir } = require('node:os');
@@ -110,6 +111,7 @@ const createSshConnection = ({
     '-o',
     'PermitLocalCommand=no',
   ];
+  const controlPathArgument = baseArgs.indexOf('-S') + 1;
   /** @type {string | null} */
   let resolvedControlPath = null;
   const getClientArgs = () => [
@@ -190,7 +192,18 @@ const createSshConnection = ({
           .toString('utf8')
           .split('\n')
           .find((entry) => entry.startsWith('controlpath '));
-        resolvedControlPath = line ? line.slice('controlpath '.length).trim() : null;
+        if (line) {
+          // Registry leases are scoped to the typed alias and explicit port,
+          // while %C merges aliases for one endpoint. Hash both identities into
+          // the original 40-byte filename budget, including space for OpenSSH's
+          // temporary bind suffix on macOS. The CLI and GUI derive the same path.
+          const destinationKey = createHash('sha256')
+            .update(JSON.stringify([alias, port ?? null, line.slice('controlpath '.length).trim()]))
+            .digest('hex')
+            .slice(0, 40);
+          resolvedControlPath = join(controlDirectory, destinationKey);
+          baseArgs[controlPathArgument] = resolvedControlPath.replaceAll('%', '%%');
+        }
         return resolvedControlPath;
       } finally {
         pendingControlPath = null;
@@ -297,6 +310,7 @@ const createSshConnection = ({
   };
 
   const exitMaster = async () => {
+    await getControlPath();
     await runSsh([...baseArgs, '-O', 'exit', '--', alias]);
   };
 
