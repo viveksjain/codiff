@@ -289,6 +289,11 @@ const runBoundedGitGrep = (
 /** @param {RepositoryHost} host @param {DefinitionSearchRequest} request @param {string} repoPath */
 const resolveSearchRevision = async (host, request, repoPath) => {
   const { kind, side, source } = request;
+  // A ref compared with the working tree has its base commit on the old side.
+  if (source.type === 'branch-working-tree' && source.baseRef)
+    return side === 'additions'
+      ? { cached: false, revision: null, untracked: true }
+      : { cached: false, revision: source.baseRef };
   if (kind === 'staged')
     return side === 'additions'
       ? { cached: true, revision: null }
@@ -311,9 +316,6 @@ const resolveSearchRevision = async (host, request, repoPath) => {
   } else if (source.type === 'branch-diff') {
     head = source.headRef;
     base = source.baseRef;
-  } else if (source.type === 'branch-working-tree' && source.headRef) {
-    head = source.headRef;
-    base = source.baseRef || `${source.headRef}^`;
   } else if (source.type === 'branch') {
     head = source.ref;
     base = `${source.ref}^`;

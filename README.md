@@ -36,16 +36,19 @@ Run it from any Git repository, or pass a path:
 codiff /path/to/repository
 ```
 
-Review a specific commit:
+Like `git diff <ref>`, pass a branch or commit to review the working tree against it, as one
+diff per file covering committed and uncommitted changes. For a branch that has diverged,
+Codiff compares from its merge-base with `HEAD`:
 
 ```bash
-codiff a1b2c3d
+codiff HEAD^
+codiff main
 ```
 
-Review the current branch against a target branch:
+Review a single commit:
 
 ```bash
-codiff main
+codiff --commit a1b2c3d
 ```
 
 Review a GitHub pull request or GitLab merge request using the current repository remote:
@@ -69,7 +72,7 @@ tree is clean:
 
 ```bash
 codiff -w
-codiff -w a1b2c3d
+codiff -w --commit a1b2c3d
 ```
 
 When walkthrough sharing is available for your Git identity, generate and upload the same
@@ -78,7 +81,7 @@ command prints the final URL:
 
 ```bash
 codiff --share
-codiff --share HEAD
+codiff --share --commit HEAD
 ```
 
 Show all available options:
@@ -109,7 +112,7 @@ On macOS and Linux, open a repository on an SSH host from the terminal:
 
 ```bash
 codiff 'devbox:~/src/app'
-codiff HEAD 'devbox:~/src/app'
+codiff --commit HEAD 'devbox:~/src/app'
 codiff --branch main 'devbox:~/src/app'
 codiff 'ssh://user@host:2222/home/user/src/app'
 ```
@@ -132,7 +135,7 @@ its CLI with the remote host's login environment and credentials:
 
 ```bash
 codiff -w --agent claude 'devbox:~/src/app'
-codiff --share HEAD 'devbox:~/src/app'
+codiff --share --commit HEAD 'devbox:~/src/app'
 ```
 
 Install and authenticate the selected agent on the remote host first. Session IDs are read from

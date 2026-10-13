@@ -86,7 +86,9 @@ approval document.
    ```
 
 2. **Pick the change.** Default to the staged diff (`git diff --staged`). If the user named a
-   target such as a commit, `HEAD`, a PR/MR, a range, or a path, use that. If nothing is
+   target such as a commit, `HEAD`, a PR/MR, a range, or a path, use that. Forward a single
+   commit as `--commit <ref>`; a bare `<ref>` means the working tree against `<ref>`, like
+   `git diff <ref>`. If nothing is
    staged, fall back to the working tree (`git diff`) and say so.
 
 3. **Author the JSON** per the guide and write it to a unique temporary file outside the
@@ -115,7 +117,7 @@ approval document.
    Forward an explicit target after the flags:
 
    ```bash
-   node scripts/open-codiff.mjs --share --file /tmp/codiff-walkthrough-<id>.json HEAD /path/to/repository
+   node scripts/open-codiff.mjs --share --file /tmp/codiff-walkthrough-<id>.json --commit HEAD /path/to/repository
    node scripts/open-codiff.mjs --share --file /tmp/codiff-walkthrough-<id>.json mr 123 /path/to/repository
    ```
 

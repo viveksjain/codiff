@@ -90,11 +90,12 @@ const withFakeGitHubCli = async <T>(
   return await callback(argsPath);
 };
 
-test('parseArguments treats a hash positional as a commit ref', () => {
-  const commitRef = 'a1b2c3d4e5f678901234567890abcdef12345678';
+test('parseArguments compares a hash positional against the working tree', () => {
+  const ref = 'a1b2c3d4e5f678901234567890abcdef12345678';
 
-  expect(parseArguments(['-w', commitRef])).toEqual({
-    commitRef,
+  expect(parseArguments(['-w', ref])).toEqual({
+    branchRef: ref,
+    commitRef: null,
     help: false,
     pullRequestNumber: null,
     pullRequestUrl: null,
@@ -104,9 +105,10 @@ test('parseArguments treats a hash positional as a commit ref', () => {
   });
 });
 
-test('parseArguments treats HEAD positional revisions as commit refs', () => {
+test('parseArguments compares HEAD positional revisions against the working tree', () => {
   expect(parseArguments(['HEAD'])).toEqual({
-    commitRef: 'HEAD',
+    branchRef: 'HEAD',
+    commitRef: null,
     help: false,
     pullRequestNumber: null,
     pullRequestUrl: null,
@@ -116,7 +118,8 @@ test('parseArguments treats HEAD positional revisions as commit refs', () => {
   });
 
   expect(parseArguments(['HEAD^1'])).toEqual({
-    commitRef: 'HEAD^1',
+    branchRef: 'HEAD^1',
+    commitRef: null,
     help: false,
     pullRequestNumber: null,
     pullRequestUrl: null,
@@ -194,9 +197,15 @@ test('parseArguments treats missing plain refs in Git repositories as branch ref
   });
 });
 
-test('parseArguments treats hex-like refs as commits before branches', async () => {
+test('parseArguments reviews a single commit only with --commit', async () => {
   await withCwd(refRepositoryPath, () => {
     expect(parseArguments([refRepositoryShortHash])).toMatchObject({
+      branchRef: refRepositoryShortHash,
+      commitRef: null,
+      requestedPath: refRepositoryPath,
+    });
+
+    expect(parseArguments(['--commit', refRepositoryShortHash])).toMatchObject({
       commitRef: refRepositoryShortHash,
       requestedPath: refRepositoryPath,
     });
@@ -345,7 +354,7 @@ test('parseArguments recognizes a blocking Markdown plan', () => {
 });
 
 test('parseArguments treats --share as a headless walkthrough for the same target syntax', () => {
-  expect(parseArguments(['--share', 'HEAD'])).toMatchObject({
+  expect(parseArguments(['--share', '--commit', 'HEAD'])).toMatchObject({
     commitRef: 'HEAD',
     requestedPath: resolve(process.cwd()),
     share: true,
@@ -1449,7 +1458,8 @@ test('formatHelpText includes version and all flags', () => {
   expect(text).toContain('-v');
   expect(text).toContain('-w');
   expect(text).toContain('codiff --share');
-  expect(text).toContain('codiff --share HEAD');
+  expect(text).toContain('codiff --share --commit HEAD');
+  expect(text).toContain('codiff HEAD^');
   expect(text).toContain('codiff pr owner:feature');
 });
 

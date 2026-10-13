@@ -20,7 +20,7 @@ export const flagDefinitions = [
     // With the source given as a flag, the positional argument can only be the
     // repository path.
     consumesSource: true,
-    description: 'Review the current branch against a target branch.',
+    description: 'Review the working tree against a branch or commit.',
     name: 'branch',
     type: 'string',
   },
@@ -113,8 +113,12 @@ export const flagDefinitions = [
 const usageExamples = [
   { command: 'codiff', description: 'Review staged and unstaged changes.' },
   { command: 'codiff /path/to/repo', description: 'Review changes in a specific repository.' },
-  { command: 'codiff main', description: 'Review the current branch against main.' },
-  { command: 'codiff a1b2c3d', description: 'Review a specific commit.' },
+  {
+    command: 'codiff main',
+    description: 'Review the current branch and local changes against main.',
+  },
+  { command: 'codiff HEAD^', description: 'Review changes since HEAD^, like `git diff HEAD^`.' },
+  { command: 'codiff --commit a1b2c3d', description: 'Review a single commit.' },
   { command: "codiff '#75'", description: 'Review pull request #75.' },
   { command: 'codiff pr 75', description: 'Review pull request #75 (alternate syntax).' },
   {
@@ -126,9 +130,12 @@ const usageExamples = [
   { command: 'codiff --plan plan.md', description: 'Edit a plan and wait for handoff.' },
   { command: 'codiff --plan plan.md --share', description: 'Share a Markdown plan.' },
   { command: 'codiff -w', description: 'Walk through local changes, or HEAD when clean.' },
-  { command: 'codiff -w a1b2c3d', description: 'Generate a narrative walkthrough for a commit.' },
+  {
+    command: 'codiff -w --commit a1b2c3d',
+    description: 'Generate a narrative walkthrough for a commit.',
+  },
   { command: 'codiff --share', description: 'Share local changes, or HEAD when clean.' },
-  { command: 'codiff --share HEAD', description: 'Share a walkthrough for a commit.' },
+  { command: 'codiff --share --commit HEAD', description: 'Share a walkthrough for a commit.' },
 ];
 
 export const getReviewSource = ({
@@ -251,14 +258,10 @@ const isBranchRef = (repositoryPath, ref) =>
 const isCommitRef = (repositoryPath, ref) =>
   gitSucceeds(repositoryPath, ['rev-parse', '--verify', `${ref}^{commit}`]);
 
-const resolveSourceCandidate = (repositoryPath, ref) =>
-  isCommitRefArgument(ref) && isCommitRef(repositoryPath, ref)
-    ? { commitRef: ref }
-    : isBranchRef(repositoryPath, ref)
-      ? { branchRef: ref }
-      : isCommitRef(repositoryPath, ref) || isCommitRefArgument(ref)
-        ? { commitRef: ref }
-        : null;
+// Like `git diff <ref>`, a positional branch or commit is compared against the
+// working tree. `--commit <ref>` reviews a single commit instead.
+const isSourceRef = (repositoryPath, ref) =>
+  isCommitRefArgument(ref) || isBranchRef(repositoryPath, ref) || isCommitRef(repositoryPath, ref);
 
 const parsePullRequestNumberArgument = (arg) => {
   const match = arg.match(pullRequestNumberPattern);
@@ -327,7 +330,7 @@ export const parseArguments = (args) => {
     strict: false,
   });
 
-  let commitRef = typeof values.commit === 'string' ? values.commit : null;
+  const commitRef = typeof values.commit === 'string' ? values.commit : null;
   let branchRef = typeof values.branch === 'string' ? values.branch : null;
   const codexSessionId =
     typeof values['codex-session'] === 'string' ? values['codex-session'] : null;
@@ -449,11 +452,8 @@ export const parseArguments = (args) => {
         : null;
   }
   if (!remoteTarget && !range && !commitRef && !branchRef && sourceCandidate) {
-    const source = resolveSourceCandidate(repositoryPath, sourceCandidate);
-    if (source?.branchRef) {
-      branchRef = source.branchRef;
-    } else if (source?.commitRef) {
-      commitRef = source.commitRef;
+    if (isSourceRef(repositoryPath, sourceCandidate)) {
+      branchRef = sourceCandidate;
     } else if (requestedPath == null && existsSync(resolve(sourceCandidate))) {
       requestedPath = sourceCandidate;
     } else if (isGitRepository(repositoryPath)) {

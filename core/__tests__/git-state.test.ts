@@ -1428,6 +1428,61 @@ test('readRepositoryState opens branch refs as current branch diffs against the 
   });
 });
 
+test('readRepositoryState compares a ref with the working tree in one section per file', async () => {
+  await withRepo(async (repo) => {
+    await writeRepoFile(repo, 'file.txt', 'base\n');
+    await writeRepoFile(repo, 'staged.txt', 'staged base\n');
+    await commitAll(repo, 'initial commit');
+    const baseBranch = (await git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const baseCommit = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+
+    await git(repo, ['checkout', '-b', 'feature']);
+    await writeRepoFile(repo, 'file.txt', 'base\ncommitted\n');
+    await commitAll(repo, 'feature commit');
+
+    // Diverge the target branch: its own changes must not show up reversed.
+    await git(repo, ['checkout', baseBranch]);
+    await writeRepoFile(repo, 'main-only.txt', 'main\n');
+    await commitAll(repo, 'main change');
+    await git(repo, ['checkout', 'feature']);
+
+    await writeRepoFile(repo, 'file.txt', 'base\ncommitted\nunstaged\n');
+    await writeRepoFile(repo, 'staged.txt', 'staged change\n');
+    await git(repo, ['add', 'staged.txt']);
+    await writeRepoFile(repo, 'new.txt', 'untracked\n');
+
+    for (const ref of [baseBranch, 'HEAD^']) {
+      const state = await readRepositoryState(host, repo, { ref, type: 'branch-working-tree' });
+      const source = state.source as Extract<ReviewSource, { type: 'branch-working-tree' }>;
+
+      expect(source).toMatchObject({ baseRef: baseCommit, ref, type: 'branch-working-tree' });
+      expect(state.files.map((file) => [file.path, file.status, file.sections.length])).toEqual([
+        ['file.txt', 'modified', 1],
+        ['new.txt', 'untracked', 1],
+        ['staged.txt', 'modified', 1],
+      ]);
+      const [file] = state.files;
+      expect(file.sections[0].kind).toBe('unstaged');
+      expect(file.sections[0].patch).toContain('+committed\n+unstaged');
+
+      const section = await readDiffSectionContent(host, repo, {
+        kind: file.sections[0].kind,
+        path: file.path,
+        source,
+      });
+      expect(section.oldFile?.contents).toBe('base\n');
+      expect(section.newFile?.contents).toBe('base\ncommitted\nunstaged\n');
+
+      const untracked = await readDiffSectionContent(host, repo, {
+        kind: 'unstaged',
+        path: 'new.txt',
+        source,
+      });
+      expect(untracked.newFile?.contents).toBe('untracked\n');
+    }
+  });
+});
+
 test('readRepositoryState reports missing branch refs clearly', async () => {
   await withRepo(async (repo) => {
     await writeRepoFile(repo, 'file.txt', 'base\n');

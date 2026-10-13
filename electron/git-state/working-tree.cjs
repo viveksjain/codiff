@@ -417,9 +417,12 @@ const readGitIdentity = async (host, launchPath) => {
 };
 
 module.exports = {
+  listUntrackedItems,
   readDiffSectionContent,
   readDiffImageContent,
   readGitIdentity,
   readRepositoryChangeSignature,
   readWorkingTreeState,
+  shouldEagerlyReadWorkingTreeContents,
+  splitPatchByPath,
 };

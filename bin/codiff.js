@@ -221,9 +221,6 @@ const run = async () => {
       candidate: parsedArguments.remoteSourceCandidate,
       range: parsedArguments.range,
     });
-    if (source?.type === 'commit') {
-      parsedArguments.commitRef = source.ref;
-    }
     if (source?.type === 'branch-working-tree') {
       parsedArguments.branchRef = source.ref;
     }

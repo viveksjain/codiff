@@ -89,14 +89,15 @@ and `h<ordinal>` is the hunk's 1-based position within that file's patch (`h1`, 
 The `<scope>` segment depends on which diff you anchored against:
 
 - `staged` — the staged diff (`git diff --staged`).
-- `unstaged` — the working-tree diff (`git diff`).
+- `unstaged` — the working-tree diff (`git diff`). Also used for every hunk of a ref compared
+  with the working tree (`codiff <ref>`, e.g. `codiff main` or `codiff HEAD^`): Codiff shows
+  one diff per file from the merge-base of `<ref>` and `HEAD` to the working tree, like
+  `git diff $(git merge-base <ref> HEAD)` plus untracked files.
 - `pull-request:<number>` — a pull request.
-- `<commit SHA>` — every commit-like target: a single commit, a branch comparison, or a
-  ref range. This is always the **full 40-character SHA of the diff's new (head) side**,
-  resolved with `git rev-parse` — never a ref name or a `branch:`/`range:` prefix:
-  - single commit (`codiff <ref>`): the resolved commit SHA.
-  - branch comparison (`codiff <branch>` — current branch vs `<branch>`): the resolved
-    **`HEAD`** SHA, _not_ `<branch>`.
+- `<commit SHA>` — a single commit or a ref range. This is always the **full 40-character
+  SHA of the diff's new (head) side**, resolved with `git rev-parse` — never a ref name or a
+  `range:` prefix:
+  - single commit (`codiff --commit <ref>`): the resolved commit SHA.
   - ref range (`codiff base..head` or `base...head`): the resolved SHA of `head`.
 
 ## Schema

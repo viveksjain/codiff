@@ -115,7 +115,7 @@ export const getSourceLabel = (source: ReviewSource) =>
     : source.type === 'branch' || source.type === 'branch-diff'
       ? `Branch vs ${source.ref}`
       : source.type === 'branch-working-tree'
-        ? `Local + branch vs ${source.ref}`
+        ? `Working tree vs ${source.ref}`
         : source.type === 'range'
           ? rangeLabel(source)
           : source.type === 'pull-request'

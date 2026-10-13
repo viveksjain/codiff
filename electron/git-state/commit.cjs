@@ -1,6 +1,22 @@
 // @ts-check
 
-const { fileSort, getFingerprint, getGravatarHash, git, normalizeStatus } = require('./common.cjs');
+const {
+  createSection,
+  createSummary,
+  fileSort,
+  getFingerprint,
+  getGravatarHash,
+  getWhitespaceDiffArgs,
+  git,
+  normalizeStatus,
+  prefetchWorkingTreeFiles,
+  readGitFile,
+  readGitImageFile,
+  readWorkingTreeFile,
+  readWorkingTreeImageFile,
+  summarizeContent,
+  validateRepositoryPath,
+} = require('./common.cjs');
 const {
   readComparisonImageContent,
   readComparisonSectionContent,
@@ -11,10 +27,12 @@ const {
   applyGeneratedAttributeStates,
   readGeneratedAttributeStates,
 } = require('../generated-files.cjs');
+const { createEmptyFileContent } = require('./git-files.cjs');
 const {
-  readDiffImageContent: readWorkingTreeDiffImageContent,
+  listUntrackedItems,
   readDiffSectionContent: readWorkingTreeDiffSectionContent,
-  readWorkingTreeState,
+  shouldEagerlyReadWorkingTreeContents,
+  splitPatchByPath,
 } = require('./working-tree.cjs');
 
 /**
@@ -22,6 +40,7 @@ const {
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageContentRequest} DiffImageContentRequest
  * @typedef {import('../../core/types.ts').DiffImageContentResult} DiffImageContentResult
+ * @typedef {import('../../core/types.ts').DiffSection} DiffSection
  * @typedef {import('../../core/types.ts').DiffSectionContentRequest} DiffSectionContentRequest
  * @typedef {import('../../core/types.ts').RepositoryState} RepositoryState
  * @typedef {import('../../core/types.ts').ReviewSource} ReviewSource
@@ -588,129 +607,217 @@ const readBranchImageContent = (host, launchPath, input, requestedPath) =>
 /**
  * Reduce a `branch-working-tree` input (which may or may not already carry a
  * resolved baseRef/headRef) down to the plain branch/branch-diff shape that
- * {@link readBranchState} already understands.
- * @param {string | BranchSource | BranchDiffSource | BranchWorkingTreeSource} input
- * @returns {string | BranchSource | BranchDiffSource}
+ * {@link resolveBranchComparison} already understands.
+ * @param {BranchWorkingTreeSource} input
+ * @returns {BranchSource | BranchDiffSource}
  */
-const toBranchComparisonInput = (input) => {
-  if (typeof input !== 'object' || input.type !== 'branch-working-tree') {
-    return input;
-  }
-
-  return input.baseRef && input.headRef
+const toBranchComparisonInput = (input) =>
+  input.baseRef && input.headRef
     ? { baseRef: input.baseRef, headRef: input.headRef, ref: input.ref, type: 'branch-diff' }
     : { ref: input.ref, type: 'branch' };
-};
 
 /**
- * Merge a resolved branch-diff `ChangedFile` and a working-tree `ChangedFile`
- * for the same path into a single entry whose sections are the concatenation
- * of both (branch commit section(s) first, then staged/unstaged section(s)),
- * with the fingerprint recomputed from the combined sections.
- * @param {ChangedFile | undefined} branchFile
- * @param {ChangedFile | undefined} workingTreeFile
- * @returns {ChangedFile}
+ * Like `git diff <ref>`, a `branch-working-tree` source compares one base
+ * commit directly with the working tree. The base is the merge-base of `ref`
+ * and `HEAD`, so a diverged branch does not show its own new commits reversed.
+ * @param {RepositoryHost} host
+ * @param {string} launchPath
+ * @param {BranchWorkingTreeSource} input
+ * @returns {Promise<{baseRef: string; repoRoot: string; source: BranchWorkingTreeSource}>}
  */
-const mergeChangedFile = (branchFile, workingTreeFile) => {
-  if (!branchFile) {
-    return /** @type {ChangedFile} */ (workingTreeFile);
-  }
-
-  if (!workingTreeFile) {
-    return branchFile;
-  }
-
-  const sections = [...branchFile.sections, ...workingTreeFile.sections];
-  const fingerprint = getFingerprint(
-    `${workingTreeFile.status}\n${workingTreeFile.oldPath || branchFile.oldPath || ''}\n${sections
-      .map(
-        (section) =>
-          `${section.loadState || 'ready'}\n${section.binary ? 'binary' : 'text'}\n${
-            section.patch
-          }\n${section.summary?.reason || ''}\n${section.summary?.fingerprint || ''}\n${
-            section.oldFile?.contents || ''
-          }\n${section.newFile?.contents || ''}`,
-      )
-      .join('\n')}`,
-  );
-
+const resolveBranchWorkingTree = async (host, launchPath, input) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const { source } = await resolveBranchComparison(host, repoRoot, toBranchComparisonInput(input));
   return {
-    fingerprint,
-    oldPath: workingTreeFile.oldPath || branchFile.oldPath,
-    path: workingTreeFile.path,
-    sections,
-    // The working-tree status reflects the most current state of the file
-    // (e.g. a branch-added file that was subsequently deleted locally).
-    status: workingTreeFile.status,
-  };
-};
-
-/**
- * Merge a resolved branch-diff `RepositoryState` and a working-tree
- * `RepositoryState` into a combined `branch-working-tree` state: file lists
- * are unioned by path, and files present in both have their sections
- * concatenated (branch commit section(s) followed by staged/unstaged
- * section(s)).
- * @param {RepositoryState} branchState
- * @param {RepositoryState} workingTreeState
- * @returns {RepositoryState}
- */
-const mergeBranchAndWorkingTreeState = (branchState, workingTreeState) => {
-  const branchSource = /** @type {BranchDiffSource} */ (branchState.source);
-  const branchFilesByPath = new Map(branchState.files.map((file) => [file.path, file]));
-  const workingTreeFilesByPath = new Map(workingTreeState.files.map((file) => [file.path, file]));
-  const paths = [...new Set([...branchFilesByPath.keys(), ...workingTreeFilesByPath.keys()])];
-
-  const files = paths
-    .map((path) => mergeChangedFile(branchFilesByPath.get(path), workingTreeFilesByPath.get(path)))
-    .sort(fileSort);
-
-  return {
-    ...branchState,
-    files,
-    generatedAt: Date.now(),
+    baseRef: source.baseRef,
+    repoRoot,
     source: {
-      baseRef: branchSource.baseRef,
-      headRef: branchSource.headRef,
-      ref: branchSource.ref,
+      baseRef: source.baseRef,
+      headRef: source.headRef,
+      ref: input.ref,
       type: 'branch-working-tree',
     },
   };
 };
 
+/** @param {RepositoryHost} host @param {string} repoRoot @param {string} baseRef */
+const readBranchWorkingTreeTrackedStatus = async (host, repoRoot, baseRef) =>
+  parseCommitNameStatus(
+    await git(host, repoRoot, ['diff', '--name-status', '-r', '-z', '-M', baseRef, '--']),
+  );
+
+/**
+ * @param {RepositoryHost} host
+ * @param {string} repoRoot
+ * @param {string} baseRef
+ * @param {Pick<StatusItem, 'oldPath' | 'path'>} item
+ * @param {{showWhitespace?: boolean}} [options]
+ */
+const readBranchWorkingTreePatch = async (host, repoRoot, baseRef, item, options = {}) => {
+  const patch = await git(host, repoRoot, [
+    'diff',
+    '--patch',
+    '--no-ext-diff',
+    '-M',
+    ...getWhitespaceDiffArgs(options),
+    baseRef,
+    '--',
+    ...(item.oldPath ? [item.oldPath] : []),
+    item.path,
+  ]);
+  return { binary: /Binary files .* differ/.test(patch), patch };
+};
+
+/**
+ * A single section from `baseRef` to the file on disk. It uses the `unstaged`
+ * kind because its new side is the working-tree file, which is what editing
+ * and definition search key off.
+ * @param {RepositoryHost} host
+ * @param {string} repoRoot
+ * @param {string} baseRef
+ * @param {Pick<StatusItem, 'oldPath' | 'path' | 'status'>} item
+ * @param {{force?: boolean; patch?: {binary: boolean; patch: string}; patchOnly?: boolean; showWhitespace?: boolean}} [options]
+ * @returns {Promise<DiffSection>}
+ */
+const createBranchWorkingTreeSection = async (host, repoRoot, baseRef, item, options = {}) => {
+  const id = `${item.path}:unstaged`;
+  /** @type {DiffSection['kind']} */
+  const kind = 'unstaged';
+
+  if (options.patchOnly) {
+    const patch =
+      options.patch ?? (await readBranchWorkingTreePatch(host, repoRoot, baseRef, item, options));
+    return patch.binary
+      ? {
+          binary: true,
+          id,
+          kind,
+          loadState: 'binary',
+          patch: '',
+          summary: createSummary('Binary file changed.', { canLoad: false }),
+        }
+      : { binary: false, id, kind, loadState: 'ready', patch: patch.patch };
+  }
+
+  const [oldFile, newFile] = await Promise.all([
+    item.status === 'added'
+      ? createEmptyFileContent(item.path)
+      : readGitFile(host, repoRoot, baseRef, item.oldPath || item.path, options),
+    item.status === 'deleted'
+      ? createEmptyFileContent(item.path)
+      : readWorkingTreeFile(host, repoRoot, item.path, options),
+  ]);
+  const summary = summarizeContent(oldFile, newFile);
+  if (summary.loadState !== 'ready') {
+    return {
+      binary: summary.binary,
+      id,
+      kind,
+      loadState: summary.loadState,
+      patch: '',
+      summary: summary.summary,
+    };
+  }
+
+  const patch = await readBranchWorkingTreePatch(host, repoRoot, baseRef, item, options);
+  return {
+    binary: patch.binary,
+    id,
+    kind,
+    loadState: 'ready',
+    newFile: newFile.file,
+    oldFile: oldFile.file,
+    patch: patch.patch,
+  };
+};
+
+/**
+ * @param {string} baseRef
+ * @param {Pick<StatusItem, 'oldPath' | 'path' | 'status'>} item
+ * @param {DiffSection} section
+ * @returns {ChangedFile}
+ */
+const createBranchWorkingTreeFile = (baseRef, item, section) => ({
+  fingerprint: getFingerprint(
+    `${baseRef}\n${item.status}\n${item.oldPath || ''}\n${section.loadState || 'ready'}\n${
+      section.binary ? 'binary' : 'text'
+    }\n${section.patch}\n${section.summary?.reason || ''}\n${section.summary?.fingerprint || ''}\n${
+      section.oldFile?.contents || ''
+    }\n${section.newFile?.contents || ''}`,
+  ),
+  oldPath: item.oldPath,
+  path: item.path,
+  sections: [section],
+  status: item.status,
+});
+
 /**
  * @param {RepositoryHost} host
  * @param {string} launchPath
- * @param {string | BranchSource | BranchDiffSource | BranchWorkingTreeSource} input
+ * @param {BranchWorkingTreeSource} input
  * @param {{showWhitespace?: boolean}} [options]
  * @returns {Promise<RepositoryState>}
  */
 const readBranchWorkingTreeState = async (host, launchPath, input, options = {}) => {
-  const [branchState, workingTreeState] = await Promise.all([
-    readBranchState(host, launchPath, toBranchComparisonInput(input)),
-    readWorkingTreeState(host, launchPath, {
-      eagerContents: false,
-      showWhitespace: options.showWhitespace,
-    }),
+  const { baseRef, repoRoot, source } = await resolveBranchWorkingTree(host, launchPath, input);
+  const [tracked, untrackedItems, rawPatch] = await Promise.all([
+    readBranchWorkingTreeTrackedStatus(host, repoRoot, baseRef),
+    listUntrackedItems(host, repoRoot),
+    git(host, repoRoot, [
+      'diff',
+      '--patch',
+      '--no-ext-diff',
+      '-M',
+      ...getWhitespaceDiffArgs(options),
+      baseRef,
+      '--',
+    ]),
   ]);
-  return mergeBranchAndWorkingTreeState(branchState, workingTreeState);
-};
+  const trackedPaths = new Set(tracked.map((item) => item.path));
+  const untracked = untrackedItems.filter((item) => !trackedPaths.has(item.path));
+  const patches = splitPatchByPath(rawPatch);
+  const prefetchedFiles = await prefetchWorkingTreeFiles(
+    host,
+    repoRoot,
+    untracked.filter((item) => !item.directory && !item.summary).map((item) => item.path),
+  );
+  /** @type {Array<ChangedFile>} */
+  const files = [];
 
-/**
- * By the time a section/image content request comes in for a
- * `branch-working-tree` source, that source is always the fully resolved
- * copy round-tripped from `RepositoryState.source` (baseRef/headRef are only
- * absent momentarily, at CLI-argument construction time, before the initial
- * state has been read).
- * @param {BranchWorkingTreeSource} source
- * @returns {BranchDiffSource}
- */
-const toResolvedBranchDiffSource = (source) => {
-  if (!source.baseRef || !source.headRef) {
-    throw new Error('Cannot load branch-working-tree content before the branch diff is resolved.');
+  for (const item of tracked) {
+    files.push(
+      createBranchWorkingTreeFile(
+        baseRef,
+        item,
+        await createBranchWorkingTreeSection(host, repoRoot, baseRef, item, {
+          patch: patches.get(item.path),
+          patchOnly: !shouldEagerlyReadWorkingTreeContents(item.path),
+          showWhitespace: options.showWhitespace,
+        }),
+      ),
+    );
   }
 
-  return { baseRef: source.baseRef, headRef: source.headRef, ref: source.ref, type: 'branch-diff' };
+  for (const item of untracked) {
+    files.push(
+      createBranchWorkingTreeFile(
+        baseRef,
+        item,
+        await createSection(host, repoRoot, item, 'unstaged', {
+          prefetched: prefetchedFiles.get(item.path),
+          showWhitespace: options.showWhitespace,
+        }),
+      ),
+    );
+  }
+
+  return {
+    files: files.sort(fileSort),
+    generatedAt: Date.now(),
+    launchPath,
+    root: repoRoot,
+    source,
+  };
 };
 
 /**
@@ -718,13 +825,23 @@ const toResolvedBranchDiffSource = (source) => {
  * @param {string} launchPath
  * @param {DiffSectionContentRequest} request
  */
-const readBranchWorkingTreeSectionContent = (host, launchPath, request) => {
-  const source = /** @type {BranchWorkingTreeSource} */ (request.source);
-  return request.kind === 'staged' || request.kind === 'unstaged'
-    ? readWorkingTreeDiffSectionContent(host, launchPath, request)
-    : readBranchSectionContent(host, launchPath, toResolvedBranchDiffSource(source), request.path, {
+const readBranchWorkingTreeSectionContent = async (host, launchPath, request) => {
+  const { baseRef, repoRoot } = await resolveBranchWorkingTree(
+    host,
+    launchPath,
+    /** @type {BranchWorkingTreeSource} */ (request.source),
+  );
+  const path = validateRepositoryPath(request.path);
+  const item = (await readBranchWorkingTreeTrackedStatus(host, repoRoot, baseRef)).find(
+    (candidate) => candidate.path === path,
+  );
+  // Untracked files are not part of `git diff <base>`; load them like local changes.
+  return item
+    ? createBranchWorkingTreeSection(host, repoRoot, baseRef, item, {
         force: request.force,
-      });
+        showWhitespace: request.showWhitespace,
+      })
+    : readWorkingTreeDiffSectionContent(host, launchPath, { ...request, kind: 'unstaged' });
 };
 
 /**
@@ -733,11 +850,42 @@ const readBranchWorkingTreeSectionContent = (host, launchPath, request) => {
  * @param {DiffImageContentRequest} request
  * @returns {Promise<DiffImageContentResult>}
  */
-const readBranchWorkingTreeImageContent = (host, launchPath, request) => {
-  const source = /** @type {BranchWorkingTreeSource} */ (request.source);
-  return request.kind === 'staged' || request.kind === 'unstaged'
-    ? readWorkingTreeDiffImageContent(host, launchPath, request)
-    : readBranchImageContent(host, launchPath, toResolvedBranchDiffSource(source), request.path);
+const readBranchWorkingTreeImageContent = async (host, launchPath, request) => {
+  try {
+    const { baseRef, repoRoot } = await resolveBranchWorkingTree(
+      host,
+      launchPath,
+      /** @type {BranchWorkingTreeSource} */ (request.source),
+    );
+    const path = validateRepositoryPath(request.path);
+    const item = (await readBranchWorkingTreeTrackedStatus(host, repoRoot, baseRef)).find(
+      (candidate) => candidate.path === path,
+    );
+    const [oldImage, newImage] = await Promise.all([
+      item && item.status !== 'added'
+        ? readGitImageFile(host, repoRoot, baseRef, item.oldPath || item.path)
+        : undefined,
+      item?.status === 'deleted' ? undefined : readWorkingTreeImageFile(host, repoRoot, path),
+    ]);
+
+    if (!oldImage && !newImage) {
+      return {
+        reason: 'Codiff could not load either side of this image.',
+        status: 'unavailable',
+      };
+    }
+
+    return {
+      ...(newImage ? { newImage } : {}),
+      ...(oldImage ? { oldImage } : {}),
+      status: 'ready',
+    };
+  } catch (error) {
+    return {
+      reason: error instanceof Error ? error.message : 'Codiff could not load this image.',
+      status: 'unavailable',
+    };
+  }
 };
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {number} [limit] @param {string} [ref] */

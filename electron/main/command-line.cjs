@@ -66,15 +66,11 @@ const isBranchRef = (repositoryPath, ref) =>
 const isCommitRef = (repositoryPath, ref) =>
   gitSucceeds(repositoryPath, ['rev-parse', '--verify', `${ref}^{commit}`]);
 
+// Like `git diff <ref>`, a positional branch or commit is compared against the
+// working tree. `--commit <ref>` reviews a single commit instead.
 /** @param {string} repositoryPath @param {string} ref */
-const resolveSourceCandidate = (repositoryPath, ref) =>
-  isCommitRefArgument(ref) && isCommitRef(repositoryPath, ref)
-    ? { commitRef: ref }
-    : isBranchRef(repositoryPath, ref)
-      ? { branchRef: ref }
-      : isCommitRef(repositoryPath, ref) || isCommitRefArgument(ref)
-        ? { commitRef: ref }
-        : null;
+const isSourceRef = (repositoryPath, ref) =>
+  isCommitRefArgument(ref) || isBranchRef(repositoryPath, ref) || isCommitRef(repositoryPath, ref);
 
 /** @param {string} arg */
 const parsePullRequestNumberArgument = (arg) => {
@@ -156,7 +152,7 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
     strict: false,
   });
 
-  let commitRef = typeof values.commit === 'string' ? values.commit : null;
+  const commitRef = typeof values.commit === 'string' ? values.commit : null;
   let branchRef = typeof values.branch === 'string' ? values.branch : null;
   let pullRequestNumber = null;
   let pullRequestProvider = null;
@@ -238,14 +234,8 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
   }
 
   if (!remoteTarget && !range && !commitRef && !branchRef && sourceCandidate) {
-    const source = resolveSourceCandidate(
-      resolve(repositoryPath || process.cwd()),
-      sourceCandidate,
-    );
-    if (source?.branchRef) {
-      branchRef = source.branchRef;
-    } else if (source?.commitRef) {
-      commitRef = source.commitRef;
+    if (isSourceRef(resolve(repositoryPath || process.cwd()), sourceCandidate)) {
+      branchRef = sourceCandidate;
     } else if (repositoryPath == null && existsSync(resolve(sourceCandidate))) {
       repositoryPath = sourceCandidate;
     } else if (isGitRepository(resolve(repositoryPath || process.cwd()))) {

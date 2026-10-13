@@ -92,7 +92,7 @@ test('classifies remote refs against the remote repository', async () => {
   });
   expect(await resolveRemoteSource(host, '/remote/repo', { candidate: 'HEAD' })).toEqual({
     ref: 'HEAD',
-    type: 'commit',
+    type: 'branch-working-tree',
   });
   expect(
     await resolveRemoteSource(host, '/remote/repo', {

@@ -156,13 +156,13 @@ test('parses plan handoff command-line options', () => {
   });
 });
 
-test('parses positional HEAD revisions as commit sources', () => {
+test('parses positional HEAD revisions as working-tree comparisons', () => {
   expect(readCommandLine(['codiff', 'HEAD'])).toEqual({
     launchOptions: {
       repositoryPathProvided: false,
       source: {
         ref: 'HEAD',
-        type: 'commit',
+        type: 'branch-working-tree',
       },
       walkthrough: false,
     },
@@ -175,7 +175,7 @@ test('parses positional HEAD revisions as commit sources', () => {
       repositoryPathProvided: true,
       source: {
         ref: 'HEAD^1',
-        type: 'commit',
+        type: 'branch-working-tree',
       },
       walkthrough: false,
     },
@@ -251,7 +251,7 @@ test('parses missing plain refs in Git repositories as branch sources', async ()
   });
 });
 
-test('parses hex-like refs as commits before branches', async () => {
+test('parses hex-like refs as working-tree comparisons unless --commit is given', async () => {
   await using directory = await createTemporaryDirectory('codiff-hex-ref-');
   await git(directory.path, ['init']);
   await git(directory.path, ['commit', '--allow-empty', '-m', 'initial commit']);
@@ -263,6 +263,11 @@ test('parses hex-like refs as commits before branches', async () => {
   await using _cwd = createTemporaryWorkingDirectory(directory.path);
 
   expect(readCommandLine(['codiff', shortHash]).launchOptions.source).toEqual({
+    ref: shortHash,
+    type: 'branch-working-tree',
+  });
+
+  expect(readCommandLine(['codiff', '--commit', shortHash]).launchOptions.source).toEqual({
     ref: shortHash,
     type: 'commit',
   });

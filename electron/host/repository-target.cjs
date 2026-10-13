@@ -137,18 +137,13 @@ const resolveRemoteSource = async (host, repositoryPath, { candidate, range }) =
   if (!candidate) {
     return undefined;
   }
-  const revision = /^(?:[0-9a-f]{4,64}|HEAD|@)(?:$|[~^@])|[~^]|@\{/i.test(candidate);
-  if (revision && (await commit(candidate))) {
-    return { ref: candidate, type: 'commit' };
-  }
+  // Like `git diff <ref>`, a branch or commit is compared against the working tree.
   if (
     (await succeeds(['show-ref', '--verify', '--quiet', `refs/heads/${candidate}`])) ||
-    (await succeeds(['show-ref', '--verify', '--quiet', `refs/remotes/${candidate}`]))
+    (await succeeds(['show-ref', '--verify', '--quiet', `refs/remotes/${candidate}`])) ||
+    (await commit(candidate))
   ) {
     return { ref: candidate, type: 'branch-working-tree' };
-  }
-  if (await commit(candidate)) {
-    return { ref: candidate, type: 'commit' };
   }
   throw new Error(`Unknown remote revision: ${candidate}`);
 };
