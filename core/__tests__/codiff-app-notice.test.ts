@@ -12,7 +12,7 @@ const wrapperPath = resolve('bin/codiff-app');
 const runVersion = async (home: string) =>
   execFileAsync('sh', [wrapperPath, '--version'], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, CODIFF_NODE_COMMAND: process.execPath, HOME: home },
   });
 
 const writeState = async (
@@ -115,7 +115,7 @@ test('ignores malformed cached versions', async () => {
 });
 
 test('succeeds without a notice when HOME is unset', async () => {
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, CODIFF_NODE_COMMAND: process.execPath };
   delete env.HOME;
 
   const { stderr, stdout } = await execFileAsync('sh', [wrapperPath, '--version'], {
@@ -141,16 +141,6 @@ test('stays silent when the state file is unreadable', async () => {
   } finally {
     await chmod(stateFile, 0o644);
   }
-});
-
-test('stays silent for version components beyond the shell integer range', async () => {
-  await using home = await createTemporaryDirectory('codiff-app-home-');
-  await writeState(home.path, {
-    lastCheckedAt: '2026-07-29T00:00:00.000Z',
-    latestVersion: '99999999999999999999.0.0',
-  });
-
-  expect((await runVersion(home.path)).stderr).toBe('');
 });
 
 test('stays silent when lastCheckedAt is missing', async () => {

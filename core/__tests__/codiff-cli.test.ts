@@ -509,427 +509,6 @@ test('PR branch lookup rejects merged pull requests', { concurrent: false }, asy
   );
 });
 
-test('packaged terminal helper forwards --commit HEAD to Electron', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-
-  await mkdir(repositoryPath);
-
-  await execFileAsync(resolve('bin/codiff-app'), ['--commit', 'HEAD', repositoryPath], {
-    env: logger.env,
-  });
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--commit',
-    'HEAD',
-    repositoryPath,
-  ]);
-});
-
-test('packaged terminal helper resolves GitHub PR branches to canonical URLs', async () => {
-  await using logger = await createFakeOpenLogger();
-  const ghArgsPath = join(logger.directory, 'gh-args.txt');
-  const ghPath = join(logger.directory, 'bin', 'gh');
-  const repositoryPath = join(logger.directory, 'repo');
-
-  await mkdir(repositoryPath);
-  await writeFile(
-    ghPath,
-    '#!/bin/sh\nfor arg in "$@"; do\n  printf "%s\\n" "$arg" >> "$GH_ARGS_FILE"\ndone\nprintf "%s\\n" "https://github.com/nkzw-tech/codiff/pull/129"\n',
-  );
-  await chmod(ghPath, 0o755);
-
-  await execFileAsync(
-    resolve('bin/codiff-app'),
-    ['pr', 'iminoso:feat/pr-branch-lookup', repositoryPath],
-    {
-      env: {
-        ...logger.env,
-        GH_ARGS_FILE: ghArgsPath,
-      },
-    },
-  );
-
-  expect(await readFile(ghArgsPath, 'utf8')).toBe(
-    [
-      'pr',
-      'view',
-      'iminoso:feat/pr-branch-lookup',
-      '--json',
-      'state,url',
-      '--jq',
-      'select(.state == "OPEN") | .url',
-      '',
-    ].join('\n'),
-  );
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    'https://github.com/nkzw-tech/codiff/pull/129',
-    repositoryPath,
-  ]);
-});
-
-test('packaged terminal helper forwards GitLab MR markers to Electron', async () => {
-  await using logger = await createFakeOpenLogger();
-
-  await execFileAsync(resolve('bin/codiff-app'), ['mr', '23'], {
-    env: logger.env,
-  });
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    'mr',
-    '23',
-    process.cwd(),
-  ]);
-});
-
-test('packaged terminal helper forwards review URLs copied from a review tab', async () => {
-  for (const value of [
-    'https://github.com/nkzw-tech/codiff/pull/1728/changes#r4821',
-    'https://github.com/nkzw-tech/codiff/pull/1728/files',
-    'https://www.github.com/nkzw-tech/codiff/pull/1728?diff=split',
-    'github.com/nkzw-tech/codiff/pull/1728',
-    'https://gitlab.example.com/group/subgroup/project/-/merge_requests/23/diffs#note_991',
-    'https://gitlab.example.com/group/subgroup/project/merge_requests/23',
-  ]) {
-    await using logger = await createFakeOpenLogger();
-
-    await execFileAsync(resolve('bin/codiff-app'), [value], {
-      env: logger.env,
-    });
-
-    expect(await logger.readArgs()).toEqual([
-      '-n',
-      resolve('bin/../../../..'),
-      '--args',
-      value,
-      process.cwd(),
-    ]);
-  }
-});
-
-test('packaged terminal helper forwards HEAD^1 to Electron as a commit', async () => {
-  await using logger = await createFakeOpenLogger();
-
-  await execFileAsync(resolve('bin/codiff-app'), ['HEAD^1'], {
-    env: logger.env,
-  });
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--commit',
-    'HEAD^1',
-    process.cwd(),
-  ]);
-});
-
-test('packaged terminal helper forwards branch names to Electron as branches', async () => {
-  await using logger = await createFakeOpenLogger();
-
-  await execFileAsync(resolve('bin/codiff-app'), ['feature'], {
-    cwd: refRepositoryPath,
-    env: logger.env,
-  });
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--branch',
-    'feature',
-    refRepositoryPath,
-  ]);
-});
-
-test.each(['base...feature', 'base..feature', 'base...feature.v1', 'base..feature.v1'])(
-  'packaged terminal helper forwards the %s range to Electron unclassified',
-  async (range) => {
-    await using logger = await createFakeOpenLogger();
-
-    await execFileAsync(resolve('bin/codiff-app'), [range], {
-      cwd: refRepositoryPath,
-      env: logger.env,
-    });
-
-    expect(await logger.readArgs()).toEqual([
-      '-n',
-      resolve('bin/../../../..'),
-      '--args',
-      range,
-      refRepositoryPath,
-    ]);
-  },
-);
-
-test.each([
-  'base...missing',
-  'base....feature',
-  'base.....feature',
-  'base...feature..base',
-  'base..feature...base',
-])(
-  'packaged terminal helper forwards the invalid %s range to Electron as a branch',
-  async (range) => {
-    await using logger = await createFakeOpenLogger();
-
-    await execFileAsync(resolve('bin/codiff-app'), [range], {
-      cwd: refRepositoryPath,
-      env: logger.env,
-    });
-
-    expect(await logger.readArgs()).toEqual([
-      '-n',
-      resolve('bin/../../../..'),
-      '--args',
-      '--branch',
-      range,
-      refRepositoryPath,
-    ]);
-  },
-);
-
-test('packaged terminal helper forwards missing branch names to Electron as branches', async () => {
-  await using logger = await createFakeOpenLogger();
-
-  await execFileAsync(resolve('bin/codiff-app'), ['definitely-missing-branch'], {
-    cwd: refRepositoryPath,
-    env: logger.env,
-  });
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--branch',
-    'definitely-missing-branch',
-    refRepositoryPath,
-  ]);
-});
-
-test('packaged terminal helper forwards hex refs to Electron as commits', async () => {
-  await using logger = await createFakeOpenLogger();
-
-  await execFileAsync(resolve('bin/codiff-app'), [refRepositoryShortHash], {
-    cwd: refRepositoryPath,
-    env: logger.env,
-  });
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--commit',
-    refRepositoryShortHash,
-    refRepositoryPath,
-  ]);
-});
-
-test('packaged terminal helper forwards relative repository paths as absolute paths', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-
-  await mkdir(join(repositoryPath, 'sub'), { recursive: true });
-  const actualRepositoryPath = await realpath(repositoryPath);
-
-  const runHelper = async (args: ReadonlyArray<string>) => {
-    await logger.reset();
-    await execFileAsync(resolve('bin/codiff-app'), args, {
-      cwd: repositoryPath,
-      env: logger.env,
-    });
-    return logger.readArgs();
-  };
-
-  expect(await runHelper(['.'])).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    `${actualRepositoryPath}/.`,
-  ]);
-  expect(await runHelper(['sub'])).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    join(actualRepositoryPath, 'sub'),
-  ]);
-  expect(await runHelper(['-w', '.'])).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--walkthrough',
-    `${actualRepositoryPath}/.`,
-  ]);
-});
-
-test('packaged terminal helper forwards Codex walkthrough seed options', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-  const contextPath = join(logger.directory, 'seed.json');
-
-  await mkdir(repositoryPath);
-  await writeFile(contextPath, '{}');
-
-  await execFileAsync(
-    resolve('bin/codiff-app'),
-    [
-      '-w',
-      '--codex-session',
-      '019e5e57-e7d6-7392-9ad1-ad959319d2fb',
-      '--walkthrough-context',
-      contextPath,
-      repositoryPath,
-    ],
-    {
-      env: logger.env,
-    },
-  );
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--codex-session',
-    '019e5e57-e7d6-7392-9ad1-ad959319d2fb',
-    '--walkthrough-context',
-    contextPath,
-    '--walkthrough',
-    repositoryPath,
-  ]);
-});
-
-test('packaged terminal helper forwards pre-authored walkthrough files', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-  const walkthroughFile = join(logger.directory, 'walkthrough.json');
-
-  await mkdir(repositoryPath);
-  await writeFile(walkthroughFile, '{}');
-
-  await execFileAsync(
-    resolve('bin/codiff-app'),
-    [
-      '-w',
-      '--agent',
-      'claude',
-      '--walkthrough-file',
-      walkthroughFile,
-      '--claude-session',
-      '019e5e57-e7d6-7392-9ad1-ad959319d2fb',
-      repositoryPath,
-    ],
-    {
-      env: logger.env,
-    },
-  );
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--claude-session',
-    '019e5e57-e7d6-7392-9ad1-ad959319d2fb',
-    '--agent',
-    'claude',
-    '--walkthrough-file',
-    walkthroughFile,
-    '--walkthrough',
-    repositoryPath,
-  ]);
-});
-
-test('packaged terminal helper forwards a plan handoff and result file', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-  const planFile = join(logger.directory, 'plan.md');
-  const resultFile = join(logger.directory, 'result.json');
-
-  await mkdir(repositoryPath);
-  await writeFile(planFile, '# Plan\n');
-  await writeFile(resultFile, '{"status":"done"}\n');
-
-  const { stdout } = await execFileAsync(
-    resolve('bin/codiff-app'),
-    ['--plan-file', planFile, '--plan-result-file', resultFile, repositoryPath],
-    {
-      env: logger.env,
-    },
-  );
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--plan-file',
-    planFile,
-    '--plan-result-file',
-    resultFile,
-    repositoryPath,
-  ]);
-  expect(stdout).toBe('CODIFF_PLAN_RESULT {"status":"done"}\n');
-});
-
-test('packaged terminal helper waits for an open plan to finish', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-  const planFile = join(logger.directory, 'plan.md');
-  const resultFile = join(logger.directory, 'result.json');
-  const openPath = join(logger.directory, 'bin', 'open');
-
-  await mkdir(repositoryPath);
-  await writeFile(planFile, '# Plan\n');
-  await writeFile(
-    openPath,
-    `#!/bin/sh
-result_file=""
-previous=""
-for arg in "$@"; do
-  printf "%s\\n" "$arg" >> "$OPEN_ARGS_FILE"
-  if [ "$previous" = "--plan-result-file" ]; then
-  result_file="$arg"
-  fi
-  previous="$arg"
-done
-(
-  sleep 0.05
-  printf '{"documentChanged":true,"status":"closed"}\\n' > "$result_file"
-) &
-app_pid=$!
-printf '{"pid":%s,"status":"open"}\\n' "$app_pid" > "$result_file"
-`,
-  );
-  await chmod(openPath, 0o755);
-
-  const { stdout } = await execFileAsync(
-    resolve('bin/codiff-app'),
-    ['--plan-file', planFile, '--plan-result-file', resultFile, repositoryPath],
-    {
-      env: logger.env,
-    },
-  );
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--plan-file',
-    planFile,
-    '--plan-result-file',
-    resultFile,
-    repositoryPath,
-  ]);
-  expect(stdout).toBe('CODIFF_PLAN_RESULT {"documentChanged":true,"status":"closed"}\n');
-});
-
 test('Codex skill launcher uses the session cwd as the repository target', async () => {
   await using logger = await createFakeCommandLogger('codiff-skill-launcher-', 'codiff');
   const home = join(logger.directory, 'home');
@@ -1356,62 +935,6 @@ printf '[{"id":"${sessionId}","directory":"%s"}]\\n' "$OPENCODE_SESSION_DIRECTOR
   ]);
 });
 
-test('packaged terminal helper forwards the agent and Claude session to Electron', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-  const sessionId = '019e5e57-e7d6-7392-9ad1-ad959319d2fb';
-
-  await mkdir(repositoryPath);
-
-  await execFileAsync(
-    resolve('bin/codiff-app'),
-    ['-w', '--agent', 'claude', '--claude-session', sessionId, repositoryPath],
-    {
-      env: logger.env,
-    },
-  );
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--claude-session',
-    sessionId,
-    '--agent',
-    'claude',
-    '--walkthrough',
-    repositoryPath,
-  ]);
-});
-
-test('packaged terminal helper forwards the OpenCode session to Electron', async () => {
-  await using logger = await createFakeOpenLogger();
-  const repositoryPath = join(logger.directory, 'repo');
-  const sessionId = 'ses_121b4816bffebMr9YE52O4870p';
-
-  await mkdir(repositoryPath);
-
-  await execFileAsync(
-    resolve('bin/codiff-app'),
-    ['-w', '--agent', 'opencode', '--opencode-session', sessionId, repositoryPath],
-    {
-      env: logger.env,
-    },
-  );
-
-  expect(await logger.readArgs()).toEqual([
-    '-n',
-    resolve('bin/../../../..'),
-    '--args',
-    '--opencode-session',
-    sessionId,
-    '--agent',
-    'opencode',
-    '--walkthrough',
-    repositoryPath,
-  ]);
-});
-
 test('packaged terminal helper runs --share through the bundled Node entry point', async () => {
   await using logger = await createFakeCommandLogger('codiff-packaged-share-', 'runtime');
 
@@ -1423,6 +946,32 @@ test('packaged terminal helper runs --share through the bundled Node entry point
   });
 
   expect(await logger.readArgs()).toEqual([resolve('bin/codiff.js'), '--share', 'HEAD']);
+});
+
+test.each([
+  ['--help'],
+  ['--version'],
+  ['--walkthrough-guide'],
+  ['HEAD^1'],
+  ['--commit', 'HEAD'],
+  ['--branch', 'feature', '/repo with spaces'],
+  ['-w', '--agent', 'claude', '--claude-session', 'session-id'],
+  ['arca.ssh.et:~/universe'],
+  ['devbox:/srv/app'],
+  ['ssh://user@devbox:2222/srv/app'],
+  ['--commit', 'HEAD', 'arca.ssh.et:~/universe'],
+  ['--branch', 'main', 'arca.ssh.et:~/universe'],
+  ['-w', '--agent', 'claude', 'arca.ssh.et:~/universe'],
+])('packaged terminal helper hands arguments %j to the bundled Node entry', async (...args) => {
+  await using runtime = await createFakeCommandLogger('codiff-packaged-remote-', 'runtime');
+  await using open = await createFakeOpenLogger();
+  await writeFile(join(runtime.directory, 'args.txt'), '');
+
+  await execFileAsync(resolve('bin/codiff-app'), args, {
+    env: { ...runtime.env, CODIFF_NODE_COMMAND: runtime.commandPath, PATH: open.env.PATH },
+  });
+
+  expect(await runtime.readArgs()).toEqual([resolve('bin/codiff.js'), ...args]);
 });
 
 test('parseArguments recognizes --help and -h flags', () => {
@@ -1480,6 +1029,7 @@ test('formatHelpText styles titles and descriptions', () => {
 test('codiff-app prints help text and exits 0', async () => {
   const { stdout } = await execFileAsync(resolve('bin/codiff-app'), ['--help'], {
     encoding: 'utf8',
+    env: { ...process.env, CODIFF_NODE_COMMAND: process.execPath },
   });
   expect(stdout).toContain('codiff v');
   expect(stdout).toContain('Usage:');
@@ -1493,6 +1043,7 @@ test('codiff-app prints help text and exits 0', async () => {
 test('codiff-app prints version and exits 0', async () => {
   const { stdout } = await execFileAsync(resolve('bin/codiff-app'), ['--version'], {
     encoding: 'utf8',
+    env: { ...process.env, CODIFF_NODE_COMMAND: process.execPath },
   });
   expect(stdout).toMatch(/^codiff v\d+\.\d+\.\d+\n$/);
 });

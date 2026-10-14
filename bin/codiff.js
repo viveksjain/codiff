@@ -388,10 +388,13 @@ const run = async () => {
     process.stderr.write(`${updateNotice}\n`);
   }
 
-  const { default: electron } = await import('electron');
+  const appBundlePath = root.match(/^(.*\.app)\/Contents\/Resources\/app$/)?.[1];
+  const electron = appBundlePath
+    ? join(appBundlePath, 'Contents/MacOS/codiff')
+    : (await import('electron')).default;
 
   const spawnElectron = () =>
-    spawn(electron, [root], {
+    spawn(electron, appBundlePath ? [] : [root], {
       detached: true,
       env: childEnv,
       stdio: 'ignore',

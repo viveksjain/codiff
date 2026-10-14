@@ -100,6 +100,7 @@ test('codiff-app prints the completion script for a supported shell', async () =
 test('codiff-app lists --completions in the help output', async () => {
   const { stdout } = await execFileAsync(resolve('bin/codiff-app'), ['--help'], {
     encoding: 'utf8',
+    env: { ...process.env, CODIFF_NODE_COMMAND: process.execPath },
   });
 
   expect(stdout).toContain('--completions <bash|fish|zsh>');
