@@ -1614,6 +1614,109 @@ test('readWorkingTreeState collapses generated untracked directories', async () 
   });
 });
 
+test('untracked discovery scans the repository once and expands only ordinary new directories', async () => {
+  await withRepo(async (repo) => {
+    await writeRepoFile(repo, 'tracked/keep.txt', 'tracked\n');
+    await writeRepoFile(repo, '.gitignore', '*.ignored\n');
+    await commitAll(repo, 'initial commit');
+    await writeRepoFile(repo, 'tracked/new.txt', 'alongside tracked\n');
+    await writeRepoFile(repo, 'new[1]*/[draft]*/notes.txt', 'new directory\n');
+    await writeRepoFile(repo, 'new[1]*/node_modules/pkg/index.js', 'generated\n');
+    await writeRepoFile(repo, 'node_modules/pkg/index.js', 'generated\n');
+    await writeRepoFile(repo, 'tracked/build/output.js', 'generated\n');
+    await writeRepoFile(repo, 'new[1]*/hidden.ignored', 'ignored\n');
+    await mkdir(join(repo, 'empty'));
+    await git(repo, ['init', 'embedded']);
+    await writeRepoFile(repo, 'embedded/inside.txt', 'belongs to another repository\n');
+    // A file named like a generated directory is still a regular file.
+    await writeRepoFile(repo, 'build', 'ordinary file\n');
+
+    const { calls, host: recordingHost } = createRecordingHost(host);
+    const state = await readWorkingTreeState(recordingHost, repo);
+
+    const rootScans = calls.filter(({ args, method }) => {
+      const commandArgs = args[1] as ReadonlyArray<string> | undefined;
+      return (
+        method === 'exec' &&
+        args[0] === 'git' &&
+        commandArgs?.[1] === repo &&
+        ((commandArgs.includes('ls-files') &&
+          commandArgs.includes('--others') &&
+          !commandArgs.includes('--')) ||
+          commandArgs.includes('--untracked-files=normal'))
+      );
+    });
+    expect(rootScans).toHaveLength(1);
+    expect(state.files.map((file) => [file.path, file.sections[0].loadState])).toEqual([
+      ['new[1]*/[draft]*/notes.txt', 'ready'],
+      ['new[1]*/node_modules', 'directory'],
+      ['tracked/build', 'directory'],
+      ['tracked/new.txt', 'ready'],
+      ['build', 'ready'],
+      ['embedded', 'directory'],
+      ['node_modules', 'directory'],
+    ]);
+    expect(
+      state.files.find((file) => file.path === 'new[1]*/[draft]*/notes.txt')?.sections[0].newFile
+        ?.contents,
+    ).toBe('new directory\n');
+  });
+});
+
+test('untracked discovery batches new directories instead of making requests per directory', async () => {
+  await withRepo(async (repo) => {
+    await writeRepoFile(repo, 'tracked.txt', 'base\n');
+    await commitAll(repo, 'initial commit');
+    const paths = Array.from({ length: 40 }, (_, index) => `new-${index}/file.txt`);
+    await Promise.all(paths.map((path) => writeRepoFile(repo, path, `${path}\n`)));
+    const { calls, host: recordingHost } = createRecordingHost(host);
+    const state = await readWorkingTreeState(recordingHost, repo);
+
+    expect(state.files.map((file) => file.path).sort()).toEqual(paths.sort());
+    expect(
+      state.files.every((file) => file.sections[0].newFile?.contents === `${file.path}\n`),
+    ).toBe(true);
+    const expansions = calls.filter(
+      ({ args, method }) =>
+        method === 'exec' &&
+        args[0] === 'git' &&
+        (args[1] as ReadonlyArray<string>).includes('ls-files'),
+    );
+    expect(expansions.length).toBeLessThanOrEqual(8);
+  });
+});
+
+test('untracked discovery bounds SSH commands for one deeply nested directory with apostrophes', async () => {
+  await withRepo(async (repo) => {
+    const parts = Array.from({ length: 4 }, () => "'".repeat(220));
+    await writeRepoFile(repo, `${parts.slice(0, 3).join('/')}/keep.txt`, 'base\n');
+    await commitAll(repo, 'initial commit');
+    const path = `${parts.join('/')}/new.txt`;
+    await writeRepoFile(repo, path, 'new\n');
+    const { calls, host: recordingHost } = createRecordingHost(host);
+    const state = await readWorkingTreeState(recordingHost, repo);
+    expect(state.files.map((file) => file.path)).toEqual([path]);
+    expect(state.files[0].sections[0].newFile?.contents).toBe('new\n');
+
+    const { buildCommandScript, wrapForLoginShell } =
+      require('../../electron/host/shell-quote.cjs') as {
+        buildCommandScript: (options: { args: ReadonlyArray<string>; command: string }) => string;
+        wrapForLoginShell: (script: string, dialect: 'posix' | 'fish') => string;
+      };
+    for (const { args, method } of calls) {
+      if (method === 'exec' && args[0] === 'git') {
+        const script = buildCommandScript({
+          args: args[1] as ReadonlyArray<string>,
+          command: 'git',
+        });
+        for (const dialect of ['posix', 'fish'] as const) {
+          expect(Buffer.byteLength(wrapForLoginShell(script, dialect))).toBeLessThan(128 * 1024);
+        }
+      }
+    }
+  });
+});
+
 test('readWorkingTreeState marks modified binary files as binary sections', async () => {
   await withRepo(async (repo) => {
     await writeRepoFile(repo, 'raw.bin', Uint8Array.from([0, 1, 2, 3]));

@@ -1,12 +1,13 @@
 // @ts-check
 
 const { readRepositoryChangeSignature } = require('../repository-watcher.cjs');
+const { quoteFish, quotePosix } = require('../host/shell-quote.cjs');
 const {
+  GENERATED_DIRECTORY_NAMES,
   createSection,
   createSummary,
   fileSort,
   generatedDirectoryPathspecExcludes,
-  generatedDirectoryPathspecs,
   getFingerprint,
   getGravatarHash,
   getWhitespaceDiffArgs,
@@ -148,18 +149,123 @@ const readPatchMap = async (host, repoRoot, kind, options = {}) => {
   return splitPatchByPath(await git(host, repoRoot, args));
 };
 
+/** @param {string} path */
+const getGeneratedDirectoryPath = (path) => {
+  const parts = path.split('/');
+  // The last component is either a filename or empty for a directory entry.
+  const index = parts.slice(0, -1).findIndex((part) => GENERATED_DIRECTORY_NAMES.has(part));
+  return index === -1 ? null : parts.slice(0, index + 1).join('/');
+};
+
+/** @param {string} directory */
+const getGeneratedDirectoryPathspecs = (directory) => {
+  const globDirectory = directory.replace(/[\\*?[\]]/g, '\\$&');
+  return [...GENERATED_DIRECTORY_NAMES].map((name) => `:(glob)${globDirectory}**/${name}/`);
+};
+
+/** @param {ReadonlyArray<string>} pathspecs */
+const batchUntrackedPathspecs = (pathspecs) => {
+  /** @type {Array<Array<string>>} */
+  const batches = [];
+  /** @type {Array<string>} */
+  let batch = [];
+  let bytes = 0;
+  for (const pathspec of pathspecs) {
+    // Budget arguments after both layers of SSH shell quoting. Leave room for
+    // the command and fixed pathspecs below Linux's remote argument limit.
+    const quoted = quotePosix(pathspec);
+    const size =
+      Math.max(Buffer.byteLength(quotePosix(quoted)), Buffer.byteLength(quoteFish(quoted))) + 1;
+    if (batch.length > 0 && bytes + size > 32 * 1024) {
+      batches.push(batch);
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(pathspec);
+    bytes += size;
+  }
+  if (batch.length > 0) {
+    batches.push(batch);
+  }
+  return batches;
+};
+
 /** @param {RepositoryHost} host @param {string} repoRoot @returns {Promise<Array<StatusItem>>} */
 const listUntrackedItems = async (host, repoRoot) => {
-  const rawFiles = await git(host, repoRoot, [
-    'ls-files',
-    '--others',
-    '--exclude-standard',
+  // Unlike ls-files, status can use Git's untracked cache. Avoid pathspecs
+  // here so Git can collapse new directories, then expand only ordinary
+  // new subtrees instead of walking the whole checkout twice.
+  const raw = await git(host, repoRoot, [
+    'status',
+    '--porcelain=v1',
+    '--no-ahead-behind',
+    '--untracked-files=normal',
     '-z',
-    '--',
-    '.',
-    ...generatedDirectoryPathspecExcludes,
   ]);
-  const paths = rawFiles.split('\0').filter(Boolean).sort();
+  /** @type {Set<string>} */
+  const files = new Set();
+  /** @type {Set<string>} */
+  const collapsedDirectories = new Set();
+  /** @type {Array<string>} */
+  const directories = [];
+  for (const { path } of parseStatus(raw).filter((item) => item.untracked)) {
+    const generatedDirectory = getGeneratedDirectoryPath(path);
+    if (generatedDirectory) {
+      collapsedDirectories.add(generatedDirectory);
+    } else if (path.endsWith('/')) {
+      directories.push(path);
+    } else {
+      files.add(path);
+    }
+  }
+
+  // Keep the original repository context: -C into a new directory could
+  // enter an embedded repository and return paths from its own index.
+  // Split individual pathspecs, since one long directory produces many of them.
+  const [fileOutputs, directoryOutputs] = await Promise.all([
+    Promise.all(
+      batchUntrackedPathspecs(directories.map((directory) => `:(literal)${directory}`)).map(
+        (batch) =>
+          git(host, repoRoot, [
+            'ls-files',
+            '--others',
+            '--exclude-standard',
+            '-z',
+            '--',
+            ...batch,
+            ...generatedDirectoryPathspecExcludes,
+          ]),
+      ),
+    ),
+    Promise.all(
+      batchUntrackedPathspecs(directories.flatMap(getGeneratedDirectoryPathspecs)).map((batch) =>
+        git(host, repoRoot, [
+          'ls-files',
+          '--others',
+          '--exclude-standard',
+          '--directory',
+          '-z',
+          '--',
+          ...batch,
+        ]),
+      ),
+    ),
+  ]);
+  for (const path of fileOutputs.join('').split('\0').filter(Boolean)) {
+    if (path.endsWith('/')) {
+      collapsedDirectories.add(path.slice(0, -1));
+    } else {
+      files.add(path);
+    }
+  }
+  for (const path of directoryOutputs.join('').split('\0').filter(Boolean)) {
+    const generatedDirectory = getGeneratedDirectoryPath(path);
+    if (generatedDirectory) {
+      collapsedDirectories.add(generatedDirectory);
+    }
+  }
+
+  const paths = [...files].sort();
   /** @type {Array<StatusItem>} */
   const items = paths.slice(0, MAX_UNTRACKED_INITIAL_ITEMS).map((path) => ({
     path,
@@ -186,20 +292,10 @@ const listUntrackedItems = async (host, repoRoot) => {
     });
   }
 
-  const rawDirectories = await git(host, repoRoot, [
-    'ls-files',
-    '--others',
-    '--exclude-standard',
-    '--directory',
-    '-z',
-    '--',
-    ...generatedDirectoryPathspecs,
-  ]);
-
-  for (const path of rawDirectories.split('\0').filter(Boolean)) {
+  for (const path of collapsedDirectories) {
     items.push({
       directory: true,
-      path: path.endsWith('/') ? path.slice(0, -1) : path,
+      path,
       staged: false,
       status: 'untracked',
       unstaged: true,

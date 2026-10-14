@@ -112,11 +112,6 @@ const generatedDirectoryPathspecExcludes = [...GENERATED_DIRECTORY_NAMES].flatMa
   `:(exclude)**/${name}/**`,
 ]);
 
-const generatedDirectoryPathspecs = [...GENERATED_DIRECTORY_NAMES].flatMap((name) => [
-  name,
-  `:(glob)**/${name}/`,
-]);
-
 /** @param {{path: string}} left @param {{path: string}} right */
 const fileSort = (left, right) => {
   const leftParts = left.path.split('/');
@@ -868,6 +863,7 @@ const gitOrEmpty = async (host, repoRoot, args) => {
 
 module.exports = {
   EAGER_TEXT_FILE_LIMIT,
+  GENERATED_DIRECTORY_NAMES,
   IMAGE_FILE_LIMIT,
   MANUAL_TEXT_FILE_LIMIT,
   MAX_UNTRACKED_INITIAL_ITEMS,
@@ -878,7 +874,6 @@ module.exports = {
   fileSort,
   formatBytes,
   generatedDirectoryPathspecExcludes,
-  generatedDirectoryPathspecs,
   getFingerprint,
   getGravatarHash,
   getImageMimeType,
