@@ -51,9 +51,11 @@ export function ReviewSourceLoading() {
 
 export function RepositoryChangeBanner({
   onRefresh,
+  untrackedLoading = false,
   visible,
 }: {
   onRefresh: () => void;
+  untrackedLoading?: boolean;
   visible: boolean;
 }) {
   const [dismissed, setDismissed] = useState(false);
@@ -62,25 +64,47 @@ export function RepositoryChangeBanner({
   if (!visible && dismissed) {
     setDismissed(false);
   }
-  const isVisible = visible && !dismissed;
+  const isVisible = untrackedLoading || (visible && !dismissed);
 
   return (
-    <div aria-live="polite" className={`repository-change-banner${isVisible ? ' visible' : ''}`}>
+    <div
+      aria-live="polite"
+      className={`repository-change-banner${isVisible ? ' visible' : ''}${
+        untrackedLoading ? ' repository-discovery-banner' : ''
+      }`}
+      role={untrackedLoading ? 'status' : undefined}
+    >
       <span className="repository-change-banner-content">
-        <span>Local changes detected,</span>
-        <button className="repository-change-reload" onClick={onRefresh} type="button">
-          refresh to see them.
-        </button>
+        {untrackedLoading ? (
+          <>
+            <CircleNotch
+              aria-hidden
+              className="repository-discovery-spinner"
+              size={15}
+              weight="bold"
+            />
+            <span>Discovering untracked files…</span>
+          </>
+        ) : (
+          <>
+            <span>Local changes detected,</span>
+            <button className="repository-change-reload" onClick={onRefresh} type="button">
+              refresh to see them.
+            </button>
+          </>
+        )}
       </span>
-      <button
-        aria-label="Dismiss update banner"
-        className="repository-change-dismiss"
-        onClick={() => setDismissed(true)}
-        title="Dismiss"
-        type="button"
-      >
-        <X aria-hidden className="diff-search-icon" size={15} weight="bold" />
-      </button>
+      {untrackedLoading ? null : (
+        <button
+          aria-label="Dismiss update banner"
+          className="repository-change-dismiss"
+          onClick={() => setDismissed(true)}
+          title="Dismiss"
+          type="button"
+        >
+          <X aria-hidden className="diff-search-icon" size={15} weight="bold" />
+        </button>
+      )}
     </div>
   );
 }

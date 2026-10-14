@@ -81,6 +81,10 @@ test('tracked diffs stay usable while untracked files and history finish loading
   await using view = await renderReact(<App />);
   await waitFor(() => expect(view.container.textContent).toContain('z-tracked.ts'));
   expect(view.container.textContent).toContain('Discovering untracked files');
+  expect(
+    view.container.querySelector('.repository-discovery-banner[role="status"]'),
+  ).not.toBeNull();
+  expect(view.container.querySelector('.sidebar-discovery-status')).toBeNull();
   const filter = view.container.querySelector<HTMLInputElement>(
     'input[aria-label="Filter changed files"]',
   )!;
@@ -3353,8 +3357,8 @@ test.each(['working-tree', 'branch-working-tree'] as const)(
     )!;
     await setInputValue(filter, 'tracked');
     await act(async () => refresh());
-    expect(view.container.querySelector('.sidebar-discovery-spinner')).not.toBeNull();
-    expect(view.container.querySelector('.sidebar-discovery-status')?.textContent).toContain(
+    expect(view.container.querySelector('.repository-discovery-spinner')).not.toBeNull();
+    expect(view.container.querySelector('.repository-discovery-banner')?.textContent).toContain(
       'Discovering untracked files',
     );
     expect(view.container.textContent).toContain('tracked.ts');
@@ -3362,7 +3366,7 @@ test.each(['working-tree', 'branch-working-tree'] as const)(
     await act(async () => completion.resolve({ ...initial, files: [tracked, untracked] }));
     // History can take longer than discovery; it must not keep the spinner running.
     await waitFor(() =>
-      expect(view.container.querySelector('.sidebar-discovery-status')).toBeNull(),
+      expect(view.container.querySelector('.repository-discovery-banner')).toBeNull(),
     );
     await act(async () => history.resolve({ entries: [], root: '/repo' }));
     expect(filter.value).toBe('tracked');
@@ -3392,10 +3396,10 @@ test('failed untracked discovery during refresh stops the spinner and allows ret
   await using view = await renderReact(<App />);
   await waitFor(() => expect(view.container.textContent).toContain('tracked.ts'));
   await act(async () => refresh());
-  expect(view.container.querySelector('.sidebar-discovery-spinner')).not.toBeNull();
+  expect(view.container.querySelector('.repository-discovery-spinner')).not.toBeNull();
   await act(async () => completion.reject(new Error('Untracked scan failed')));
   await waitFor(() =>
-    expect(view.container.querySelector('.sidebar-discovery-spinner')).toBeNull(),
+    expect(view.container.querySelector('.repository-discovery-spinner')).toBeNull(),
   );
   expect(view.container.querySelector('.sidebar-discovery-status')?.textContent).toContain(
     'Refresh to retry',

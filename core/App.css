@@ -1047,13 +1047,14 @@ a.review-top-bar-source:focus-visible {
 }
 
 .repository-change-banner {
+  --repository-banner-accent: var(--viewed);
   -webkit-app-region: no-drag;
   align-items: center;
-  background: color-mix(in srgb, var(--viewed) 10%, var(--code-bg));
-  border: 1px solid color-mix(in srgb, var(--viewed) 18%, transparent);
+  background: color-mix(in srgb, var(--repository-banner-accent) 10%, var(--code-bg));
+  border: 1px solid color-mix(in srgb, var(--repository-banner-accent) 18%, transparent);
   border-radius: 17px;
-  box-shadow: 0 16px 46px -30px color-mix(in srgb, var(--viewed) 52%, rgb(0 0 0));
-  color: color-mix(in srgb, var(--viewed) 36%, var(--text));
+  box-shadow: 0 16px 46px -30px color-mix(in srgb, var(--repository-banner-accent) 52%, rgb(0 0 0));
+  color: color-mix(in srgb, var(--repository-banner-accent) 36%, var(--text));
   corner-shape: squircle;
   display: inline-flex;
   font-size: 13px;
@@ -1086,6 +1087,38 @@ a.review-top-bar-source:focus-visible {
   align-items: center;
   display: inline-flex;
   gap: 5px;
+}
+
+.repository-change-banner.repository-discovery-banner {
+  --repository-banner-accent: var(--tree-selection-focus);
+  background: color-mix(in srgb, var(--repository-banner-accent) 20%, var(--code-bg));
+  border-color: color-mix(in srgb, var(--repository-banner-accent) 45%, transparent);
+  padding-right: 13px;
+}
+
+.repository-discovery-banner .repository-change-banner-content {
+  gap: 8px;
+}
+
+.repository-discovery-spinner {
+  animation: repository-discovery-spin 900ms linear infinite;
+  flex: none;
+}
+
+@keyframes repository-discovery-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .repository-discovery-banner {
+    transition: none;
+  }
+
+  .repository-discovery-spinner {
+    animation: none;
+  }
 }
 
 .repository-change-banner button {
@@ -1401,23 +1434,6 @@ html[data-codiff-platform='darwin'] .sidebar {
   font: 500 11px/1.4 var(--font-sans);
   gap: 6px;
   padding: 0 8px 8px;
-}
-
-.sidebar-discovery-spinner {
-  animation: sidebar-discovery-spin 900ms linear infinite;
-  flex: none;
-}
-
-@keyframes sidebar-discovery-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .sidebar-discovery-spinner {
-    animation: none;
-  }
 }
 
 .sidebar-total-summary {

@@ -1,4 +1,3 @@
-import { CircleNotchIcon as CircleNotch } from '@phosphor-icons/react/CircleNotch';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { matchesShortcut } from '../../config/keymap.ts';
 import type { CodiffKeymap } from '../../config/types.ts';
@@ -51,7 +50,6 @@ export function Sidebar({
   shareWalkthroughDisabled,
   showWhitespace,
   untrackedError,
-  untrackedLoading,
   viewed,
   walkthroughError,
   walkthroughLoading,
@@ -83,7 +81,6 @@ export function Sidebar({
   shareWalkthroughDisabled?: boolean;
   showWhitespace: boolean;
   untrackedError?: string;
-  untrackedLoading?: boolean;
   viewed: Record<string, string>;
   walkthroughError: WalkthroughError | null;
   walkthroughLoading: boolean;
@@ -134,23 +131,9 @@ export function Sidebar({
           value={searchQuery}
         />
       </div>
-      {untrackedLoading || untrackedError ? (
-        <div
-          className="sidebar-discovery-status"
-          role={untrackedError ? 'alert' : 'status'}
-          title={untrackedError}
-        >
-          {untrackedLoading && !untrackedError ? (
-            <CircleNotch
-              aria-hidden
-              className="sidebar-discovery-spinner"
-              size={14}
-              weight="bold"
-            />
-          ) : null}
-          {untrackedError
-            ? 'Could not discover untracked files. Refresh to retry.'
-            : 'Discovering untracked files…'}
+      {untrackedError ? (
+        <div className="sidebar-discovery-status" role="alert" title={untrackedError}>
+          Could not discover untracked files. Refresh to retry.
         </div>
       ) : null}
       {mode === 'history' ? (

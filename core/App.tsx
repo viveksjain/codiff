@@ -2168,6 +2168,7 @@ export default function App() {
       {connectionBanner}
       <RepositoryChangeBanner
         onRefresh={refreshRepository}
+        untrackedLoading={state.untrackedLoading}
         visible={
           !disconnected &&
           localChangesDetected &&
@@ -2249,7 +2250,6 @@ export default function App() {
           shareWalkthroughDisabled={walkthroughSharing}
           showWhitespace={showWhitespace}
           untrackedError={state.untrackedError}
-          untrackedLoading={state.untrackedLoading}
           viewed={viewed}
           walkthroughError={walkthroughError}
           walkthroughLoading={walkthroughLoading}
