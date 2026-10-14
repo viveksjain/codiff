@@ -1394,10 +1394,30 @@ html[data-codiff-platform='darwin'] .sidebar {
 }
 
 .sidebar-discovery-status {
+  align-items: center;
   color: var(--muted);
+  display: flex;
   flex: none;
   font: 500 11px/1.4 var(--font-sans);
+  gap: 6px;
   padding: 0 8px 8px;
+}
+
+.sidebar-discovery-spinner {
+  animation: sidebar-discovery-spin 900ms linear infinite;
+  flex: none;
+}
+
+@keyframes sidebar-discovery-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-discovery-spinner {
+    animation: none;
+  }
 }
 
 .sidebar-total-summary {

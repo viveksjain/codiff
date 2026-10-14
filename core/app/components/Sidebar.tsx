@@ -1,3 +1,4 @@
+import { CircleNotchIcon as CircleNotch } from '@phosphor-icons/react/CircleNotch';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { matchesShortcut } from '../../config/keymap.ts';
 import type { CodiffKeymap } from '../../config/types.ts';
@@ -139,6 +140,14 @@ export function Sidebar({
           role={untrackedError ? 'alert' : 'status'}
           title={untrackedError}
         >
+          {untrackedLoading && !untrackedError ? (
+            <CircleNotch
+              aria-hidden
+              className="sidebar-discovery-spinner"
+              size={14}
+              weight="bold"
+            />
+          ) : null}
           {untrackedError
             ? 'Could not discover untracked files. Refresh to retry.'
             : 'Discovering untracked files…'}
