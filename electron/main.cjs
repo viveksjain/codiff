@@ -34,6 +34,7 @@ const { normalizeClaudeModel } = require('./claude.cjs');
 const { normalizeOpenCodeModel, renderOpenCodeCommand } = require('./opencode.cjs');
 const { createWalkthroughCommit } = require('./walkthrough-commit.cjs');
 const { registerHostShutdown } = require('./main/host-shutdown.cjs');
+const { createRepositoryStateLoad } = require('./main/repository-state-load.cjs');
 const { readKeyboardLayout, watchKeyboardLayout } = require('./keyboard-layout.cjs');
 const { diagnoseWalkthroughMismatch } = require('./walkthrough-diagnosis.cjs');
 const { readCommitMessageReply } = require('./walkthrough-commit-message.cjs');
@@ -137,6 +138,7 @@ const { createWalkthroughProgressReporter } = require('./walkthrough-progress.cj
  * @typedef {import('../core/types.ts').CodiffLaunchOptions} CodiffLaunchOptions
  * @typedef {import('../core/types.ts').CodiffTheme} CodiffTheme
  * @typedef {import('../core/types.ts').ReviewSource} ReviewSource
+ * @typedef {import('../core/types.ts').RepositoryState} RepositoryState
  * @typedef {{key: string; repositoryRoot: string; sourceKey: string}} WindowIdentity
  * @typedef {{direction: string; name: string; owner: string; repo: string}} GitHubRemote
  * @typedef {{repositoryPath?: string; launchOptions?: CodiffLaunchOptions}} SingleInstanceAdditionalData
@@ -156,8 +158,10 @@ const hostRegistry = createHostRegistry({ localHost });
 const windowRemoteLeases = new Map();
 /** @type {Map<number, CodiffLaunchOptions>} */
 const windowLaunchOptions = new Map();
-/** @type {Map<number, Promise<RepositoryState>>} */
+/** @type {Map<number, ReturnType<typeof createRepositoryStateLoad>>} */
 const windowInitialRepositoryStates = new Map();
+/** @type {Map<number, number>} */
+const windowRepositoryReadGenerations = new Map();
 /** @type {Map<number, number>} */
 const walkthroughProgressGenerations = new Map();
 /** @type {Map<number, string>} */
@@ -214,21 +218,34 @@ const getActiveAgent = () => getAgent(config.settings.agentBackend);
 const withRepositoryHost = (host, state) =>
   host.id === 'local' ? state : { ...state, hostId: host.id, hostLabel: host.label };
 
-/** @param {RepositoryHost} host @param {string} repositoryPath @param {ReviewSource} [source] */
-const readRepositoryStateWithConfig = async (host, repositoryPath, source) => {
+/** @param {RepositoryHost} host @param {string} repositoryPath @param {ReviewSource} [source] @param {(state: RepositoryState) => void} [onTrackedState] */
+const readRepositoryStateWithConfig = async (host, repositoryPath, source, onTrackedState) => {
   if (host.id !== 'local' && source?.type === 'pull-request') {
     throw new Error('PR/MR reviews are unavailable for remote repositories.');
   }
   const state = await readRepositoryState(host, repositoryPath, source, {
     showWhitespace: config.settings.showWhitespace,
+    onTrackedState: onTrackedState
+      ? (state) => onTrackedState(withRepositoryHost(host, state))
+      : undefined,
   });
   return withRepositoryHost(host, state);
 };
 
-/** @param {RepositoryHost} host @param {string} repositoryPath @param {CodiffLaunchOptions} launchOptions */
-const readInitialRepositoryStateWithConfig = async (host, repositoryPath, launchOptions) => {
+/** @param {RepositoryHost} host @param {string} repositoryPath @param {CodiffLaunchOptions} launchOptions @param {(state: RepositoryState) => void} [onTrackedState] */
+const readInitialRepositoryStateWithConfig = async (
+  host,
+  repositoryPath,
+  launchOptions,
+  onTrackedState,
+) => {
   if (!launchOptions.walkthrough || launchOptions.walkthroughFile) {
-    return readRepositoryStateWithConfig(host, repositoryPath, launchOptions.source);
+    return readRepositoryStateWithConfig(
+      host,
+      repositoryPath,
+      launchOptions.source,
+      onTrackedState,
+    );
   }
   const state = await readWalkthroughRepositoryState(host, repositoryPath, launchOptions.source, {
     showWhitespace: config.settings.showWhitespace,
@@ -1104,18 +1121,20 @@ const createWindow = (host, repositoryPath, launchOptions, identity) => {
     repositoryPath: identity?.repositoryRoot || repositoryPath,
   });
   windowLaunchOptions.set(webContentsId, launchOptions);
-  const initialRepositoryStatePromise = launchOptions.planFile
+  const initialLoad = launchOptions.planFile
     ? null
-    : readInitialRepositoryStateWithConfig(host, repositoryPath, launchOptions);
-  const initialRepositoryState = initialRepositoryStatePromise?.then(async (state) => {
-    if (!window.isDestroyed()) {
+    : createRepositoryStateLoad((report) =>
+        readInitialRepositoryStateWithConfig(host, repositoryPath, launchOptions, report),
+      );
+  const initialRepositoryState = initialLoad?.promise.then(async (state) => {
+    if (!window.isDestroyed() && windowInitialRepositoryStates.get(webContentsId) === initialLoad) {
       await storeResolvedRepositoryState(webContentsId, state);
     }
     return state;
   });
   initialRepositoryState?.catch(() => {});
-  if (initialRepositoryState) {
-    windowInitialRepositoryStates.set(webContentsId, initialRepositoryState);
+  if (initialLoad) {
+    windowInitialRepositoryStates.set(webContentsId, initialLoad);
   }
   if (
     !launchOptions.planFile &&
@@ -1219,6 +1238,7 @@ const createWindow = (host, repositoryPath, launchOptions, identity) => {
     windowIdentities.delete(webContentsId);
     windowIdentityGenerations.delete(webContentsId);
     windowInitialRepositoryStates.delete(webContentsId);
+    windowRepositoryReadGenerations.delete(webContentsId);
     walkthroughProgressGenerations.delete(webContentsId);
     const remoteLease = windowRemoteLeases.get(webContentsId);
     windowRemoteLeases.delete(webContentsId);
@@ -1411,7 +1431,9 @@ const focusOrCreateWindowNow = async (host, repositoryPath, launchOptions) => {
       } else {
         windowInitialRepositoryStates.set(
           matchingWebContentsId,
-          readInitialRepositoryStateWithConfig(host, repositoryPath, launchOptions),
+          createRepositoryStateLoad((report) =>
+            readInitialRepositoryStateWithConfig(host, repositoryPath, launchOptions, report),
+          ),
         );
       }
       if (identity) {
@@ -1721,22 +1743,50 @@ ipcMain.handle('codiff:openReleasePage', () => {
   );
 });
 
-ipcMain.handle('codiff:getRepositoryState', async (event, source) => {
+ipcMain.handle('codiff:getRepositoryState', async (event, source, requestId) => {
+  const generation = (windowRepositoryReadGenerations.get(event.sender.id) ?? 0) + 1;
+  windowRepositoryReadGenerations.set(event.sender.id, generation);
   const { host, repositoryPath } = windowRepositories.get(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
-  const initialState = !source ? windowInitialRepositoryStates.get(event.sender.id) : undefined;
-  if (initialState) {
-    windowInitialRepositoryStates.delete(event.sender.id);
+  const initialLoad = !source ? windowInitialRepositoryStates.get(event.sender.id) : undefined;
+  windowInitialRepositoryStates.delete(event.sender.id);
+  const load =
+    initialLoad ??
+    createRepositoryStateLoad((report) =>
+      readRepositoryStateWithConfig(
+        host,
+        repositoryPath,
+        source || launchOptions?.source,
+        typeof requestId === 'number' ? report : undefined,
+      ),
+    );
+  const unsubscribe =
+    typeof requestId === 'number'
+      ? load.subscribe((state) => {
+          if (
+            !event.sender.isDestroyed() &&
+            windowRepositoryReadGenerations.get(event.sender.id) === generation
+          ) {
+            event.sender.send('codiff:repositoryTrackedState', requestId, state);
+          }
+        })
+      : () => {};
+  try {
+    const state = await load.promise;
+    if (
+      !event.sender.isDestroyed() &&
+      windowRepositoryReadGenerations.get(event.sender.id) === generation
+    ) {
+      await storeResolvedRepositoryState(event.sender.id, state);
+      if (host.id === 'local') {
+        rememberLastRepositoryPath(state.root);
+      }
+      void resetRepositoryWatcher(host, event.sender.id, state.root);
+    }
+    return state;
+  } finally {
+    unsubscribe();
   }
-  const state = initialState
-    ? await initialState
-    : await readRepositoryStateWithConfig(host, repositoryPath, source || launchOptions?.source);
-  await storeResolvedRepositoryState(event.sender.id, state);
-  if (host.id === 'local') {
-    rememberLastRepositoryPath(state.root);
-  }
-  void resetRepositoryWatcher(host, event.sender.id, state.root);
-  return state;
 });
 
 ipcMain.handle('codiff:resolvePullRequestUrl', (event, value) => {

@@ -12,6 +12,8 @@ if (document.documentElement) {
   window.addEventListener('DOMContentLoaded', applyPlatformAttribute, { once: true });
 }
 
+let repositoryStateRequestId = 0;
+
 /** @type {Window['codiff']} */
 const codiff = {
   applyUpdate: () => ipcRenderer.invoke('codiff:applyUpdate'),
@@ -37,7 +39,27 @@ const codiff = {
   getPlanReview: () => ipcRenderer.invoke('codiff:getPlanReview'),
   getRepositoryHistory: (limit, source) =>
     ipcRenderer.invoke('codiff:getRepositoryHistory', limit, source),
-  getRepositoryState: (source) => ipcRenderer.invoke('codiff:getRepositoryState', source),
+  getRepositoryState: async (source, onTrackedState) => {
+    if (!onTrackedState) {
+      return ipcRenderer.invoke('codiff:getRepositoryState', source);
+    }
+    const requestId = ++repositoryStateRequestId;
+    const listener = (
+      /** @type {Electron.IpcRendererEvent} */ _event,
+      /** @type {number} */ id,
+      /** @type {import('../core/types.ts').RepositoryState} */ state,
+    ) => {
+      if (id === requestId) {
+        onTrackedState(state);
+      }
+    };
+    ipcRenderer.on('codiff:repositoryTrackedState', listener);
+    try {
+      return await ipcRenderer.invoke('codiff:getRepositoryState', source, requestId);
+    } finally {
+      ipcRenderer.removeListener('codiff:repositoryTrackedState', listener);
+    }
+  },
   getTerminalHelperStatus: () => ipcRenderer.invoke('codiff:getTerminalHelperStatus'),
   getUpdateStatus: () => ipcRenderer.invoke('codiff:getUpdateStatus'),
   getNarrativeWalkthrough: (source, options) =>

@@ -72,13 +72,33 @@ const { annotateGeneratedFiles } = require('./generated-files.cjs');
  * @typedef {import('../core/types.ts').ReviewSource} ReviewSource
  */
 
-/** @param {RepositoryHost} host @param {string} launchPath @param {ReviewSource} [source] @param {{showWhitespace?: boolean}} [options] @returns {Promise<RepositoryState>} */
+/** @param {RepositoryHost} host @param {string} launchPath @param {ReviewSource} [source] @param {{showWhitespace?: boolean; onTrackedState?: (state: RepositoryState) => void | Promise<void>}} [options] @returns {Promise<RepositoryState>} */
 const readRepositoryState = async (
   host,
   launchPath,
   source = { type: 'working-tree' },
   options = {},
 ) => {
+  /** @param {RepositoryState} state */
+  const decorateState = async (state) => {
+    const comparisonState =
+      source.type === 'commit' ||
+      source.type === 'range' ||
+      source.type === 'branch' ||
+      source.type === 'branch-diff';
+    const [branch, annotatedState] = await Promise.all([
+      gitOrEmpty(host, state.root, ['symbolic-ref', '--short', 'HEAD']),
+      comparisonState ? state : annotateGeneratedFiles(host, state),
+    ]);
+    return { ...annotatedState, branch: branch.trim() || null };
+  };
+  const workingTreeOptions = {
+    showWhitespace: options.showWhitespace,
+    onTrackedState: options.onTrackedState
+      ? async (/** @type {RepositoryState} */ state) =>
+          options.onTrackedState?.(await decorateState(state))
+      : undefined,
+  };
   const state =
     source.type === 'pull-request'
       ? await (isGitLabReviewSource(source) ? readMergeRequestState : readPullRequestState)(
@@ -95,23 +115,12 @@ const readRepositoryState = async (
           : source.type === 'branch' || source.type === 'branch-diff'
             ? await readBranchState(host, launchPath, source)
             : source.type === 'branch-working-tree'
-              ? await readBranchWorkingTreeState(host, launchPath, source, {
-                  showWhitespace: options.showWhitespace,
-                })
+              ? await readBranchWorkingTreeState(host, launchPath, source, workingTreeOptions)
               : await readWorkingTreeState(host, launchPath, {
                   eagerContents: false,
-                  showWhitespace: options.showWhitespace,
+                  ...workingTreeOptions,
                 });
-  const comparisonState =
-    source.type === 'commit' ||
-    source.type === 'range' ||
-    source.type === 'branch' ||
-    source.type === 'branch-diff';
-  const [branch, annotatedState] = await Promise.all([
-    gitOrEmpty(host, state.root, ['symbolic-ref', '--short', 'HEAD']),
-    comparisonState ? state : annotateGeneratedFiles(host, state),
-  ]);
-  return { ...annotatedState, branch: branch.trim() || null };
+  return decorateState(state);
 };
 
 /**

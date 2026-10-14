@@ -261,6 +261,7 @@ export function useAppWalkthrough({
     const currentState = stateRef.current;
     if (
       !currentState ||
+      currentState.untrackedLoading ||
       currentState.source.type !== 'working-tree' ||
       currentState.files.length === 0
     ) {

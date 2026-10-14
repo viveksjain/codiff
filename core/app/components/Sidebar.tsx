@@ -49,6 +49,8 @@ export function Sidebar({
   selectedPath,
   shareWalkthroughDisabled,
   showWhitespace,
+  untrackedError,
+  untrackedLoading,
   viewed,
   walkthroughError,
   walkthroughLoading,
@@ -79,6 +81,8 @@ export function Sidebar({
   selectedPath: string | null;
   shareWalkthroughDisabled?: boolean;
   showWhitespace: boolean;
+  untrackedError?: string;
+  untrackedLoading?: boolean;
   viewed: Record<string, string>;
   walkthroughError: WalkthroughError | null;
   walkthroughLoading: boolean;
@@ -129,6 +133,17 @@ export function Sidebar({
           value={searchQuery}
         />
       </div>
+      {untrackedLoading || untrackedError ? (
+        <div
+          className="sidebar-discovery-status"
+          role={untrackedError ? 'alert' : 'status'}
+          title={untrackedError}
+        >
+          {untrackedError
+            ? 'Could not discover untracked files. Refresh to retry.'
+            : 'Discovering untracked files…'}
+        </div>
+      ) : null}
       {mode === 'history' ? (
         <HistorySidebar
           branchSource={branchSource}

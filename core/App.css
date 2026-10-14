@@ -1393,6 +1393,13 @@ html[data-codiff-platform='darwin'] .sidebar {
   padding: 8px;
 }
 
+.sidebar-discovery-status {
+  color: var(--muted);
+  flex: none;
+  font: 500 11px/1.4 var(--font-sans);
+  padding: 0 8px 8px;
+}
+
 .sidebar-total-summary {
   align-items: center;
   display: inline-flex;

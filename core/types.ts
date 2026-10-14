@@ -265,6 +265,9 @@ export type RepositoryState = {
   reviewComments?: ReadonlyArray<PullRequestExistingReviewComment>;
   root: string;
   source: ReviewSource;
+  untrackedError?: string;
+  /** Tracked changes are ready; untracked files will arrive in the completed snapshot. */
+  untrackedLoading?: boolean;
 };
 
 export type CodiffFeatureFlags = {

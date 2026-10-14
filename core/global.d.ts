@@ -79,7 +79,10 @@ declare global {
       getRepositoryFile: (path: string) => Promise<RepositoryFileDocument>;
       getRepositoryHistory: (limit?: number, source?: ReviewSource) => Promise<RepositoryHistory>;
       getRepositoryHost: () => Promise<RepositoryHostInfo>;
-      getRepositoryState: (source?: ReviewSource) => Promise<RepositoryState>;
+      getRepositoryState: (
+        source?: ReviewSource,
+        onTrackedState?: (state: RepositoryState) => void,
+      ) => Promise<RepositoryState>;
       getTerminalHelperStatus: () => Promise<TerminalHelperStatus>;
       getUpdateStatus: () => Promise<CodiffUpdateStatus>;
       increaseCodeFontSize: () => Promise<void>;

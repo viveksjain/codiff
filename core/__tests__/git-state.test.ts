@@ -108,7 +108,10 @@ type GitStateModule = {
     host: RepositoryHost,
     launchPath: string,
     source?: ReviewSource,
-    options?: { showWhitespace?: boolean },
+    options?: {
+      onTrackedState?: (state: RepositoryState) => void | Promise<void>;
+      showWhitespace?: boolean;
+    },
   ) => Promise<RepositoryState>;
   readWalkthroughRepositoryState: (
     host: RepositoryHost,
@@ -1387,6 +1390,58 @@ test('readRepositoryState compares a ref with the working tree in one section pe
     }
   });
 });
+
+test.each(['working-tree', 'branch-working-tree'] as const)(
+  '%s publishes usable tracked changes before untracked discovery completes',
+  async (type) => {
+    await withRepo(async (repo) => {
+      await writeRepoFile(repo, '.gitattributes', 'tracked.txt linguist-generated\n');
+      await writeRepoFile(repo, 'tracked.txt', 'before\n');
+      await commitAll(repo, 'base');
+      await writeRepoFile(repo, 'tracked.txt', 'after\n');
+      await writeRepoFile(repo, 'new.txt', 'new file\n');
+      const discovery = Promise.withResolvers<void>();
+      const progress = Promise.withResolvers<RepositoryState>();
+      const delayedHost: RepositoryHost = {
+        ...host,
+        exec: async (command, args, options) => {
+          if (command === 'git' && args.includes('--untracked-files=normal')) {
+            await discovery.promise;
+          }
+          return host.exec(command, args, options);
+        },
+      };
+      const loading = readRepositoryState(
+        delayedHost,
+        repo,
+        type === 'working-tree' ? { type } : { ref: 'HEAD', type },
+        { onTrackedState: progress.resolve },
+      );
+      try {
+        const partial = await Promise.race([
+          progress.promise,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Tracked changes waited for discovery')), 1500),
+          ),
+        ]);
+        expect(partial.files.map((file) => file.path)).toEqual(['tracked.txt']);
+        expect(partial.files[0].generated).toBe(true);
+        expect(partial.files[0].sections[0].patch).toContain('+after');
+        expect(partial.branch).not.toBeNull();
+        discovery.resolve();
+        const complete = await loading;
+        expect(complete.files.map((file) => file.path)).toEqual(['new.txt', 'tracked.txt']);
+        expect(complete.files.find((file) => file.path === 'tracked.txt')).toEqual(
+          partial.files[0],
+        );
+        expect(complete.source).toEqual(partial.source);
+      } finally {
+        discovery.resolve();
+        await loading;
+      }
+    });
+  },
+);
 
 test('readRepositoryState reports missing branch refs clearly', async () => {
   await withRepo(async (repo) => {

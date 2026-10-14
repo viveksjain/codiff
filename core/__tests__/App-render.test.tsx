@@ -66,6 +66,293 @@ const repositoryState = {
   source: { type: 'working-tree' },
 } satisfies RepositoryState;
 
+test('tracked diffs stay usable while untracked files and history finish loading', async () => {
+  const tracked = createChangedFile('z-tracked.ts');
+  const untracked = createChangedFile('a-new.ts', { status: 'untracked' });
+  const completion = Promise.withResolvers<RepositoryState>();
+  const history = Promise.withResolvers<{ entries: []; root: string }>();
+  window.codiff = createCodiffMock({
+    getRepositoryHistory: vi.fn(() => history.promise),
+    getRepositoryState: vi.fn(async (_source, onTracked?: (state: RepositoryState) => void) => {
+      onTracked?.({ ...repositoryState, files: [tracked], untrackedLoading: true });
+      return completion.promise;
+    }),
+  });
+  await using view = await renderReact(<App />);
+  await waitFor(() => expect(view.container.textContent).toContain('z-tracked.ts'));
+  expect(view.container.textContent).toContain('Discovering untracked files');
+  const filter = view.container.querySelector<HTMLInputElement>(
+    'input[aria-label="Filter changed files"]',
+  )!;
+  await setInputValue(filter, 'tracked');
+  await act(async () => {
+    completion.resolve({ ...repositoryState, files: [untracked, tracked] });
+  });
+  await waitFor(() =>
+    expect(view.container.textContent).not.toContain('Discovering untracked files'),
+  );
+  expect(filter.value).toBe('tracked');
+  expect(view.container.textContent).toContain('z-tracked.ts');
+  await act(async () => history.resolve({ entries: [], root: '/repo' }));
+  expect(filter.value).toBe('tracked');
+});
+
+test.each([true, false])(
+  'reload restores an untracked selection with immediate completion=%s',
+  async (immediate) => {
+    const tracked = createChangedFile('tracked.ts');
+    const untracked = createChangedFile('new.ts', { status: 'untracked' });
+    const complete = { ...repositoryState, files: [untracked, tracked] };
+    writeReloadSelection(complete, 'new.ts');
+    const completion = Promise.withResolvers<RepositoryState>();
+    const openFile = vi.fn(async () => {});
+    window.codiff = createCodiffMock({
+      getRepositoryState: vi.fn(async (_source, onTracked) => {
+        onTracked?.({ ...repositoryState, files: [tracked], untrackedLoading: true });
+        return immediate ? complete : completion.promise;
+      }),
+      openFile,
+    });
+    await using view = await renderReact(<App />);
+    await waitFor(() => expect(view.container.textContent).toContain('tracked.ts'));
+    await act(async () => completion.resolve(complete));
+    await waitFor(() => expect(view.container.textContent).toContain('new.ts'));
+    await act(async () => dispatchModifiedKey('O', true));
+    expect(openFile).toHaveBeenLastCalledWith('new.ts');
+  },
+);
+
+test.each(['empty', 'failure'] as const)(
+  'tracked snapshots handle %s discovery without hiding the review',
+  async (scenario) => {
+    const tracked = createChangedFile('tracked.ts');
+    const completion = Promise.withResolvers<RepositoryState>();
+    window.codiff = createCodiffMock({
+      getRepositoryState: vi.fn(async (_source, onTracked) => {
+        onTracked?.({
+          ...repositoryState,
+          files: scenario === 'empty' ? [] : [tracked],
+          untrackedLoading: true,
+        });
+        return completion.promise;
+      }),
+    });
+    await using view = await renderReact(<App />);
+    await waitFor(() =>
+      expect(view.container.textContent).toContain('Discovering untracked files'),
+    );
+    expect(view.container.textContent).not.toContain('No local changes');
+    await act(async () => {
+      if (scenario === 'empty') {
+        completion.resolve({
+          ...repositoryState,
+          files: [createChangedFile('new.ts', { status: 'untracked' })],
+        });
+      } else {
+        completion.reject(new Error('scan failed'));
+      }
+    });
+    await waitFor(() =>
+      expect(view.container.textContent).not.toContain('Discovering untracked files'),
+    );
+    expect(view.container.textContent).toContain(scenario === 'empty' ? 'new.ts' : 'tracked.ts');
+    if (scenario === 'failure') {
+      expect(view.container.querySelector('[role="alert"]')?.textContent).toContain(
+        'Refresh to retry',
+      );
+    }
+  },
+);
+
+test('discovery completion keeps a walkthrough opened from the tracked snapshot', async () => {
+  const tracked = createChangedFile('tracked.ts');
+  const completion = Promise.withResolvers<RepositoryState>();
+  const walkthrough = createNarrativeWalkthroughFixture([
+    { added: 1, path: 'tracked.ts', status: 'modified' },
+  ]);
+  window.codiff = createCodiffMock({
+    getNarrativeWalkthrough: vi.fn(async () => ({ status: 'ready' as const, walkthrough })),
+    getRepositoryState: vi.fn(async (_source, onTracked) => {
+      onTracked?.({ ...repositoryState, files: [tracked], untrackedLoading: true });
+      return completion.promise;
+    }),
+  });
+  await using view = await renderReact(<App />);
+  await waitFor(() => expect(view.container.textContent).toContain('tracked.ts'));
+  await act(async () =>
+    [...view.container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Walkthrough')!
+      .click(),
+  );
+  await waitFor(() => expect(view.container.textContent).toContain(walkthrough.focus));
+  await act(async () => completion.resolve({ ...repositoryState, files: [tracked] }));
+  expect(view.container.textContent).toContain(walkthrough.focus);
+  expect(window.codiff.getNarrativeWalkthrough).toHaveBeenCalledTimes(1);
+});
+
+test.each([true, false])(
+  'returning to a source restores its saved walkthrough with immediate completion=%s',
+  async (immediate) => {
+    const tracked = createChangedFile('tracked.ts');
+    const untracked = createChangedFile('new.ts', { status: 'untracked' });
+    const fullState = { ...repositoryState, files: [untracked, tracked] };
+    writeReloadSelection(fullState, 'new.ts');
+    const completion = Promise.withResolvers<RepositoryState>();
+    const walkthrough = createNarrativeWalkthroughFixture([
+      { added: 1, path: 'tracked.ts', status: 'modified' },
+      { added: 1, path: 'new.ts', status: 'untracked' },
+    ]);
+    const commitWalkthrough = {
+      ...createNarrativeWalkthroughFixture([{ added: 1, path: 'commit.ts', status: 'modified' }]),
+      focus: 'Review the earlier commit.',
+    };
+    let workingReads = 0;
+    const openFile = vi.fn(async () => {});
+    window.codiff = createCodiffMock({
+      getNarrativeWalkthrough: vi.fn(async (source) => ({
+        status: 'ready' as const,
+        walkthrough: source?.type === 'commit' ? commitWalkthrough : walkthrough,
+      })),
+      getRepositoryHistory: vi.fn(async () => ({
+        entries: [
+          { author: 'Ada', committedAt: 1, parents: [], ref: 'abc1234', subject: 'Earlier commit' },
+        ],
+        root: '/repo',
+      })),
+      getRepositoryState: vi.fn(async (source, onTracked) => {
+        if (source?.type === 'commit') {
+          return { ...repositoryState, files: [createChangedFile('commit.ts')], source };
+        }
+        if (++workingReads === 1) {
+          return fullState;
+        }
+        onTracked?.({ ...repositoryState, files: [tracked], untrackedLoading: true });
+        return immediate ? fullState : completion.promise;
+      }),
+      openFile,
+    });
+    await using view = await renderReact(<App />);
+    const button = (label: string) =>
+      [...view.container.querySelectorAll<HTMLButtonElement>('button')].find((item) =>
+        item.textContent?.includes(label),
+      )!;
+    await waitFor(() => expect(view.container.textContent).toContain('new.ts'));
+    await act(async () => button('Walkthrough').click());
+    await waitFor(() => expect(view.container.textContent).toContain(walkthrough.focus));
+    await act(async () => button('History').click());
+    await act(async () => button('Earlier commit').click());
+    await waitFor(() => expect(view.container.textContent).toContain('commit.ts'));
+    await act(async () => button('Walkthrough').click());
+    await waitFor(() => expect(view.container.textContent).toContain(commitWalkthrough.focus));
+    await act(async () => button('History').click());
+    await act(async () => button('Uncommitted changes').click());
+    if (!immediate) {
+      await waitFor(() =>
+        expect(view.container.textContent).toContain('Discovering untracked files'),
+      );
+    }
+    await act(async () => completion.resolve(fullState));
+    await waitFor(() =>
+      expect(view.container.textContent).not.toContain('Discovering untracked files'),
+    );
+    await act(async () => dispatchModifiedKey('O', true));
+    expect(openFile).toHaveBeenLastCalledWith('new.ts');
+    await act(async () => button('Walkthrough').click());
+    await waitFor(() => expect(view.container.textContent).toContain(walkthrough.focus));
+    expect(window.codiff.getNarrativeWalkthrough).toHaveBeenCalledTimes(2);
+  },
+);
+
+test('viewed untracked files arrive collapsed when switching from a commit', async () => {
+  const tracked = createChangedFile('tracked.ts');
+  const untracked = createChangedFile('new.ts', { status: 'untracked' });
+  const source = { ref: 'HEAD', type: 'commit' } as const;
+  window.localStorage.setItem(
+    'codiff:viewed:/repo',
+    JSON.stringify({ [untracked.path]: untracked.fingerprint }),
+  );
+  window.codiff = createCodiffMock({
+    getLaunchOptions: vi.fn(async () => ({
+      repositoryPathProvided: true,
+      source,
+      walkthrough: false,
+    })),
+    getRepositoryState: vi.fn(async (requestedSource, onTracked) => {
+      if (!requestedSource || requestedSource.type === 'commit') {
+        return { ...repositoryState, files: [createChangedFile('commit.ts')], source };
+      }
+      onTracked?.({ ...repositoryState, files: [tracked], untrackedLoading: true });
+      return { ...repositoryState, files: [untracked, tracked] };
+    }),
+  });
+  await using view = await renderReact(<App />);
+  const button = (label: string) =>
+    [...view.container.querySelectorAll<HTMLButtonElement>('button')].find((item) =>
+      item.textContent?.includes(label),
+    )!;
+  await waitFor(() => expect(view.container.textContent).toContain('commit.ts'));
+  await act(async () => button('History').click());
+  await act(async () => button('Uncommitted changes').click());
+  await waitFor(() => {
+    const header = [...view.container.querySelectorAll('.codiff-file-header')].find((item) =>
+      item.textContent?.includes('new.ts'),
+    );
+    expect(header?.classList.contains('collapsed')).toBe(true);
+  });
+});
+
+test('an old untracked discovery result cannot replace a newly opened commit', async () => {
+  const completion = Promise.withResolvers<RepositoryState>();
+  let openSource!: (kind: 'commit') => void;
+  window.codiff = createCodiffMock({
+    getRepositoryHistory: vi.fn(async () => ({
+      entries: [
+        { author: 'Ada', committedAt: 1, parents: [], ref: 'abc1234', subject: 'Earlier commit' },
+      ],
+      root: '/repo',
+    })),
+    getRepositoryState: vi.fn(async (source, onTracked) => {
+      if (source?.type === 'commit') {
+        return { ...repositoryState, files: [createChangedFile('commit.ts')], source };
+      }
+      onTracked?.({
+        ...repositoryState,
+        files: [createChangedFile('tracked.ts')],
+        untrackedLoading: true,
+      });
+      return completion.promise;
+    }),
+    onOpenReviewSource: vi.fn((callback) => {
+      openSource = callback;
+      return () => {};
+    }),
+  });
+  await using view = await renderReact(<App />);
+  await waitFor(() => expect(view.container.textContent).toContain('tracked.ts'));
+  await act(async () => openSource('commit'));
+  await setInputValue(
+    view.container.querySelector<HTMLInputElement>('#open-review-source-input')!,
+    'HEAD~1',
+  );
+  await act(async () =>
+    view.container
+      .querySelector('form')!
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
+  );
+  await waitFor(() => expect(view.container.textContent).toContain('commit.ts'));
+  await act(async () =>
+    completion.resolve({ ...repositoryState, files: [createChangedFile('stale.ts')] }),
+  );
+  expect(view.container.textContent).toContain('commit.ts');
+  expect(view.container.textContent).not.toContain('stale.ts');
+  await act(async () =>
+    [...view.container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'History')!
+      .click(),
+  );
+  await waitFor(() => expect(view.container.textContent).toContain('Earlier commit'));
+});
+
 const createCommitMetadataFixture = (body: string): CommitMetadata => ({
   author: {
     date: '2026-01-01T12:00:00Z',
@@ -916,7 +1203,7 @@ test('branch history keeps branch diff available after selecting uncommitted cha
     findButton('Uncommitted')?.click();
   });
   await waitFor(() => {
-    expect(getRepositoryState).toHaveBeenCalledWith({ type: 'working-tree' });
+    expect(getRepositoryState).toHaveBeenCalledWith({ type: 'working-tree' }, expect.any(Function));
     expect(findButton('Committed only vs main')).toBeTruthy();
   });
   await act(async () => {
@@ -985,7 +1272,7 @@ test('repository reload restores branch diff scope after selecting uncommitted c
     expect(container.querySelector('.loading')).toBeNull();
     expect(findButton('Committed only vs main')).toBeTruthy();
   });
-  expect(getRepositoryState).toHaveBeenCalledWith({ type: 'working-tree' });
+  expect(getRepositoryState).toHaveBeenCalledWith({ type: 'working-tree' }, expect.any(Function));
   expect(getRepositoryHistory).toHaveBeenCalledWith(expect.any(Number), branchSource);
 });
 
@@ -1036,7 +1323,7 @@ test('repository reload does not let stale selection override launch source', as
   await waitFor(() => {
     expect(container.querySelector('.loading')).toBeNull();
   });
-  expect(getRepositoryState).toHaveBeenCalledWith(undefined);
+  expect(getRepositoryState).toHaveBeenCalledWith(undefined, expect.any(Function));
   expect(getRepositoryState).not.toHaveBeenCalledWith(staleState.source);
 });
 

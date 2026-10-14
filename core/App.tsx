@@ -158,6 +158,21 @@ const getPreferencesFromConfig = ({ settings }: CodiffConfig): CodiffPreferences
 
 const defaultPreferences = getPreferencesFromConfig(createDefaultConfig());
 
+// Keep sections hydrated or edited in the renderer while discovery ran, and
+// preserve object identity so adding untracked files does not reset tracked views.
+const mergeCompletedRepositoryState = (current: RepositoryState, complete: RepositoryState) => {
+  const currentFiles = new Map(current.files.map((file) => [file.path, file]));
+  return {
+    ...complete,
+    files: sortFiles(
+      complete.files.map((file) => {
+        const previous = currentFiles.get(file.path);
+        return previous?.fingerprint === file.fingerprint ? previous : file;
+      }),
+    ),
+  };
+};
+
 const getCollapsedViewedPaths = (
   files: ReadonlyArray<ChangedFile>,
   viewedFiles: Readonly<Record<string, string>>,
@@ -234,6 +249,12 @@ export default function App() {
   const preferencesRef = useRef<CodiffPreferences>(defaultPreferences);
   const selectedPathRef = useRef<string | null>(null);
   const sourceRequestRef = useRef(0);
+  const pendingInitialRestorationRef = useRef<{
+    commit: boolean;
+    path: string | null;
+    request: number;
+    scrollPath: string | null;
+  } | null>(null);
   const stateGenerationRef = useRef(0);
   const markdownRefreshQueueRef = useRef<Promise<void>>(Promise.resolve());
   const viewedRef = useRef<Record<string, string>>({});
@@ -627,6 +648,11 @@ export default function App() {
   useEffect(() => {
     let canceled = false;
     let loadingPlan = false;
+    let trackedStateShown = false;
+    let trackedSelectedPath: string | null = null;
+    let trackedViewed: Record<string, string> = {};
+    let initialHistory: ReturnType<Window['codiff']['getRepositoryHistory']> | undefined;
+    const request = ++sourceRequestRef.current;
 
     const load = async () => {
       const reloadSelection = consumeReloadSelection();
@@ -665,28 +691,111 @@ export default function App() {
       }
       setTerminalHelperStatus(nextTerminalHelperStatus);
 
-      const nextState = await window.codiff.getRepositoryState(
-        getReloadSourceForLaunch(reloadSelection, nextLaunchOptions),
-      );
+      const onTrackedState = (nextState: RepositoryState) => {
+        if (canceled || sourceRequestRef.current !== request) {
+          return;
+        }
+        const orderedState = { ...nextState, files: sortFiles(nextState.files) };
+        const nextViewed = usesViewedFileState(orderedState.source)
+          ? readViewed(getRepositoryStateKey(orderedState))
+          : {};
+        trackedViewed = nextViewed;
+        stateGenerationRef.current += 1;
+        stateRef.current = orderedState;
+        setState(orderedState);
+        setViewed(nextViewed);
+        setCollapsed(getCollapsedViewedPaths(orderedState.files, nextViewed));
+        const reloadPath = getReloadSelectionPath(reloadSelection, orderedState);
+        trackedSelectedPath = reloadPath ?? orderedState.files[0]?.path ?? null;
+        setSelectedPath(trackedSelectedPath);
+        if (reloadPath) {
+          scrollPathIntoReview(reloadPath, 'instant');
+        }
+        setSidebarMode('tree');
+        setWalkthroughLoading(false);
+        const nextHistorySource =
+          getReloadHistorySource(reloadSelection, orderedState) ??
+          getHistorySource(orderedState.source) ??
+          null;
+        setHistorySource(nextHistorySource);
+        const historyRequest = historyRequestRef.current;
+        initialHistory = window.codiff
+          .getRepositoryHistory(HISTORY_PAGE_SIZE, nextHistorySource ?? undefined)
+          .then((history) => {
+            if (!canceled && historyRequestRef.current === historyRequest) {
+              setHistoryEntries(history.entries);
+              setHistoryHasMore(history.entries.length >= HISTORY_PAGE_SIZE);
+              setHistoryLimit(HISTORY_PAGE_SIZE);
+            }
+            return history;
+          })
+          .catch(() => ({ entries: [], root: orderedState.root }));
+        trackedStateShown = true;
+      };
+      const launchSource = getReloadSourceForLaunch(reloadSelection, nextLaunchOptions);
+      const effectiveSource = launchSource ?? nextLaunchOptions.source;
+      const nextState = await (nextLaunchOptions.walkthrough ||
+      nextLaunchOptions.walkthroughFile ||
+      (effectiveSource &&
+        effectiveSource.type !== 'working-tree' &&
+        effectiveSource.type !== 'branch-working-tree')
+        ? window.codiff.getRepositoryState(launchSource)
+        : window.codiff.getRepositoryState(launchSource, onTrackedState));
 
-      if (canceled) {
+      if (canceled || sourceRequestRef.current !== request) {
         return;
       }
 
-      const orderedState = {
-        ...nextState,
-        files: sortFiles(nextState.files),
-      };
+      const orderedState =
+        trackedStateShown && stateRef.current
+          ? mergeCompletedRepositoryState(stateRef.current, nextState)
+          : { ...nextState, files: sortFiles(nextState.files) };
+      if (trackedStateShown) {
+        const previousPaths = new Set(stateRef.current?.files.map((file) => file.path));
+        const reloadPath = getReloadSelectionPath(reloadSelection, orderedState);
+        stateRef.current = orderedState;
+        setState(orderedState);
+        setSelectedPath((current) =>
+          current === trackedSelectedPath && reloadPath
+            ? reloadPath
+            : current && orderedState.files.some((file) => file.path === current)
+              ? current
+              : (orderedState.files[0]?.path ?? null),
+        );
+        // Restore scroll and mode after React applies the selection updater,
+        // including when both snapshots arrive before the first render.
+        pendingInitialRestorationRef.current = {
+          commit: getReloadMainMode(reloadSelection, orderedState) === 'commit',
+          path: reloadPath ?? trackedSelectedPath ?? orderedState.files[0]?.path ?? null,
+          request,
+          scrollPath: reloadPath !== trackedSelectedPath ? reloadPath : null,
+        };
+        setReloadDeltaPaths(getReloadDeltaPaths(reloadSelection, orderedState));
+        setCollapsed((current) => {
+          const next = new Set(current);
+          for (const file of orderedState.files) {
+            if (!previousPaths.has(file.path) && trackedViewed[file.path] === file.fingerprint) {
+              next.add(file.path);
+            }
+          }
+          return next;
+        });
+        if (orderedState.files.length === 0 && shouldStartInHistoryWhenEmpty(orderedState.source)) {
+          setSidebarMode('history');
+        }
+      }
       const nextHistorySource: ReviewSource | null =
         getReloadHistorySource(reloadSelection, orderedState) ??
         getHistorySource(orderedState.source) ??
         null;
-      const history = await window.codiff.getRepositoryHistory(
-        HISTORY_PAGE_SIZE,
-        nextHistorySource ?? undefined,
-      );
+      const history = await (initialHistory ??
+        window.codiff.getRepositoryHistory(HISTORY_PAGE_SIZE, nextHistorySource ?? undefined));
 
-      if (canceled) {
+      if (canceled || sourceRequestRef.current !== request) {
+        return;
+      }
+
+      if (trackedStateShown) {
         return;
       }
 
@@ -704,9 +813,11 @@ export default function App() {
         shouldStartInHistoryWhenEmpty(orderedState.source) && orderedState.files.length === 0;
 
       setLaunchOptions(nextLaunchOptions);
-      setSidebarMode(
-        shouldLoadNarrative ? 'walkthrough' : shouldStartInHistory ? 'history' : 'tree',
-      );
+      if (!trackedStateShown || shouldStartInHistory) {
+        setSidebarMode(
+          shouldLoadNarrative ? 'walkthrough' : shouldStartInHistory ? 'history' : 'tree',
+        );
+      }
       if (shouldLoadNarrative) {
         startWalkthroughLoading();
       } else {
@@ -722,7 +833,7 @@ export default function App() {
           ? await window.codiff.getNarrativeWalkthrough(orderedState.source, { force: true })
           : await window.codiff.getNarrativeWalkthrough(orderedState.source)
         : null;
-      if (canceled) {
+      if (canceled || sourceRequestRef.current !== request) {
         return;
       }
       const loadedNarrative =
@@ -793,12 +904,20 @@ export default function App() {
     };
 
     load().catch((error: unknown) => {
-      if (canceled) {
+      if (canceled || sourceRequestRef.current !== request) {
         return;
       }
 
       if (loadingPlan) {
         setPlanLoadError(error instanceof Error ? error.message : String(error));
+      } else if (trackedStateShown && stateRef.current) {
+        const nextState = {
+          ...stateRef.current,
+          untrackedError: error instanceof Error ? error.message : String(error),
+          untrackedLoading: false,
+        };
+        stateRef.current = nextState;
+        setState(nextState);
       } else {
         setLoadError(getRepositoryLoadError(error));
       }
@@ -825,6 +944,23 @@ export default function App() {
     setWalkthroughLoading,
     startWalkthroughLoading,
   ]);
+
+  useEffect(() => {
+    const restoration = pendingInitialRestorationRef.current;
+    if (!restoration || !state || state.untrackedLoading) {
+      return;
+    }
+    pendingInitialRestorationRef.current = null;
+    if (sourceRequestRef.current !== restoration.request || selectedPath !== restoration.path) {
+      return;
+    }
+    if (restoration.scrollPath) {
+      scrollPathIntoReview(restoration.scrollPath, 'instant');
+    }
+    if (restoration.commit && state.source.type === 'working-tree' && state.files.length > 0) {
+      setMainMode('commit');
+    }
+  }, [scrollPathIntoReview, selectedPath, setMainMode, state]);
 
   useEffect(
     () =>
@@ -1432,86 +1568,142 @@ export default function App() {
       setScrollTarget(null);
       setMainMode('review');
 
-      return window.codiff
-        .getRepositoryState(source)
-        .then((nextState) => {
-          if (sourceRequestRef.current !== request) {
-            return;
-          }
+      let trackedStateShown = false;
+      let trackedSelectedPath: string | null = null;
+      let trackedViewed: Record<string, string> = {};
+      let savedSession: SourceSession | undefined;
+      const applyState = (nextState: RepositoryState) => {
+        if (sourceRequestRef.current !== request) {
+          return;
+        }
 
-          const orderedState = {
-            ...nextState,
-            files: sortFiles(nextState.files),
-          };
-          const session = sourceSessionsRef.current.get(getSourceKey(orderedState.source));
-          const nextViewed =
-            session?.viewed ??
-            (usesViewedFileState(orderedState.source)
-              ? readViewed(getRepositoryStateKey(orderedState))
-              : {});
-          const nextSelectedPath =
-            session?.selectedPath &&
-            orderedState.files.some((file) => file.path === session.selectedPath)
-              ? session.selectedPath
-              : (orderedState.files[0]?.path ?? null);
-          const nextCollapsed =
-            session?.collapsed ?? getCollapsedViewedPaths(orderedState.files, nextViewed);
-          const nextExpandedReviewKeys = session?.expandedReviewKeys ?? new Set<string>();
-          const sessionWalkthroughIsCurrent =
-            session?.narrativeWalkthrough != null &&
-            !haveChangedFiles(session.walkthroughFiles, orderedState.files);
-          const nextNarrativeWalkthrough = sessionWalkthroughIsCurrent
-            ? (session?.narrativeWalkthrough ?? null)
-            : null;
-
-          stateGenerationRef.current += 1;
+        if (trackedStateShown && stateRef.current) {
+          const orderedState = mergeCompletedRepositoryState(stateRef.current, nextState);
+          const previousPaths = new Set(stateRef.current.files.map((file) => file.path));
+          const restorePath = savedSession?.selectedPath;
           stateRef.current = orderedState;
           setState(orderedState);
-          setHistorySource(getHistorySource(orderedState.source) ?? historySource);
-          setCollapsed(new Set(nextCollapsed));
-          setExpandedReviewKeys(new Set(nextExpandedReviewKeys));
-          setItemVersionByKey({});
-          setReviewComments(session?.reviewComments ?? getReviewCommentsFromState(orderedState));
-          setReloadDeltaPaths(new Set());
-          setViewed(nextViewed);
-          setSelectedPath(nextSelectedPath);
-          setNarrativeWalkthrough(nextNarrativeWalkthrough);
-          setWalkthroughError(
-            sessionWalkthroughIsCurrent ? (session.walkthroughError ?? null) : null,
+          setSelectedPath((current) =>
+            current === trackedSelectedPath &&
+            restorePath &&
+            orderedState.files.some((file) => file.path === restorePath)
+              ? restorePath
+              : current && orderedState.files.some((file) => file.path === current)
+                ? current
+                : (orderedState.files[0]?.path ?? null),
           );
-          setWalkthroughLoading(false);
-          setWalkthroughUnread(false);
-          setLocalChangesDetected(false);
-          setPendingSource(null);
-          if (!sessionWalkthroughIsCurrent) {
-            refreshWalkthroughForState(orderedState, session?.narrativeWalkthrough ?? null);
-          }
-        })
-        .catch((error: unknown) => {
-          if (sourceRequestRef.current === request) {
-            // A source read can discover the loss before the host event arrives,
-            // or fail just as the master recovers. Keep the already loaded review
-            // in either case; Electron IPC preserves the error message, not its type.
-            const connectionLost =
-              hostInfo.remote &&
-              currentState != null &&
-              error instanceof Error &&
-              error.message.includes('Lost connection to ');
-            if (!throwOnError && !connectionLost) {
-              setLoadError(getRepositoryLoadError(error));
+          setCollapsed((current) => {
+            const next = new Set(current);
+            for (const file of orderedState.files) {
+              if (!previousPaths.has(file.path) && trackedViewed[file.path] === file.fingerprint) {
+                next.add(file.path);
+              }
             }
-            setWalkthroughLoading(false);
-            setPendingSource(null);
+            return next;
+          });
+          const savedWalkthroughIsCurrent =
+            savedSession?.narrativeWalkthrough != null &&
+            !haveChangedFiles(savedSession.walkthroughFiles, orderedState.files);
+          if (savedWalkthroughIsCurrent && savedSession) {
+            setNarrativeWalkthrough(
+              (current) => current ?? savedSession?.narrativeWalkthrough ?? null,
+            );
+            setWalkthroughError((current) => current ?? savedSession?.walkthroughError ?? null);
+          } else if (!narrativeWalkthroughRef.current) {
+            refreshWalkthroughForState(orderedState, savedSession?.narrativeWalkthrough ?? null);
           }
-          if (throwOnError) {
-            throw error;
+          return;
+        }
+        const orderedState = {
+          ...nextState,
+          files: sortFiles(nextState.files),
+        };
+        const session = sourceSessionsRef.current.get(getSourceKey(orderedState.source));
+        savedSession = session;
+        const nextViewed =
+          session?.viewed ??
+          (usesViewedFileState(orderedState.source)
+            ? readViewed(getRepositoryStateKey(orderedState))
+            : {});
+        trackedViewed = nextViewed;
+        const nextSelectedPath =
+          session?.selectedPath &&
+          orderedState.files.some((file) => file.path === session.selectedPath)
+            ? session.selectedPath
+            : (orderedState.files[0]?.path ?? null);
+        const nextCollapsed =
+          session?.collapsed ?? getCollapsedViewedPaths(orderedState.files, nextViewed);
+        const nextExpandedReviewKeys = session?.expandedReviewKeys ?? new Set<string>();
+        const sessionWalkthroughIsCurrent =
+          session?.narrativeWalkthrough != null &&
+          !haveChangedFiles(session.walkthroughFiles, orderedState.files);
+        const nextNarrativeWalkthrough = sessionWalkthroughIsCurrent
+          ? (session?.narrativeWalkthrough ?? null)
+          : null;
+
+        stateGenerationRef.current += 1;
+        stateRef.current = orderedState;
+        setState(orderedState);
+        setHistorySource(getHistorySource(orderedState.source) ?? historySource);
+        setCollapsed(new Set(nextCollapsed));
+        setExpandedReviewKeys(new Set(nextExpandedReviewKeys));
+        setItemVersionByKey({});
+        setReviewComments(session?.reviewComments ?? getReviewCommentsFromState(orderedState));
+        setReloadDeltaPaths(new Set());
+        setViewed(nextViewed);
+        setSelectedPath(nextSelectedPath);
+        trackedSelectedPath = nextSelectedPath;
+        setNarrativeWalkthrough(nextNarrativeWalkthrough);
+        setWalkthroughError(
+          sessionWalkthroughIsCurrent ? (session.walkthroughError ?? null) : null,
+        );
+        setWalkthroughLoading(false);
+        setWalkthroughUnread(false);
+        setLocalChangesDetected(false);
+        setPendingSource(null);
+        if (!sessionWalkthroughIsCurrent && !nextState.untrackedLoading) {
+          refreshWalkthroughForState(orderedState, session?.narrativeWalkthrough ?? null);
+        }
+        trackedStateShown = nextState.untrackedLoading === true;
+      };
+      const loading =
+        source.type === 'working-tree' || source.type === 'branch-working-tree'
+          ? window.codiff.getRepositoryState(source, applyState)
+          : window.codiff.getRepositoryState(source);
+      return loading.then(applyState).catch((error: unknown) => {
+        if (sourceRequestRef.current === request) {
+          // A source read can discover the loss before the host event arrives,
+          // or fail just as the master recovers. Keep the already loaded review
+          // in either case; Electron IPC preserves the error message, not its type.
+          const connectionLost =
+            hostInfo.remote &&
+            currentState != null &&
+            error instanceof Error &&
+            error.message.includes('Lost connection to ');
+          if (trackedStateShown && stateRef.current) {
+            const nextState = {
+              ...stateRef.current,
+              untrackedError: error instanceof Error ? error.message : String(error),
+              untrackedLoading: false,
+            };
+            stateRef.current = nextState;
+            setState(nextState);
+          } else if (!throwOnError && !connectionLost) {
+            setLoadError(getRepositoryLoadError(error));
           }
-        });
+          setWalkthroughLoading(false);
+          setPendingSource(null);
+        }
+        if (throwOnError) {
+          throw error;
+        }
+      });
     },
     [
       disconnected,
       historySource,
       hostInfo.remote,
+      narrativeWalkthroughRef,
       pendingSource,
       refreshWalkthroughForState,
       resetCommentFocus,
@@ -1995,7 +2187,7 @@ export default function App() {
                   }
                 : null
           }
-          commitDisabled={disconnected}
+          commitDisabled={disconnected || state.untrackedLoading === true}
           commitFiles={state.files}
           commitViewOpen={showPlainCommitView}
           currentSource={pendingSource ?? state.source}
@@ -2021,6 +2213,8 @@ export default function App() {
           selectedPath={visibleSelectedPath}
           shareWalkthroughDisabled={walkthroughSharing}
           showWhitespace={showWhitespace}
+          untrackedError={state.untrackedError}
+          untrackedLoading={state.untrackedLoading}
           viewed={viewed}
           walkthroughError={walkthroughError}
           walkthroughLoading={walkthroughLoading}
@@ -2081,7 +2275,11 @@ export default function App() {
         ) : state.files.length === 0 ? (
           <div className="empty-state">
             <div className="empty-panel squircle">
-              <strong>{getEmptySourceTitle(state.source)}</strong>
+              <strong>
+                {state.untrackedLoading
+                  ? 'Discovering untracked files…'
+                  : getEmptySourceTitle(state.source)}
+              </strong>
               {emptySourceDetail.kind === 'code' ? (
                 <code className="walkthrough-inline-code" title={emptySourceDetail.title}>
                   {emptySourceDetail.text}

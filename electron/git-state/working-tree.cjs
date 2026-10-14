@@ -313,17 +313,12 @@ const listUntrackedItems = async (host, repoRoot) => {
 
 /**
  * @param {RepositoryHost} host
- * @param {string} launchPath
- * @param {{eagerContents?: boolean; showWhitespace?: boolean}} [options]
- * @returns {Promise<RepositoryState>}
+ * @param {string} repoRoot
+ * @param {Array<StatusItem>} status
+ * @param {{eagerContents?: boolean; showWhitespace?: boolean}} options
+ * @returns {Promise<Array<ChangedFile>>}
  */
-const readWorkingTreeState = async (host, launchPath, options = {}) => {
-  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
-  const [trackedStatus, untrackedItems] = await Promise.all([
-    git(host, repoRoot, ['status', '--porcelain=v1', '-z', '-uno']),
-    listUntrackedItems(host, repoRoot),
-  ]);
-  const status = [...parseStatus(trackedStatus), ...untrackedItems].sort(fileSort);
+const readWorkingTreeFiles = async (host, repoRoot, status, options) => {
   const prefetchedFiles = await prefetchWorkingTreeFiles(
     host,
     repoRoot,
@@ -332,12 +327,14 @@ const readWorkingTreeState = async (host, launchPath, options = {}) => {
       .map((item) => item.path),
   );
   const shouldUsePatchOnly = options.eagerContents === false;
-  const [stagedPatches, unstagedPatches] = shouldUsePatchOnly
-    ? await Promise.all([
-        readPatchMap(host, repoRoot, 'staged', options),
-        readPatchMap(host, repoRoot, 'unstaged', options),
-      ])
-    : [new Map(), new Map()];
+  const hasTrackedFiles = status.some((item) => !item.untracked);
+  const [stagedPatches, unstagedPatches] =
+    shouldUsePatchOnly && hasTrackedFiles
+      ? await Promise.all([
+          readPatchMap(host, repoRoot, 'staged', options),
+          readPatchMap(host, repoRoot, 'unstaged', options),
+        ])
+      : [new Map(), new Map()];
   /** @type {Array<ChangedFile>} */
   const files = [];
 
@@ -389,15 +386,39 @@ const readWorkingTreeState = async (host, launchPath, options = {}) => {
     });
   }
 
-  return {
+  return files;
+};
+
+/**
+ * @param {RepositoryHost} host
+ * @param {string} launchPath
+ * @param {{eagerContents?: boolean; showWhitespace?: boolean; onTrackedState?: (state: RepositoryState) => void | Promise<void>}} [options]
+ * @returns {Promise<RepositoryState>}
+ */
+const readWorkingTreeState = async (host, launchPath, options = {}) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  /** @param {Array<ChangedFile>} files @returns {RepositoryState} */
+  const createState = (files) => ({
+    branch: null,
     files,
     generatedAt: Date.now(),
     launchPath,
     root: repoRoot,
-    source: {
-      type: 'working-tree',
-    },
-  };
+    source: { type: 'working-tree' },
+  });
+  const [trackedFiles, untrackedFiles] = await Promise.all([
+    (async () => {
+      const status = parseStatus(
+        await git(host, repoRoot, ['status', '--porcelain=v1', '-z', '-uno']),
+      );
+      const files = await readWorkingTreeFiles(host, repoRoot, status, options);
+      await options.onTrackedState?.({ ...createState(files), untrackedLoading: true });
+      return files;
+    })(),
+    (async () =>
+      readWorkingTreeFiles(host, repoRoot, await listUntrackedItems(host, repoRoot), options))(),
+  ]);
+  return createState([...trackedFiles, ...untrackedFiles].sort(fileSort));
 };
 
 /** @param {RepositoryHost} host @param {string} repoRoot @param {string} path @returns {Promise<StatusItem>} */

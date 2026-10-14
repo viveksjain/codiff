@@ -755,49 +755,63 @@ const createBranchWorkingTreeFile = (baseRef, item, section) => ({
  * @param {RepositoryHost} host
  * @param {string} launchPath
  * @param {BranchWorkingTreeSource} input
- * @param {{showWhitespace?: boolean}} [options]
+ * @param {{showWhitespace?: boolean; onTrackedState?: (state: RepositoryState) => void | Promise<void>}} [options]
  * @returns {Promise<RepositoryState>}
  */
 const readBranchWorkingTreeState = async (host, launchPath, input, options = {}) => {
   const { baseRef, repoRoot, source } = await resolveBranchWorkingTree(host, launchPath, input);
-  const [tracked, untrackedItems, rawPatch] = await Promise.all([
-    readBranchWorkingTreeTrackedStatus(host, repoRoot, baseRef),
+  const trackedPromise = (async () => {
+    const [tracked, rawPatch] = await Promise.all([
+      readBranchWorkingTreeTrackedStatus(host, repoRoot, baseRef),
+      git(host, repoRoot, [
+        'diff',
+        '--patch',
+        '--no-ext-diff',
+        '-M',
+        ...getWhitespaceDiffArgs(options),
+        baseRef,
+        '--',
+      ]),
+    ]);
+    const patches = splitPatchByPath(rawPatch);
+    /** @type {Array<ChangedFile>} */
+    const files = [];
+    for (const item of tracked) {
+      files.push(
+        createBranchWorkingTreeFile(
+          baseRef,
+          item,
+          await createBranchWorkingTreeSection(host, repoRoot, baseRef, item, {
+            patch: patches.get(item.path),
+            patchOnly: !shouldEagerlyReadWorkingTreeContents(item.path),
+            showWhitespace: options.showWhitespace,
+          }),
+        ),
+      );
+    }
+    await options.onTrackedState?.({
+      branch: null,
+      files: files.sort(fileSort),
+      generatedAt: Date.now(),
+      launchPath,
+      root: repoRoot,
+      source,
+      untrackedLoading: true,
+    });
+    return files;
+  })();
+  const [trackedFiles, untrackedItems] = await Promise.all([
+    trackedPromise,
     listUntrackedItems(host, repoRoot),
-    git(host, repoRoot, [
-      'diff',
-      '--patch',
-      '--no-ext-diff',
-      '-M',
-      ...getWhitespaceDiffArgs(options),
-      baseRef,
-      '--',
-    ]),
   ]);
-  const trackedPaths = new Set(tracked.map((item) => item.path));
+  const trackedPaths = new Set(trackedFiles.map((file) => file.path));
   const untracked = untrackedItems.filter((item) => !trackedPaths.has(item.path));
-  const patches = splitPatchByPath(rawPatch);
   const prefetchedFiles = await prefetchWorkingTreeFiles(
     host,
     repoRoot,
     untracked.filter((item) => !item.directory && !item.summary).map((item) => item.path),
   );
-  /** @type {Array<ChangedFile>} */
-  const files = [];
-
-  for (const item of tracked) {
-    files.push(
-      createBranchWorkingTreeFile(
-        baseRef,
-        item,
-        await createBranchWorkingTreeSection(host, repoRoot, baseRef, item, {
-          patch: patches.get(item.path),
-          patchOnly: !shouldEagerlyReadWorkingTreeContents(item.path),
-          showWhitespace: options.showWhitespace,
-        }),
-      ),
-    );
-  }
-
+  const files = [...trackedFiles];
   for (const item of untracked) {
     files.push(
       createBranchWorkingTreeFile(
@@ -813,6 +827,7 @@ const readBranchWorkingTreeState = async (host, launchPath, input, options = {})
 
   return {
     files: files.sort(fileSort),
+    branch: null,
     generatedAt: Date.now(),
     launchPath,
     root: repoRoot,
