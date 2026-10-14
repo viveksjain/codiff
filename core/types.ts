@@ -115,6 +115,7 @@ export type ReviewSource =
       type: 'working-tree';
     }
   | {
+      github?: { owner: string; parentRef?: string | null; repo: string };
       ref: string;
       type: 'commit';
     }
@@ -156,11 +157,14 @@ export type ReviewSource =
     }
   | {
       author?: ReviewAuthor;
+      /** GitHub base snapshot used to resolve full context on demand. */
+      baseSha?: string;
       canEditDescription?: boolean;
       canEditReviewers?: boolean;
       canEditTitle?: boolean;
       description?: string;
       draft?: boolean;
+      headRepository?: { owner: string; repo: string };
       headSha?: string;
       host?: string;
       mergeState?: PullRequestMergeState;
@@ -186,6 +190,7 @@ export type HistoryEntry = {
   parents: ReadonlyArray<string>;
   ref: string;
   scope?: 'base' | 'pull-request';
+  source?: ReviewSource;
   subject: string;
 };
 
@@ -742,6 +747,8 @@ export type GitIdentity = {
 };
 
 export type DiffSectionContentRequest = {
+  /** File metadata from the displayed snapshot, for GitHub context loading. */
+  file?: { oldPath?: string; patch: string; status: GitFileStatus };
   force?: boolean;
   kind: DiffSection['kind'];
   path: string;

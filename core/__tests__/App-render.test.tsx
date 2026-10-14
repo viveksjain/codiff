@@ -4146,3 +4146,58 @@ test('remote dialog opens from a native menu request and lists recent targets', 
   );
   expect(window.codiff.openRemoteRepository).toHaveBeenCalledWith('devbox:~/src/app');
 });
+
+test('PR history preserves GitHub commit context and highlights the selected commit', async () => {
+  const pullRequestSource = {
+    headRepository: { owner: 'contributor', repo: 'widgets' },
+    number: 42,
+    owner: 'acme',
+    provider: 'github',
+    repo: 'widgets',
+    type: 'pull-request',
+    url: 'https://github.com/acme/widgets/pull/42',
+  } satisfies ReviewSource;
+  const commitSource = {
+    github: { owner: 'contributor', repo: 'widgets' },
+    ref: 'abc1234',
+    type: 'commit',
+  } satisfies ReviewSource;
+  const getRepositoryState = vi.fn(async (source?: ReviewSource) => ({
+    ...repositoryState,
+    source: source?.type === 'commit' ? commitSource : pullRequestSource,
+  }));
+  window.codiff = createCodiffMock({
+    getRepositoryHistory: vi.fn(async () => ({
+      entries: [
+        {
+          author: 'Reviewer',
+          committedAt: Date.now(),
+          parents: [],
+          ref: 'abc1234',
+          scope: 'pull-request' as const,
+          source: commitSource,
+          subject: 'API commit',
+        },
+      ],
+      root: '/repo',
+    })),
+    getRepositoryState,
+  });
+  await using app = await renderReact(<App />);
+  await waitFor(() => expect(app.container.querySelector('.loading')).toBeNull());
+  const historyButton = Array.from(app.container.querySelectorAll('button')).find(
+    (button) => button.textContent === 'History',
+  );
+  await act(async () => historyButton!.click());
+  const entry = app.container.querySelector<HTMLButtonElement>(
+    '.history-entry[title="API commit"]',
+  );
+  expect(entry).not.toBeNull();
+  await act(async () => entry!.click());
+  expect(getRepositoryState).toHaveBeenLastCalledWith(commitSource);
+  await waitFor(() =>
+    expect(app.container.querySelector('.history-entry.selected')?.getAttribute('title')).toBe(
+      'API commit',
+    ),
+  );
+});

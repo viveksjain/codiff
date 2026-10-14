@@ -268,7 +268,7 @@ function HistorySidebar({
       kind: 'entry' as const,
       ref: entry.ref,
       scope: entry.scope,
-      source: { ref: entry.ref, type: 'commit' } satisfies ReviewSource,
+      source: entry.source ?? ({ ref: entry.ref, type: 'commit' } satisfies ReviewSource),
       subject: entry.subject,
     }));
     const matchesQuery = (row: (typeof commitRows)[number]) =>
@@ -415,7 +415,7 @@ function HistorySidebar({
           );
         }
 
-        const selected = row.key === currentSourceKey;
+        const selected = getSourceKey(row.source) === currentSourceKey;
         const hasMetadata = Boolean(row.author && row.committedAt);
         return (
           <button

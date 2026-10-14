@@ -77,7 +77,9 @@ const getSourceCapabilities = (source: ReviewSource) => sourceCapabilitiesByType
 
 export const getSourceKey = (source: ReviewSource) =>
   source.type === 'commit'
-    ? `commit:${source.ref}`
+    ? source.github
+      ? `commit:github:${source.github.owner}/${source.github.repo}:${source.ref}`
+      : `commit:${source.ref}`
     : source.type === 'branch-diff'
       ? `branch-diff:${source.ref}:${source.baseRef}:${source.headRef}`
       : source.type === 'branch-working-tree'
@@ -138,7 +140,8 @@ export const getRefreshSource = (source: ReviewSource): ReviewSource =>
     : source;
 
 export const supportsLazyDiffContent = (source: ReviewSource) =>
-  getSourceCapabilities(source).lazyDiffContent;
+  getSourceCapabilities(source).lazyDiffContent ||
+  (source.type === 'pull-request' && source.provider !== 'gitlab');
 
 export const supportsDiffSearchContentPreload = (source: ReviewSource) =>
   getSourceCapabilities(source).preloadDiffSearchContent;

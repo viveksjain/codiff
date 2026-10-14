@@ -7,7 +7,9 @@ const { findExecutableOnPath, isExecutableFile } = require('../agent-shared.cjs'
 const { getCommandEnvironment } = require('../login-shell-environment.cjs');
 const {
   IMAGE_FILE_LIMIT,
+  MANUAL_TEXT_FILE_LIMIT,
   bufferToImageRevision,
+  bufferToTextFile,
   createSummary,
   formatBytes,
   getFingerprint,
@@ -17,13 +19,15 @@ const {
   summarizeContent,
   validateRepositoryPath,
 } = require('./common.cjs');
-const { readGitFiles } = require('./git-files.cjs');
+const { createEmptyFileContent } = require('./git-files.cjs');
 const { parseReviewUrl } = require('../review-source.cjs');
 
 /**
  * @typedef {import('../host/repository-host.cjs').RepositoryHost} RepositoryHost
  * @typedef {import('../../core/types.ts').ChangedFile} ChangedFile
  * @typedef {import('../../core/types.ts').DiffImageContentResult} DiffImageContentResult
+ * @typedef {import('../../core/types.ts').DiffSectionContentRequest} DiffSectionContentRequest
+ * @typedef {import('../../core/types.ts').GitFileStatus} GitFileStatus
  * @typedef {import('../../core/types.ts').PullRequestReviewComment} PullRequestReviewComment
  * @typedef {import('../../core/types.ts').RepositoryState} RepositoryState
  * @typedef {import('../../core/types.ts').ReviewSource} ReviewSource
@@ -252,23 +256,6 @@ const selectPullRequestRemote = async (host, repoRoot, pullRequest, expectedHead
     `Pull request ${pullRequest.owner}/${pullRequest.repo} does not match a GitHub remote in this repository.`,
   );
 };
-
-/** @param {PullRequestReference} pullRequest @param {GitHubPullRequestMetadata} metadata */
-const createPullRequestHistoryFetchRefspecs = (pullRequest, metadata) => [
-  `+refs/pull/${pullRequest.number}/head:refs/codiff/pull-requests/${pullRequest.number}/head`,
-  ...(metadata.base?.ref
-    ? [`+refs/heads/${metadata.base.ref}:refs/codiff/pull-requests/${pullRequest.number}/base`]
-    : []),
-];
-
-/** @param {RepositoryHost} host @param {string} repoRoot @param {GitHubRemote} remote @param {PullRequestReference} pullRequest @param {GitHubPullRequestMetadata} metadata */
-const fetchPullRequestHistoryRefs = (host, repoRoot, remote, pullRequest, metadata) =>
-  git(host, repoRoot, [
-    'fetch',
-    '--no-tags',
-    remote.name,
-    ...createPullRequestHistoryFetchRefspecs(pullRequest, metadata),
-  ]);
 
 /**
  * Runs `gh api` and reports how it exited. Callers decide which exit codes are
@@ -632,15 +619,28 @@ const listPullRequestHistory = async (host, launchPath, source, limit = 200) => 
     readPullRequestMetadata(repoRoot, pullRequest),
     readPullRequestCommits(repoRoot, pullRequest),
   ]);
-  const remote = await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
-  await fetchPullRequestHistoryRefs(host, repoRoot, remote, pullRequest, metadata);
+  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const baseCommits = metadata.base?.sha
     ? await readRepositoryCommits(repoRoot, pullRequest, metadata.base.sha, limit)
     : [];
+  /** @param {GitHubCommit} commit @param {'base' | 'pull-request'} scope @param {GitHubRepositoryReference} repository */
+  const withSource = (commit, scope, repository) => {
+    const entry = normalizeGitHubCommit(commit, scope);
+    return entry
+      ? {
+          ...entry,
+          source: { github: repository, ref: entry.ref, type: /** @type {const} */ ('commit') },
+        }
+      : null;
+  };
+  const headRepository = normalizeGitHubRepositoryReference(metadata.head?.repo) ?? pullRequest;
   return {
     entries: [
-      ...commits.map(normalizeGitHubPullRequestCommit).filter(Boolean).reverse(),
-      ...baseCommits.map((commit) => normalizeGitHubCommit(commit, 'base')).filter(Boolean),
+      ...commits
+        .map((commit) => withSource(commit, 'pull-request', headRepository))
+        .filter(Boolean)
+        .reverse(),
+      ...baseCommits.map((commit) => withSource(commit, 'base', pullRequest)).filter(Boolean),
     ],
     root: repoRoot,
   };
@@ -708,6 +708,11 @@ const createPullRequestSource = (pullRequest, metadata) => ({
       }
     : {}),
   ...(metadata.body?.trim() ? { description: metadata.body.trim() } : {}),
+  baseSha: metadata.base?.sha,
+  headRepository: normalizeGitHubRepositoryReference(metadata.head?.repo) ?? {
+    owner: pullRequest.owner,
+    repo: pullRequest.repo,
+  },
   headSha: metadata.head?.sha,
   host: 'github.com',
   number: pullRequest.number,
@@ -719,69 +724,6 @@ const createPullRequestSource = (pullRequest, metadata) => ({
   type: 'pull-request',
   url: pullRequest.url,
 });
-
-/**
- * Make sure the pull request head and base branch are available as local refs
- * and resolve the two commits to diff against. GitHub computes the pull request
- * diff against the merge base of the base branch and the head, so mirror that to
- * keep line numbers and changes aligned with the GitHub review.
- *
- * Returns `null` when the full file contents cannot be resolved, in which case
- * callers fall back to the GitHub-provided patch (which cannot expand
- * unmodified context).
- *
- * @param {RepositoryHost} host
- * @param {string} repoRoot
- * @param {PullRequestReference} pullRequest
- * @param {GitHubPullRequestMetadata} metadata
- * @param {GitHubRemote} [selectedRemote]
- * @returns {Promise<{base: string; head: string} | null>}
- */
-const resolvePullRequestContentRefs = async (
-  host,
-  repoRoot,
-  pullRequest,
-  metadata,
-  selectedRemote,
-) => {
-  if (!metadata.base?.ref) {
-    return null;
-  }
-
-  const headRef = `refs/codiff/pull-requests/${pullRequest.number}/head`;
-  const baseRef = `refs/codiff/pull-requests/${pullRequest.number}/base`;
-  const headSha = metadata.head?.sha;
-  const baseSha = metadata.base?.sha;
-  const localHead = (
-    await gitOrEmpty(host, repoRoot, ['rev-parse', '--verify', '--quiet', headRef])
-  ).trim();
-  const localBase = (
-    await gitOrEmpty(host, repoRoot, ['rev-parse', '--verify', '--quiet', baseRef])
-  ).trim();
-
-  // Refetch when a ref is missing or has moved -- including when the base branch
-  // advanced or the pull request was retargeted (localBase !== base sha) -- so
-  // the merge base is always resolved against the current base and head rather
-  // than stale contents.
-  if (
-    localBase === '' ||
-    localHead === '' ||
-    (headSha != null && localHead !== headSha) ||
-    (baseSha != null && localBase !== baseSha)
-  ) {
-    try {
-      const remote =
-        selectedRemote ??
-        (await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha));
-      await fetchPullRequestHistoryRefs(host, repoRoot, remote, pullRequest, metadata);
-    } catch {
-      return null;
-    }
-  }
-
-  const mergeBase = (await gitOrEmpty(host, repoRoot, ['merge-base', baseRef, headRef])).trim();
-  return mergeBase ? { base: mergeBase, head: headRef } : null;
-};
 
 /**
  * git/GitHub emit `Binary files a/x and b/x differ` as a diff metadata line.
@@ -797,15 +739,15 @@ const BINARY_DIFF_MARKER = /^Binary files .* differ/m;
  * renders a recomputed diff with expandable unmodified context (matching commits
  * and the working tree). Otherwise it falls back to the GitHub patch.
  *
- * @param {PullRequestReference} pullRequest
+ * @param {string} id
+ * @param {'commit' | 'pull-request'} kind
  * @param {GitHubPullRequestFile} file
  * @param {string} patch
  * @param {import('./common.cjs').FileContentResult} [oldFile]
  * @param {import('./common.cjs').FileContentResult} [newFile]
  * @returns {import('../../core/types.ts').DiffSection}
  */
-const createPullRequestSection = (pullRequest, file, patch, oldFile, newFile) => {
-  const id = `${file.filename}:pull-request:${pullRequest.number}`;
+const createGitHubSection = (id, kind, file, patch, oldFile, newFile) => {
   const patchBinary = !patch || BINARY_DIFF_MARKER.test(patch);
   // Expandable context can only be rendered when both sides' contents are present.
   const attemptedContent = oldFile != null && newFile != null;
@@ -824,7 +766,7 @@ const createPullRequestSection = (pullRequest, file, patch, oldFile, newFile) =>
       return {
         binary: false,
         id,
-        kind: 'pull-request',
+        kind,
         loadState: 'ready',
         newFile: newFile.file,
         oldFile: oldFile.file,
@@ -833,20 +775,30 @@ const createPullRequestSection = (pullRequest, file, patch, oldFile, newFile) =>
     }
   }
 
-  // Pull request contents are loaded up front, so a file that falls back to its
-  // patch (binary, oversized, or refs unavailable) cannot be loaded on demand.
+  // Text patches hydrate only when the user expands unchanged context.
   return {
     binary: patchBinary,
     id,
-    kind: 'pull-request',
+    kind,
     loadState: patchBinary ? 'binary' : 'ready',
     patch,
     summary: createSummary(
       patchBinary ? 'Binary file changed.' : 'Showing the pull request patch for this file.',
-      { canLoad: false },
+      { canLoad: !patchBinary && !attemptedContent },
     ),
   };
 };
+
+/** @param {PullRequestReference} pullRequest @param {GitHubPullRequestFile} file @param {string} patch @param {import('./common.cjs').FileContentResult} [oldFile] @param {import('./common.cjs').FileContentResult} [newFile] */
+const createPullRequestSection = (pullRequest, file, patch, oldFile, newFile) =>
+  createGitHubSection(
+    `${file.filename}:pull-request:${pullRequest.number}`,
+    'pull-request',
+    file,
+    patch,
+    oldFile,
+    newFile,
+  );
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @returns {Promise<RepositoryState>} */
 const readPullRequestState = async (host, launchPath, source) => {
@@ -859,19 +811,8 @@ const readPullRequestState = async (host, launchPath, source) => {
     readPullRequestDiff(repoRoot, pullRequest),
     readPullRequestComments(repoRoot, pullRequest),
   ]);
-  const remote = await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
+  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const diffByPath = splitPullRequestDiff(diff);
-  // Load every file's base and head contents up front from the local refs, so
-  // each diff renders in its final collapsed layout immediately and never shifts
-  // as expandable context becomes available. Files larger than the eager limit
-  // stay patch-only.
-  const contentRefs = await resolvePullRequestContentRefs(
-    host,
-    repoRoot,
-    pullRequest,
-    metadata,
-    remote,
-  ).catch(() => null);
   const reviewFiles = [...apiFiles].map((file) => {
     const patch = diffByPath.get(file.filename) || createPatchFromPullRequestFile(file);
     return {
@@ -880,33 +821,10 @@ const readPullRequestState = async (host, launchPath, source) => {
       patch,
     };
   });
-  const contentFiles = reviewFiles.filter(({ patch }) => !BINARY_DIFF_MARKER.test(patch));
-  const [oldFiles, newFiles] = contentRefs
-    ? await Promise.all([
-        readGitFiles(
-          host,
-          repoRoot,
-          contentRefs.base,
-          contentFiles.map(({ oldPath }) => oldPath),
-          { refScopedEmptyCacheKey: true },
-        ),
-        readGitFiles(
-          host,
-          repoRoot,
-          contentRefs.head,
-          contentFiles.map(({ file }) => file.filename),
-          { refScopedEmptyCacheKey: true },
-        ),
-      ])
-    : [new Map(), new Map()];
-
   /** @type {Array<ChangedFile>} */
   const files = reviewFiles
-    .map(({ file, oldPath, patch }) => {
-      const oldFile = contentRefs && !BINARY_DIFF_MARKER.test(patch) ? oldFiles.get(oldPath) : null;
-      const newFile =
-        contentRefs && !BINARY_DIFF_MARKER.test(patch) ? newFiles.get(file.filename) : null;
-      const section = createPullRequestSection(pullRequest, file, patch, oldFile, newFile);
+    .map(({ file, patch }) => {
+      const section = createPullRequestSection(pullRequest, file, patch);
 
       return {
         fingerprint: getFingerprint(
@@ -937,6 +855,97 @@ const readPullRequestState = async (host, launchPath, source) => {
     root: repoRoot,
     source: createPullRequestSource(pullRequest, metadata),
   };
+};
+
+/** @param {string} repoRoot @param {GitHubRepositoryReference} repository @param {string} ref @param {string} path */
+const readGitHubTextFile = async (repoRoot, repository, ref, path) => {
+  const buffer = await ghApiBuffer(repoRoot, [
+    '-H',
+    'Accept: application/vnd.github.raw',
+    `repos/${repository.owner}/${repository.repo}/contents/${encodeGitHubContentPath(path)}?ref=${encodeURIComponent(ref)}`,
+  ]);
+  if (!buffer) {
+    throw new Error(`Codiff could not load ${path} from GitHub at ${ref}.`);
+  }
+  if (buffer.length > MANUAL_TEXT_FILE_LIMIT) {
+    throw new Error(
+      `File is ${formatBytes(buffer.length)}, so Codiff skipped loading full context.`,
+    );
+  }
+  return bufferToTextFile(path, buffer, `${repository.owner}/${repository.repo}:${ref}:${path}`);
+};
+
+/** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {string} requestedPath @param {DiffSectionContentRequest['file']} [snapshotFile] */
+const readPullRequestSectionContent = async (
+  host,
+  launchPath,
+  source,
+  requestedPath,
+  snapshotFile,
+) => {
+  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const path = validateRepositoryPath(requestedPath);
+  const pullRequest = parseGitHubPullRequestUrl(source.url);
+  const [metadata, files] = await Promise.all([
+    source.baseSha && source.headSha
+      ? Promise.resolve(null)
+      : readPullRequestMetadata(repoRoot, pullRequest),
+    snapshotFile
+      ? Promise.resolve([
+          {
+            filename: path,
+            previous_filename: snapshotFile.oldPath,
+            status: snapshotFile.status === 'deleted' ? 'removed' : snapshotFile.status,
+          },
+        ])
+      : readPullRequestFiles(repoRoot, pullRequest),
+  ]);
+  const base = source.baseSha ?? metadata?.base?.sha;
+  const head = source.headSha ?? metadata?.head?.sha;
+  if (!base || !head) {
+    throw new Error('Codiff could not resolve the pull request commits from GitHub.');
+  }
+  // A displayed snapshot was validated when it opened. Rechecking an opaque
+  // remote's live PR head would reject that snapshot after a subsequent push.
+  if (!snapshotFile || !source.baseSha || !source.headSha) {
+    await selectPullRequestRemote(host, repoRoot, pullRequest, head);
+  }
+  const file = files.find((candidate) => candidate.filename === path);
+  if (!file) {
+    throw new Error('File is not part of this pull request.');
+  }
+
+  // GitHub's PR patch starts at the merge base, which can predate base.sha.
+  // Resolve it through the API only when full context is actually requested.
+  const comparison = JSON.parse(
+    await ghApi(repoRoot, [
+      `repos/${pullRequest.owner}/${pullRequest.repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=1`,
+    ]),
+  );
+  const mergeBase = comparison.merge_base_commit?.sha;
+  if (!mergeBase) {
+    throw new Error('Codiff could not resolve the pull request merge base from GitHub.');
+  }
+  const headRepository =
+    source.headRepository ??
+    normalizeGitHubRepositoryReference(metadata?.head?.repo) ??
+    pullRequest;
+  const oldPath = file.previous_filename || file.filename;
+  const [oldFile, newFile] = await Promise.all([
+    file.status === 'added'
+      ? createEmptyFileContent(oldPath, mergeBase, true)
+      : readGitHubTextFile(repoRoot, pullRequest, mergeBase, oldPath),
+    file.status === 'removed'
+      ? createEmptyFileContent(file.filename, head, true)
+      : readGitHubTextFile(repoRoot, headRepository, head, file.filename),
+  ]);
+  return createPullRequestSection(
+    pullRequest,
+    file,
+    snapshotFile?.patch ?? createPatchFromPullRequestFile(file),
+    oldFile,
+    newFile,
+  );
 };
 
 /**
@@ -1119,22 +1128,27 @@ module.exports = {
   PENDING_REVIEW_COMMENT_ERROR,
   collectResolvedReviewCommentIds,
   createPatchFromPullRequestFile,
-  createPullRequestHistoryFetchRefspecs,
   createPullRequestSection,
+  createGitHubSection,
   createPullRequestSource,
   getGhCommand,
   getPullRequestHeadImageSource,
+  ghApi,
   listPullRequestHistory,
   normalizeGitHubCommit,
   normalizeGitHubPullRequestCommit,
   normalizeGitHubReviewComment,
   normalizePullRequestComment,
+  normalizePullRequestFileStatus,
   parseGitHubPullRequestUrl,
   readPullRequestImageContent,
+  readPullRequestSectionContent,
+  readGitHubImageFile,
+  readGitHubTextFile,
   readPullRequestState,
-  resolvePullRequestContentRefs,
   selectPullRequestRemote,
   selectUnresolvedReviewComments,
+  splitPullRequestDiff,
   submitPullRequestComment,
   submitPullRequestReview,
 };

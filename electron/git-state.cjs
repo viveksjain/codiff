@@ -21,7 +21,6 @@ const { parseRepositoryWatcherStatus } = require('./repository-watcher.cjs');
 const {
   PENDING_REVIEW_COMMENT_ERROR,
   collectResolvedReviewCommentIds,
-  createPullRequestHistoryFetchRefspecs,
   createPullRequestSection,
   createPullRequestSource,
   getPullRequestHeadImageSource,
@@ -31,8 +30,8 @@ const {
   normalizePullRequestComment,
   parseGitHubPullRequestUrl,
   readPullRequestImageContent,
+  readPullRequestSectionContent,
   readPullRequestState,
-  resolvePullRequestContentRefs,
   selectUnresolvedReviewComments,
   submitPullRequestComment,
   submitPullRequestReview,
@@ -49,6 +48,11 @@ const {
   submitMergeRequestReview,
 } = require('./git-state/merge-request.cjs');
 const { parseReviewUrl } = require('./review-source.cjs');
+const {
+  readGitHubCommitState,
+  readGitHubCommitSectionContent,
+  readGitHubCommitImageContent,
+} = require('./git-state/github-commit.cjs');
 const {
   readDiffSectionContent: readWorkingTreeDiffSectionContent,
   readDiffImageContent: readWorkingTreeDiffImageContent,
@@ -83,7 +87,9 @@ const readRepositoryState = async (
           source,
         )
       : source.type === 'commit'
-        ? await readCommitState(host, launchPath, source.ref)
+        ? await (source.github
+            ? readGitHubCommitState(host, launchPath, source)
+            : readCommitState(host, launchPath, source.ref))
         : source.type === 'range'
           ? await readRangeState(host, launchPath, source.base, source.head, source.symmetric)
           : source.type === 'branch' || source.type === 'branch-diff'
@@ -189,61 +195,71 @@ const readRepositoryHistory = (host, launchPath, limit, source) =>
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {DiffSectionContentRequest} request */
 const readDiffSectionContent = async (host, launchPath, request) =>
-  request.source?.type === 'range'
-    ? readRangeSectionContent(
-        host,
-        launchPath,
-        request.source.base,
-        request.source.head,
-        request.source.symmetric,
-        request.path,
-        { force: request.force },
-      )
-    : request.source?.type === 'branch' || request.source?.type === 'branch-diff'
-      ? readBranchSectionContent(host, launchPath, request.source, request.path, {
-          force: request.force,
-        })
-      : request.source?.type === 'branch-working-tree'
-        ? readBranchWorkingTreeSectionContent(host, launchPath, request)
-        : request.kind === 'commit' || request.source?.type === 'commit'
-          ? readCommitSectionContent(
-              host,
-              launchPath,
-              request.source?.ref || 'HEAD',
-              request.path,
-              {
-                force: request.force,
-              },
-            )
-          : readWorkingTreeDiffSectionContent(host, launchPath, request);
+  request.source?.type === 'pull-request' && !isGitLabReviewSource(request.source)
+    ? readPullRequestSectionContent(host, launchPath, request.source, request.path, request.file)
+    : request.source?.type === 'commit' && request.source.github
+      ? readGitHubCommitSectionContent(host, launchPath, request.source, request.path, request.file)
+      : request.source?.type === 'range'
+        ? readRangeSectionContent(
+            host,
+            launchPath,
+            request.source.base,
+            request.source.head,
+            request.source.symmetric,
+            request.path,
+            { force: request.force },
+          )
+        : request.source?.type === 'branch' || request.source?.type === 'branch-diff'
+          ? readBranchSectionContent(host, launchPath, request.source, request.path, {
+              force: request.force,
+            })
+          : request.source?.type === 'branch-working-tree'
+            ? readBranchWorkingTreeSectionContent(host, launchPath, request)
+            : request.kind === 'commit' || request.source?.type === 'commit'
+              ? readCommitSectionContent(
+                  host,
+                  launchPath,
+                  request.source?.ref || 'HEAD',
+                  request.path,
+                  {
+                    force: request.force,
+                  },
+                )
+              : readWorkingTreeDiffSectionContent(host, launchPath, request);
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {DiffImageContentRequest} request @returns {Promise<DiffImageContentResult>} */
 const readDiffImageContent = (host, launchPath, request) =>
-  request.source?.type === 'pull-request'
-    ? (isGitLabReviewSource(request.source)
-        ? readMergeRequestImageContent
-        : readPullRequestImageContent)(host, launchPath, request.source, request.path)
-    : request.source?.type === 'range'
-      ? readRangeImageContent(
-          host,
-          launchPath,
-          request.source.base,
-          request.source.head,
-          request.source.symmetric,
-          request.path,
-        )
-      : request.source?.type === 'branch' || request.source?.type === 'branch-diff'
-        ? readBranchImageContent(host, launchPath, request.source, request.path)
-        : request.source?.type === 'branch-working-tree'
-          ? readBranchWorkingTreeImageContent(host, launchPath, request)
-          : request.kind === 'commit' || request.source?.type === 'commit'
-            ? readCommitImageContent(host, launchPath, request.source?.ref || 'HEAD', request.path)
-            : readWorkingTreeDiffImageContent(host, launchPath, request);
+  request.source?.type === 'commit' && request.source.github
+    ? readGitHubCommitImageContent(host, launchPath, request.source, request.path)
+    : request.source?.type === 'pull-request'
+      ? (isGitLabReviewSource(request.source)
+          ? readMergeRequestImageContent
+          : readPullRequestImageContent)(host, launchPath, request.source, request.path)
+      : request.source?.type === 'range'
+        ? readRangeImageContent(
+            host,
+            launchPath,
+            request.source.base,
+            request.source.head,
+            request.source.symmetric,
+            request.path,
+          )
+        : request.source?.type === 'branch' || request.source?.type === 'branch-diff'
+          ? readBranchImageContent(host, launchPath, request.source, request.path)
+          : request.source?.type === 'branch-working-tree'
+            ? readBranchWorkingTreeImageContent(host, launchPath, request)
+            : request.kind === 'commit' || request.source?.type === 'commit'
+              ? readCommitImageContent(
+                  host,
+                  launchPath,
+                  request.source?.ref || 'HEAD',
+                  request.path,
+                )
+              : readWorkingTreeDiffImageContent(host, launchPath, request);
 
 module.exports = {
   PENDING_REVIEW_COMMENT_ERROR,
   collectResolvedReviewCommentIds,
-  createPullRequestHistoryFetchRefspecs,
   createGitLabPosition,
   createMergeRequestFetchRefspecs,
   createPullRequestSection,
@@ -268,7 +284,6 @@ module.exports = {
   readRepositoryState,
   readWalkthroughRepositoryState,
   readWorkingTreeState,
-  resolvePullRequestContentRefs,
   /** @param {RepositoryHost} host */
   submitPullRequestComment: (host, launchPath, request) =>
     (isGitLabReviewSource(request.source) ? submitMergeRequestComment : submitPullRequestComment)(

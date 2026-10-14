@@ -5,8 +5,29 @@ import {
   type FileDiffLoadedFiles,
   type FileDiffMetadata,
 } from '@pierre/diffs';
-import type { ChangedFile, DiffSection } from '../types.ts';
+import type {
+  ChangedFile,
+  DiffSection,
+  DiffSectionContentRequest,
+  ReviewSource,
+} from '../types.ts';
 import type { DiffLineCount } from './app-types.ts';
+
+export const createSectionContentRequest = (
+  file: ChangedFile,
+  section: DiffSection,
+  source: ReviewSource,
+  showWhitespace: boolean,
+): DiffSectionContentRequest => ({
+  force: true,
+  kind: section.kind,
+  path: file.path,
+  showWhitespace,
+  source,
+  ...(source.type === 'pull-request' || (source.type === 'commit' && source.github)
+    ? { file: { oldPath: file.oldPath, patch: section.patch, status: file.status } }
+    : {}),
+});
 
 export const getItemId = (section: DiffSection) => `diff:${section.id}`;
 

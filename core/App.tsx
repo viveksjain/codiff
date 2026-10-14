@@ -68,6 +68,7 @@ import {
   type WalkthroughNote,
 } from './lib/app-types.ts';
 import {
+  createSectionContentRequest,
   isPatchOnlyDiffSection,
   shouldLoadDiffSectionContents,
   shouldPreloadSectionContentsForSearch,
@@ -401,13 +402,14 @@ export default function App() {
       setLoadingSectionIds((current) => new Set(current).add(section.id));
 
       window.codiff
-        .getDiffSectionContent({
-          force: true,
-          kind: section.kind,
-          path: file.path,
-          showWhitespace: preferencesRef.current.showWhitespace,
-          source: currentState.source,
-        })
+        .getDiffSectionContent(
+          createSectionContentRequest(
+            file,
+            section,
+            currentState.source,
+            preferencesRef.current.showWhitespace,
+          ),
+        )
         .then((loadedSection) => {
           setState((current) => {
             if (
@@ -487,13 +489,14 @@ export default function App() {
         throw new Error(`Cannot load diff contents for '${file.path}'.`);
       }
 
-      const loadedSection = await window.codiff.getDiffSectionContent({
-        force: true,
-        kind: section.kind,
-        path: file.path,
-        showWhitespace: preferencesRef.current.showWhitespace,
-        source: currentState.source,
-      });
+      const loadedSection = await window.codiff.getDiffSectionContent(
+        createSectionContentRequest(
+          file,
+          section,
+          currentState.source,
+          preferencesRef.current.showWhitespace,
+        ),
+      );
       if (!loadedSection.newFile) {
         throw new Error(`No file contents available for '${file.path}'.`);
       }
