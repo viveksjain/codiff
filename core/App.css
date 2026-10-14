@@ -1094,6 +1094,7 @@ a.review-top-bar-source:focus-visible {
   background: color-mix(in srgb, var(--repository-banner-accent) 20%, var(--code-bg));
   border-color: color-mix(in srgb, var(--repository-banner-accent) 45%, transparent);
   padding-right: 13px;
+  top: 48px;
 }
 
 .repository-discovery-banner .repository-change-banner-content {
