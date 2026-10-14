@@ -1458,8 +1458,43 @@ export default function App() {
       ? getRefreshSource(historySourceRef.current)
       : undefined;
 
+    let discoveringUntracked = false;
+    const updateDiscoveryStatus = (loading: boolean, error?: string) => {
+      if (sourceRequestRef.current !== request || !stateRef.current) {
+        return;
+      }
+      const nextState = {
+        ...stateRef.current,
+        untrackedError: error,
+        untrackedLoading: loading,
+      };
+      stateRef.current = nextState;
+      setState(nextState);
+    };
+    const onTrackedState = () => {
+      discoveringUntracked = true;
+      updateDiscoveryStatus(true);
+    };
+    const repositoryLoad =
+      refreshSource.type === 'working-tree' || refreshSource.type === 'branch-working-tree'
+        ? window.codiff.getRepositoryState(refreshSource, onTrackedState)
+        : window.codiff.getRepositoryState(refreshSource);
+
     Promise.all([
-      window.codiff.getRepositoryState(refreshSource),
+      repositoryLoad.then(
+        (nextState) => {
+          if (discoveringUntracked) {
+            updateDiscoveryStatus(false);
+          }
+          return nextState;
+        },
+        (error: unknown) => {
+          if (discoveringUntracked) {
+            updateDiscoveryStatus(false, error instanceof Error ? error.message : String(error));
+          }
+          throw error;
+        },
+      ),
       window.codiff.getRepositoryHistory(historyLimit, refreshHistorySource),
     ])
       .then(([nextState, history]) => {

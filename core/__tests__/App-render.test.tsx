@@ -3319,6 +3319,92 @@ test('clicking the change banner refreshes the repository in place', async () =>
   expect(container.textContent).not.toContain('-old\n+new\n');
 });
 
+test.each(['working-tree', 'branch-working-tree'] as const)(
+  'refreshing a %s shows untracked discovery progress until the scan finishes',
+  async (type) => {
+    const source: ReviewSource = type === 'working-tree' ? { type } : { ref: 'main', type };
+    const tracked = createChangedFile('tracked.ts');
+    const untracked = createChangedFile('new.ts', { status: 'untracked' });
+    const initial = { ...repositoryState, files: [tracked], source };
+    const completion = Promise.withResolvers<RepositoryState>();
+    const history = Promise.withResolvers<{ entries: []; root: string }>();
+    let refresh!: () => void;
+    window.codiff = createCodiffMock({
+      getRepositoryHistory: vi
+        .fn<Window['codiff']['getRepositoryHistory']>()
+        .mockResolvedValueOnce({ entries: [], root: '/repo' })
+        .mockImplementation(() => history.promise),
+      getRepositoryState: vi
+        .fn<Window['codiff']['getRepositoryState']>()
+        .mockResolvedValueOnce(initial)
+        .mockImplementation(async (_source, onTracked) => {
+          onTracked?.({ ...initial, untrackedLoading: true });
+          return completion.promise;
+        }),
+      onRefreshRequest: vi.fn((listener) => {
+        refresh = listener;
+        return () => {};
+      }),
+    });
+    await using view = await renderReact(<App />);
+    await waitFor(() => expect(view.container.textContent).toContain('tracked.ts'));
+    const filter = view.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Filter changed files"]',
+    )!;
+    await setInputValue(filter, 'tracked');
+    await act(async () => refresh());
+    expect(view.container.querySelector('.sidebar-discovery-spinner')).not.toBeNull();
+    expect(view.container.querySelector('.sidebar-discovery-status')?.textContent).toContain(
+      'Discovering untracked files',
+    );
+    expect(view.container.textContent).toContain('tracked.ts');
+    expect(filter.value).toBe('tracked');
+    await act(async () => completion.resolve({ ...initial, files: [tracked, untracked] }));
+    // History can take longer than discovery; it must not keep the spinner running.
+    await waitFor(() =>
+      expect(view.container.querySelector('.sidebar-discovery-status')).toBeNull(),
+    );
+    await act(async () => history.resolve({ entries: [], root: '/repo' }));
+    expect(filter.value).toBe('tracked');
+    await setInputValue(filter, '');
+    expect(view.container.textContent).toContain('new.ts');
+  },
+);
+
+test('failed untracked discovery during refresh stops the spinner and allows retry', async () => {
+  const initial = { ...repositoryState, files: [createChangedFile('tracked.ts')] };
+  const completion = Promise.withResolvers<RepositoryState>();
+  let refresh!: () => void;
+  window.codiff = createCodiffMock({
+    getRepositoryState: vi
+      .fn<Window['codiff']['getRepositoryState']>()
+      .mockResolvedValueOnce(initial)
+      .mockImplementationOnce(async (_source, onTracked) => {
+        onTracked?.({ ...initial, untrackedLoading: true });
+        return completion.promise;
+      })
+      .mockResolvedValue(initial),
+    onRefreshRequest: vi.fn((listener) => {
+      refresh = listener;
+      return () => {};
+    }),
+  });
+  await using view = await renderReact(<App />);
+  await waitFor(() => expect(view.container.textContent).toContain('tracked.ts'));
+  await act(async () => refresh());
+  expect(view.container.querySelector('.sidebar-discovery-spinner')).not.toBeNull();
+  await act(async () => completion.reject(new Error('Untracked scan failed')));
+  await waitFor(() =>
+    expect(view.container.querySelector('.sidebar-discovery-spinner')).toBeNull(),
+  );
+  expect(view.container.querySelector('.sidebar-discovery-status')?.textContent).toContain(
+    'Refresh to retry',
+  );
+  expect(view.container.textContent).toContain('tracked.ts');
+  await act(async () => refresh());
+  await waitFor(() => expect(view.container.querySelector('.sidebar-discovery-status')).toBeNull());
+});
+
 test('refreshing all changes re-resolves the branch snapshot', async () => {
   const initialSource = {
     baseRef: 'base123',
@@ -3415,10 +3501,14 @@ test('refreshing all changes re-resolves the branch snapshot', async () => {
   await waitFor(() => {
     expect(container.textContent).toContain('added.ts');
   });
-  expect(getRepositoryState).toHaveBeenNthCalledWith(2, {
-    ref: 'main',
-    type: 'branch-working-tree',
-  });
+  expect(getRepositoryState).toHaveBeenNthCalledWith(
+    2,
+    {
+      ref: 'main',
+      type: 'branch-working-tree',
+    },
+    expect.any(Function),
+  );
   expect(getRepositoryHistory).toHaveBeenLastCalledWith(expect.any(Number), {
     ref: 'main',
     type: 'branch-working-tree',
