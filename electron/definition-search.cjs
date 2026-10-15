@@ -2,6 +2,7 @@
 
 const { dirname, extname } = require('node:path');
 const { gitOrEmpty, validateRepositoryPath } = require('./git-state/common.cjs');
+const { isGitHubSource, withNoLazyFetch } = require('./git-state/github-git.cjs');
 
 /** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
 
@@ -319,6 +320,13 @@ const resolveSearchRevision = async (host, request, repoPath) => {
   } else if (source.type === 'branch') {
     head = source.ref;
     base = `${source.ref}^`;
+  } else if (source.type === 'pull-request' && isGitHubSource(source)) {
+    if (!source.headSha || (side === 'deletions' && !source.baseSha)) {
+      throw new Error('Pull request commit metadata is unavailable.');
+    }
+    head = source.headSha;
+    base = source.baseSha || null;
+    mergeBase = true;
   } else if (source.type === 'pull-request' && source.number != null) {
     const namespace = source.provider === 'gitlab' ? 'merge-requests' : 'pull-requests';
     head = `refs/codiff/${namespace}/${source.number}/head`;
@@ -351,7 +359,8 @@ const findDefinitions = async (host, repoPath, request, options = {}) => {
     const pathspecs = getPathspecs(currentPath);
     if (pathspecs.length === 0)
       return { candidates: [], identifier: request.identifier, status: 'ready' };
-    const snapshot = await resolveSearchRevision(host, request, repoPath);
+    const searchHost = isGitHubSource(request.source) ? withNoLazyFetch(host) : host;
+    const snapshot = await resolveSearchRevision(searchHost, request, repoPath);
     const args = [
       'grep',
       '--no-recurse-submodules',
@@ -367,7 +376,7 @@ const findDefinitions = async (host, repoPath, request, options = {}) => {
     else if (snapshot.untracked) args.push('--untracked');
     if (snapshot.revision) args.push(snapshot.revision);
     args.push('--', ...pathspecs);
-    const output = await runBoundedGitGrep(host, repoPath, args, options);
+    const output = await runBoundedGitGrep(searchHost, repoPath, args, options);
     const currentDirectory = dirname(currentPath);
     const candidates = parseGrepOutput(output, snapshot.revision)
       .filter((match) => containsIdentifier(request.identifier, match.line))

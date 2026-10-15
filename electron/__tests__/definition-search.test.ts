@@ -102,6 +102,72 @@ test('marks historical snapshot candidates as unsafe for editor fallback', async
   }
 });
 
+test.each(['pull-request', 'commit'] as const)(
+  'definition lookup for GitHub %s snapshots disables lazy fetching on both sides',
+  async (type) => {
+    await using directory = await createTemporaryDirectory('codiff-github-definitions-');
+    createDefinitionNavigationRepository(directory.path);
+    await host.exec('git', [
+      '-C',
+      directory.path,
+      '-c',
+      'user.name=Codiff Test',
+      '-c',
+      'user.email=codiff-test@example.com',
+      '-c',
+      'commit.gpgSign=false',
+      'commit',
+      '--allow-empty',
+      '--no-verify',
+      '-m',
+      'Second commit',
+    ]);
+    const head = (await host.exec('git', ['-C', directory.path, 'rev-parse', 'HEAD']))
+      .toString()
+      .trim();
+    const environments: Array<Parameters<RepositoryHost['exec']>[2]> = [];
+    const commands: ReadonlyArray<string>[] = [];
+    const searchHost: RepositoryHost = {
+      ...host,
+      exec: (command, args, options) => {
+        commands.push(args);
+        environments.push(options);
+        return host.exec(command, args, options);
+      },
+      spawn: (command, args, options) => {
+        commands.push(args);
+        environments.push(options);
+        return host.spawn(command, args, options);
+      },
+    };
+    const source =
+      type === 'commit'
+        ? { type, ref: head, github: { owner: 'acme', repo: 'widgets' } }
+        : {
+            type,
+            number: 42,
+            url: 'https://github.com/acme/widgets/pull/42',
+            headSha: head,
+            baseSha: head,
+          };
+    for (const side of ['additions', 'deletions'] as const) {
+      const result = await findDefinitions(searchHost, directory.path, {
+        ...request,
+        kind: type,
+        side,
+        source,
+      });
+      expect(result).toMatchObject({
+        status: 'ready',
+        candidates: [expect.objectContaining({ path: 'src/greeting.ts', canOpenInEditor: false })],
+      });
+    }
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.some((args) => args.some((arg) => arg.startsWith('refs/codiff/')))).toBe(false);
+    expect(environments.every((options) => options?.env?.GIT_NO_LAZY_FETCH === '1')).toBe(true);
+  },
+);
+
 test('parses revision-prefixed git grep records', () => {
   expect(
     parseGrepOutput('HEAD:src/value.ts\u00001\u0000export const value = 1;\n', 'HEAD'),

@@ -14,11 +14,10 @@ const {
   formatBytes,
   getFingerprint,
   getImageMimeType,
-  git,
-  gitOrEmpty,
   summarizeContent,
   validateRepositoryPath,
 } = require('./common.cjs');
+const { git, gitOrEmpty } = require('./github-git.cjs');
 const { createEmptyFileContent } = require('./git-files.cjs');
 const { parseReviewUrl } = require('../review-source.cjs');
 
@@ -271,7 +270,7 @@ const runGhApi = async (repoRoot, args, input) => {
   return new Promise((resolve, reject) => {
     const child = spawn(getGhCommand(), ['api', ...args], {
       cwd: repoRoot,
-      env: environment,
+      env: { ...environment, GIT_NO_LAZY_FETCH: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     /** @type {Array<Buffer>} */

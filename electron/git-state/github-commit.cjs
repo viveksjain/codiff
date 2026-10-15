@@ -1,6 +1,7 @@
 // @ts-check
 
-const { getFingerprint, git, validateRepositoryPath } = require('./common.cjs');
+const { getFingerprint, validateRepositoryPath } = require('./common.cjs');
+const { git } = require('./github-git.cjs');
 const { createEmptyFileContent } = require('./git-files.cjs');
 const {
   createGitHubSection,

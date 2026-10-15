@@ -13,6 +13,10 @@ a commit, branch, pull request, ref range, or repository path. If nothing is sta
 to the working tree (`git diff`) and say so. Anchor every `hunkId` against whichever diff you
 choose.
 
+For GitHub pull requests, use the GitHub API (`gh pr diff` and `gh api`) for patches
+and additional file context. PR commits and blobs may be absent from the local clone.
+Do not clone, fetch PR refs, or run local Git object reads that could trigger a lazy fetch.
+
 For an SSH repository, run Codiff on the laptop with a target such as
 `codiff --walkthrough devbox:~/src/app`. Generated walkthroughs use the selected
 agent CLI, credentials and linked-session transcripts on that remote host.

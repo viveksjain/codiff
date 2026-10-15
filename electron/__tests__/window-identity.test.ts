@@ -159,6 +159,33 @@ test('source window identities match launch identities for the same source', asy
   );
 });
 
+test('GitHub history window identities never resolve commits through local Git', async () => {
+  await using directory = await createTemporaryDirectory('codiff-github-window-identity-');
+  await initRepository(directory.path);
+  const commands: ReadonlyArray<string>[] = [];
+  const metadataHost: RepositoryHost = {
+    ...host,
+    exec: (command, args, options) => {
+      commands.push(args);
+      if (args.includes('--verify')) throw new Error('PR objects are not available locally.');
+      return host.exec(command, args, options);
+    },
+  };
+  const source = {
+    type: 'commit' as const,
+    ref: 'c'.repeat(40),
+    github: { owner: 'acme', repo: 'widgets' },
+  };
+  const launch = await getWindowIdentityForSource(metadataHost, directory.path, source);
+  const loaded = await getWindowIdentityForRepositoryState(metadataHost, {
+    root: directory.path,
+    source,
+  });
+  expect(launch).toMatchObject({ sourceKey: 'commit:github:acme/widgets:' + 'c'.repeat(40) });
+  expect(loaded?.key).toBe(launch?.key);
+  expect(commands.some((args) => args.includes('--verify'))).toBe(false);
+});
+
 test(
   'resolved repository states build identities without invoking Git',
   { concurrent: false },

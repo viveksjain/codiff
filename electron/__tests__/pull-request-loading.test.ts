@@ -23,9 +23,13 @@ import {
 import type {
   DiffSection,
   DiffSectionContentRequest,
+  DiffImageContentRequest,
+  DiffImageContentResult,
   RepositoryHistory,
   RepositoryState,
   ReviewSource,
+  SubmitPullRequestCommentRequest,
+  SubmitPullRequestReviewRequest,
 } from '../../core/types.ts';
 import type { RepositoryHost } from '../host/repository-host.cjs';
 
@@ -33,7 +37,41 @@ const require = createRequire(import.meta.url);
 const { createLocalHost } = require('../host/local-host.cjs') as {
   createLocalHost: () => RepositoryHost;
 };
-const { readDiffSectionContent, readRepositoryState } = require('../git-state.cjs') as {
+const {
+  readDiffImageContent,
+  readDiffSectionContent,
+  listRepositoryHistory: readRepositoryHistory,
+  readRepositoryState,
+  readWalkthroughRepositoryState,
+  submitPullRequestComment,
+  submitPullRequestReview,
+} = require('../git-state.cjs') as {
+  readDiffImageContent: (
+    host: RepositoryHost,
+    root: string,
+    request: DiffImageContentRequest,
+  ) => Promise<DiffImageContentResult>;
+  listRepositoryHistory: (
+    host: RepositoryHost,
+    root: string,
+    limit: number,
+    source: ReviewSource,
+  ) => Promise<RepositoryHistory>;
+  readWalkthroughRepositoryState: (
+    host: RepositoryHost,
+    root: string,
+    source: ReviewSource,
+  ) => Promise<RepositoryState>;
+  submitPullRequestComment: (
+    host: RepositoryHost,
+    root: string,
+    request: SubmitPullRequestCommentRequest,
+  ) => Promise<unknown>;
+  submitPullRequestReview: (
+    host: RepositoryHost,
+    root: string,
+    request: SubmitPullRequestReviewRequest,
+  ) => Promise<void>;
   readRepositoryState: (
     host: RepositoryHost,
     root: string,
@@ -69,6 +107,14 @@ const patch =
   'diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -2 +2 @@\n-before\n+after\n';
 const createResponses = () => ({
   failures: {} as Record<string, string>,
+  submittedComment: {
+    body: 'Review comment',
+    diff_hunk: '@@ -2 +2 @@',
+    id: 123,
+    line: 2,
+    path: 'file.txt',
+    side: 'RIGHT',
+  },
   commit: {
     sha: head,
     parents: [{ sha: mergeBase }],
@@ -150,6 +196,8 @@ else if (endpoint.includes('/contents/')) {
 else if (endpoint.includes('/compare/')) response = responses.comparison;
 else if (endpoint.includes('/files?')) response = responses.files;
 else if (endpoint.includes('/comments?')) response = responses.comments;
+else if (endpoint.endsWith('/comments')) response = responses.submittedComment;
+else if (endpoint.endsWith('/reviews')) response = {};
 else if (endpoint.includes('/pulls/42/commits?')) response = responses.commits;
 else if (endpoint.includes('/commits/')) response = [responses.commit];
 else if (endpoint.includes('/commits?')) response = endpoint.endsWith('page=1') ? responses.baseCommits : [];
@@ -162,13 +210,17 @@ process.stdout.write(typeof response === 'string' ? response : JSON.stringify(re
   await using _environment = createTemporaryEnvironment({ CODIFF_GH_PATH: gh, SHELL: undefined });
   const local = createLocalHost();
   const gitRequests: string[][] = [];
+  const unsafeRequests: string[][] = [];
   const host: RepositoryHost = {
     ...local,
     exec: (command, args, options) => {
       if (command === 'git') {
         gitRequests.push([...args]);
-        if (['fetch', 'ls-remote', 'cat-file', 'ls-tree', 'merge-base', 'show'].includes(args[2]))
+        if (!['rev-parse', 'remote', 'config', 'symbolic-ref'].includes(args[2])) {
+          unsafeRequests.push([...args]);
           return Promise.reject(new Error('PR Git data unavailable.'));
+        }
+        expect(options?.env?.GIT_NO_LAZY_FETCH).toBe('1');
       }
       return local.exec(command, args, options);
     },
@@ -186,6 +238,7 @@ process.stdout.write(typeof response === 'string' ? response : JSON.stringify(re
     saveResponses,
     source: { type: 'pull-request', url: 'https://github.com/acme/widgets/pull/42' },
   });
+  expect(unsafeRequests).toEqual([]);
 };
 
 test('opens a PR through the full repository loader without local Git objects or eager file contents', async () => {
@@ -241,6 +294,86 @@ test('keeps generated path detection for PRs without reading local attributes', 
     const state = await readRepositoryState(host, root, source);
     expect(state.files[0]).toMatchObject({ generated: true, path: 'pnpm-lock.yaml' });
     expect(gitRequests.some((args) => ['check-attr', 'read-tree'].includes(args[2]))).toBe(false);
+  });
+});
+
+test('secondary PR actions use API data without local objects or Git fallback', async () => {
+  await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
+    const state = await readRepositoryState(host, root, source);
+    const refresh = await readRepositoryState(host, root, state.source);
+    expect(refresh.files[0].sections[0].patch).toBe(patch);
+    const walkthrough = await readWalkthroughRepositoryState(host, root, source);
+    expect(walkthrough.files[0].sections[0].patch).toBe(patch);
+    const history = await readRepositoryHistory(host, root, 10, source);
+    expect(history.entries).toHaveLength(2);
+    for (const entry of history.entries) {
+      const commit = await readRepositoryState(host, root, entry.source!);
+      expect(commit.files).toHaveLength(1);
+    }
+    const comment = {
+      body: 'Review comment',
+      filePath: 'file.txt',
+      lineNumber: 2,
+      side: 'additions' as const,
+    };
+    await expect(submitPullRequestComment(host, root, { comment, source })).resolves.toMatchObject({
+      body: 'Review comment',
+    });
+    await submitPullRequestReview(host, root, { comments: [comment], event: 'COMMENT', source });
+
+    responses.files[0][0] = { filename: 'image.png', status: 'modified' };
+    responses.commit.files[0].filename = 'image.png';
+    responses.contents[`repos/acme/widgets/contents/image.png?ref=${base}`] = 'old-image';
+    responses.contents[`repos/acme/widgets/contents/image.png?ref=${mergeBase}`] = 'old-image';
+    responses.contents[`repos/contributor/widgets/contents/image.png?ref=${mergeBase}`] =
+      'old-image';
+    responses.contents[`repos/contributor/widgets/contents/image.png?ref=${head}`] = 'new-image';
+    await saveResponses();
+    expect(
+      await readDiffImageContent(host, root, { kind: 'pull-request', path: 'image.png', source }),
+    ).toMatchObject({
+      status: 'ready',
+      oldImage: { mimeType: 'image/png' },
+      newImage: { mimeType: 'image/png' },
+    });
+    expect(
+      await readDiffImageContent(host, root, {
+        kind: 'commit',
+        path: 'image.png',
+        source: history.entries[0].source,
+      }),
+    ).toMatchObject({
+      status: 'ready',
+      oldImage: { mimeType: 'image/png' },
+      newImage: { mimeType: 'image/png' },
+    });
+
+    responses.failures['repos/acme/widgets/pulls/42'] = 'HTTP 503: Service Unavailable';
+    await saveResponses();
+    await expect(readRepositoryHistory(host, root, 10, source)).rejects.toThrow('HTTP 503');
+    expect(
+      await readDiffImageContent(host, root, { kind: 'pull-request', path: 'image.png', source }),
+    ).toMatchObject({ status: 'unavailable', reason: expect.stringContaining('HTTP 503') });
+    await expect(
+      submitPullRequestReview(host, root, { comments: [], event: 'APPROVE', source }),
+    ).rejects.toThrow('HTTP 503');
+  });
+});
+
+test('direct generated-file annotation never reads GitHub PR or history objects', async () => {
+  const { annotateGeneratedFiles } = require('../generated-files.cjs');
+  await withPullRequest(async ({ gitRequests, host, root, source }) => {
+    const state = await readPullRequestState(host, root, source);
+    state.files[0].path = 'pnpm-lock.yaml';
+    for (const reviewSource of [
+      state.source,
+      { type: 'commit', ref: head, github: { owner: 'contributor', repo: 'widgets' } },
+    ]) {
+      expect(
+        (await annotateGeneratedFiles(host, { ...state, source: reviewSource })).files[0].generated,
+      ).toBe(true);
+    }
+    expect(gitRequests.map((args) => args[2])).toEqual(['rev-parse', 'remote', 'config']);
   });
 });
 

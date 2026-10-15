@@ -3,6 +3,7 @@
 const { join } = require('node:path');
 const { gitBufferWithInput } = require('./git-state/common.cjs');
 const { isGeneratedWalkthroughPath } = require('../core/lib/narrative-walkthrough-diff.cjs');
+const { isGitHubSource } = require('./git-state/github-git.cjs');
 
 /** @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost */
 
@@ -139,12 +140,14 @@ const applyGeneratedAttributeStates = (state, generatedAttributeStates) => ({
 const annotateGeneratedFiles = async (host, state) =>
   applyGeneratedAttributeStates(
     state,
-    await readGeneratedAttributeStates(
-      host,
-      state.root,
-      state.files.map((file) => file.path),
-      getGeneratedAttributeSource(state.source),
-    ),
+    isGitHubSource(state.source)
+      ? new Map()
+      : await readGeneratedAttributeStates(
+          host,
+          state.root,
+          state.files.map((file) => file.path),
+          getGeneratedAttributeSource(state.source),
+        ),
   );
 
 module.exports = {

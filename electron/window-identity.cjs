@@ -118,6 +118,7 @@ const getSourceKey = async (host, repositoryRoot, source = { type: 'working-tree
   }
 
   if (source.type === 'commit') {
+    if (source.github) return getResolvedSourceKey(source);
     const commit = await resolveCommitRef(host, repositoryRoot, source.ref);
     return commit ? `commit:${commit}` : null;
   }
@@ -168,7 +169,9 @@ const getResolvedSourceKey = (source) => {
     return 'working-tree';
   }
   if (source.type === 'commit') {
-    return `commit:${source.ref.toLowerCase()}`;
+    return source.github
+      ? `commit:github:${source.github.owner.toLowerCase()}/${source.github.repo.toLowerCase()}:${source.ref.toLowerCase()}`
+      : `commit:${source.ref.toLowerCase()}`;
   }
   if (source.type === 'branch-diff') {
     return `branch-diff:${source.ref}:${source.baseRef.toLowerCase()}:${source.headRef.toLowerCase()}`;
