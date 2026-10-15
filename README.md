@@ -62,6 +62,12 @@ codiff mr 23
 Branch lookup uses `gh` and selects an open GitHub pull request. Include `owner:` for pull
 requests from forks.
 
+For stacked GitHub PRs, Codiff detects the current PR's incremental review link in its
+description (`/pull/<number>/files/<base>..<head>`) and shows only that commit range.
+Diffs, expanded context, images, walkthroughs, and PR history use the same range through
+GitHub's API, without cloning or fetching commits. Old-side inline GitHub comments require
+the full PR's line numbers; use a new-side comment, a general review, or GitHub for those.
+
 Full GitHub and GitLab review URLs are also supported. GitLab hosts and nested project paths are
 derived from the URL or local Git remote and authenticated through `glab`; Codiff does not require
 instance-specific configuration.

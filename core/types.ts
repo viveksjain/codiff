@@ -162,6 +162,8 @@ export type ReviewSource =
       canEditDescription?: boolean;
       canEditReviewers?: boolean;
       canEditTitle?: boolean;
+      /** Exact incremental range linked from a GitHub stacked PR description. */
+      commitRange?: { base: string; head: string };
       description?: string;
       draft?: boolean;
       headRepository?: { owner: string; repo: string };

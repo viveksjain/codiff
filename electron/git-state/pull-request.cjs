@@ -19,6 +19,7 @@ const {
 } = require('./common.cjs');
 const { git, gitOrEmpty } = require('./github-git.cjs');
 const { createEmptyFileContent } = require('./git-files.cjs');
+const { parseStackedPullRequestRange } = require('./stacked-pull-request.cjs');
 const { parseReviewUrl } = require('../review-source.cjs');
 
 /**
@@ -346,6 +347,43 @@ const readPullRequestFiles = async (repoRoot, pullRequest) => {
   return pages.flat();
 };
 
+/** @param {PullRequestReference} pullRequest @param {{base: string; head: string}} range */
+const getComparisonEndpoint = (pullRequest, range) =>
+  `repos/${pullRequest.owner}/${pullRequest.repo}/compare/${encodeURIComponent(range.base)}...${encodeURIComponent(range.head)}`;
+
+/**
+ * GitHub's comparison API uses a merge base. For a stacked incremental range it
+ * must equal the explicitly linked base, otherwise this is a different diff.
+ * The API returns at most 300 files, so do not display a potentially partial list.
+ *
+ * @param {string} repoRoot
+ * @param {PullRequestReference} pullRequest
+ * @param {{base: string; head: string}} range
+ * @param {boolean} [allCommits]
+ * @returns {Promise<{commits: Array<GitHubCommit>; files: Array<GitHubPullRequestFile>}>}
+ */
+const readStackedComparison = async (repoRoot, pullRequest, range, allCommits = false) => {
+  const response = JSON.parse(
+    await ghApi(repoRoot, [
+      ...(allCommits ? ['--paginate', '--slurp'] : []),
+      `${getComparisonEndpoint(pullRequest, range)}?per_page=100`,
+    ]),
+  );
+  const pages = allCommits ? response : [response];
+  const comparison = pages[0];
+  if (comparison.merge_base_commit?.sha?.toLowerCase() !== range.base.toLowerCase()) {
+    throw new Error(
+      `The stacked commit range ${range.base}..${range.head} does not start at an ancestor of its head. Codiff cannot show this exact range through GitHub's comparison API. Update the PR's incremental review link and retry.`,
+    );
+  }
+  if (!Array.isArray(comparison.files) || comparison.files.length >= 300) {
+    throw new Error(
+      'GitHub did not return a complete file list for this stacked commit range (the comparison API is limited to 300 files).',
+    );
+  }
+  return { commits: pages.flatMap((page) => page.commits || []), files: comparison.files };
+};
+
 /** @param {string} path */
 const encodeGitHubContentPath = (path) => path.split('/').map(encodeURIComponent).join('/');
 
@@ -614,14 +652,19 @@ const normalizeGitHubPullRequestCommit = (commit) => normalizeGitHubCommit(commi
 const listPullRequestHistory = async (host, launchPath, source, limit = 200) => {
   const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const pullRequest = parseGitHubPullRequestUrl(source.url);
-  const [metadata, commits] = await Promise.all([
-    readPullRequestMetadata(repoRoot, pullRequest),
-    readPullRequestCommits(repoRoot, pullRequest),
-  ]);
+  const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
+  const commitRange =
+    source.commitRange ?? parseStackedPullRequestRange(metadata.body, pullRequest);
   await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
-  const baseCommits = metadata.base?.sha
-    ? await readRepositoryCommits(repoRoot, pullRequest, metadata.base.sha, limit)
-    : [];
+  const base = commitRange?.base ?? metadata.base?.sha;
+  const [commits, baseCommits] = await Promise.all([
+    commitRange
+      ? readStackedComparison(repoRoot, pullRequest, commitRange, true).then(
+          ({ commits }) => commits,
+        )
+      : readPullRequestCommits(repoRoot, pullRequest),
+    base ? readRepositoryCommits(repoRoot, pullRequest, base, limit) : [],
+  ]);
   /** @param {GitHubCommit} commit @param {'base' | 'pull-request'} scope @param {GitHubRepositoryReference} repository */
   const withSource = (commit, scope, repository) => {
     const entry = normalizeGitHubCommit(commit, scope);
@@ -632,7 +675,8 @@ const listPullRequestHistory = async (host, launchPath, source, limit = 200) => 
         }
       : null;
   };
-  const headRepository = normalizeGitHubRepositoryReference(metadata.head?.repo) ?? pullRequest;
+  const headRepository =
+    source.headRepository ?? normalizeGitHubRepositoryReference(metadata.head?.repo) ?? pullRequest;
   return {
     entries: [
       ...commits
@@ -695,8 +739,12 @@ const normalizePullRequestFileStatus = (status) =>
         ? 'renamed'
         : 'modified';
 
-/** @param {PullRequestReference} pullRequest @param {GitHubPullRequestMetadata} metadata @returns {Extract<ReviewSource, {type: 'pull-request'}>} */
-const createPullRequestSource = (pullRequest, metadata) => ({
+/** @param {PullRequestReference} pullRequest @param {GitHubPullRequestMetadata} metadata @param {{base: string; head: string} | undefined} [commitRange] @returns {Extract<ReviewSource, {type: 'pull-request'}>} */
+const createPullRequestSource = (
+  pullRequest,
+  metadata,
+  commitRange = parseStackedPullRequestRange(metadata.body, pullRequest),
+) => ({
   ...(metadata.user?.login
     ? {
         author: {
@@ -707,12 +755,13 @@ const createPullRequestSource = (pullRequest, metadata) => ({
       }
     : {}),
   ...(metadata.body?.trim() ? { description: metadata.body.trim() } : {}),
-  baseSha: metadata.base?.sha,
+  baseSha: commitRange?.base ?? metadata.base?.sha,
+  ...(commitRange ? { commitRange } : {}),
   headRepository: normalizeGitHubRepositoryReference(metadata.head?.repo) ?? {
     owner: pullRequest.owner,
     repo: pullRequest.repo,
   },
-  headSha: metadata.head?.sha,
+  headSha: commitRange?.head ?? metadata.head?.sha,
   host: 'github.com',
   number: pullRequest.number,
   owner: pullRequest.owner,
@@ -816,10 +865,29 @@ const readPullRequestState = async (host, launchPath, source) => {
       );
     }
   };
-  const [metadata, apiFiles, diff, reviewComments] = await Promise.all([
-    withContext('metadata', readPullRequestMetadata(repoRoot, pullRequest)),
-    withContext('changed files', readPullRequestFiles(repoRoot, pullRequest)),
-    withContext('diff', readPullRequestDiff(repoRoot, pullRequest)),
+  const metadataRequest = withContext('metadata', readPullRequestMetadata(repoRoot, pullRequest));
+  const [metadata, { apiFiles, commitRange, diff }, reviewComments] = await Promise.all([
+    metadataRequest,
+    metadataRequest.then(async (metadata) => {
+      const commitRange = parseStackedPullRequestRange(metadata.body, pullRequest);
+      const [apiFiles, diff] = commitRange
+        ? await withContext(
+            `stacked commit range ${commitRange.base}..${commitRange.head}`,
+            Promise.all([
+              readStackedComparison(repoRoot, pullRequest, commitRange).then(({ files }) => files),
+              ghApi(repoRoot, [
+                '-H',
+                'Accept: application/vnd.github.v3.diff',
+                getComparisonEndpoint(pullRequest, commitRange),
+              ]),
+            ]),
+          )
+        : await Promise.all([
+            withContext('changed files', readPullRequestFiles(repoRoot, pullRequest)),
+            withContext('diff', readPullRequestDiff(repoRoot, pullRequest)),
+          ]);
+      return { apiFiles, commitRange, diff };
+    }),
     withContext('review comments', readPullRequestComments(repoRoot, pullRequest)),
   ]);
   await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
@@ -840,7 +908,8 @@ const readPullRequestState = async (host, launchPath, source) => {
       return {
         fingerprint: getFingerprint(
           [
-            metadata.head?.sha || '',
+            ...(commitRange ? [commitRange.base] : []),
+            commitRange?.head || metadata.head?.sha || '',
             file.status,
             file.previous_filename || '',
             file.filename,
@@ -862,9 +931,17 @@ const readPullRequestState = async (host, launchPath, source) => {
     files,
     generatedAt: Date.now(),
     launchPath,
-    reviewComments,
+    reviewComments: commitRange
+      ? reviewComments.filter(
+          (comment) =>
+            commitRange.head === metadata.head?.sha &&
+            comment.side === 'additions' &&
+            comment.startSide !== 'deletions' &&
+            !comment.isOutdated,
+        )
+      : reviewComments,
     root: repoRoot,
-    source: createPullRequestSource(pullRequest, metadata),
+    source: createPullRequestSource(pullRequest, metadata, commitRange),
   };
 };
 
@@ -897,29 +974,30 @@ const readPullRequestSectionContent = async (
   const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const path = validateRepositoryPath(requestedPath);
   const pullRequest = parseGitHubPullRequestUrl(source.url);
-  const [metadata, files] = await Promise.all([
-    source.baseSha && source.headSha
-      ? Promise.resolve(null)
-      : readPullRequestMetadata(repoRoot, pullRequest),
-    snapshotFile
-      ? Promise.resolve([
-          {
-            filename: path,
-            previous_filename: snapshotFile.oldPath,
-            status: snapshotFile.status === 'deleted' ? 'removed' : snapshotFile.status,
-          },
-        ])
-      : readPullRequestFiles(repoRoot, pullRequest),
-  ]);
-  const base = source.baseSha ?? metadata?.base?.sha;
-  const head = source.headSha ?? metadata?.head?.sha;
+  const metadata =
+    source.baseSha && source.headSha ? null : await readPullRequestMetadata(repoRoot, pullRequest);
+  const commitRange =
+    source.commitRange ?? parseStackedPullRequestRange(metadata?.body, pullRequest);
+  const files = snapshotFile
+    ? [
+        {
+          filename: path,
+          previous_filename: snapshotFile.oldPath,
+          status: snapshotFile.status === 'deleted' ? 'removed' : snapshotFile.status,
+        },
+      ]
+    : commitRange
+      ? (await readStackedComparison(repoRoot, pullRequest, commitRange)).files
+      : await readPullRequestFiles(repoRoot, pullRequest);
+  const base = commitRange?.base ?? source.baseSha ?? metadata?.base?.sha;
+  const head = commitRange?.head ?? source.headSha ?? metadata?.head?.sha;
   if (!base || !head) {
     throw new Error('Codiff could not resolve the pull request commits from GitHub.');
   }
   // A displayed snapshot was validated when it opened. Rechecking an opaque
   // remote's live PR head would reject that snapshot after a subsequent push.
   if (!snapshotFile || !source.baseSha || !source.headSha) {
-    await selectPullRequestRemote(host, repoRoot, pullRequest, head);
+    await selectPullRequestRemote(host, repoRoot, pullRequest, metadata?.head?.sha ?? head);
   }
   const file = files.find((candidate) => candidate.filename === path);
   if (!file) {
@@ -928,13 +1006,12 @@ const readPullRequestSectionContent = async (
 
   // GitHub's PR patch starts at the merge base, which can predate base.sha.
   // Resolve it through the API only when full context is actually requested.
-  const comparison = JSON.parse(
-    await ghApi(repoRoot, [
-      `repos/${pullRequest.owner}/${pullRequest.repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=1`,
-    ]),
-  );
-  const mergeBase = comparison.merge_base_commit?.sha;
-  if (!mergeBase) {
+  const oldRef = commitRange
+    ? base
+    : JSON.parse(
+        await ghApi(repoRoot, [`${getComparisonEndpoint(pullRequest, { base, head })}?per_page=1`]),
+      ).merge_base_commit?.sha;
+  if (!oldRef) {
     throw new Error('Codiff could not resolve the pull request merge base from GitHub.');
   }
   const headRepository =
@@ -944,8 +1021,8 @@ const readPullRequestSectionContent = async (
   const oldPath = file.previous_filename || file.filename;
   const [oldFile, newFile] = await Promise.all([
     file.status === 'added'
-      ? createEmptyFileContent(oldPath, mergeBase, true)
-      : readGitHubTextFile(repoRoot, pullRequest, mergeBase, oldPath),
+      ? createEmptyFileContent(oldPath, oldRef, true)
+      : readGitHubTextFile(repoRoot, pullRequest, oldRef, oldPath),
     file.status === 'removed'
       ? createEmptyFileContent(file.filename, head, true)
       : readGitHubTextFile(repoRoot, headRepository, head, file.filename),
@@ -972,27 +1049,39 @@ const readPullRequestImageContent = async (host, launchPath, source, requestedPa
     const path = validateRepositoryPath(requestedPath);
     const pullRequest = parseGitHubPullRequestUrl(source.url);
 
-    const [metadata, files] = await Promise.all([
-      readPullRequestMetadata(repoRoot, pullRequest),
-      readPullRequestFiles(repoRoot, pullRequest),
-    ]);
-    await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
+    const metadata =
+      source.commitRange && source.headRepository
+        ? null
+        : await readPullRequestMetadata(repoRoot, pullRequest);
+    const commitRange =
+      source.commitRange ?? parseStackedPullRequestRange(metadata?.body, pullRequest);
+    const files = commitRange
+      ? (await readStackedComparison(repoRoot, pullRequest, commitRange)).files
+      : await readPullRequestFiles(repoRoot, pullRequest);
+    if (metadata) {
+      await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
+    }
     const file = files.find((candidate) => candidate.filename === path);
     if (!file) {
       throw new Error('File is not part of this pull request.');
     }
 
-    const headImageSource = getPullRequestHeadImageSource(pullRequest, metadata);
+    const headImageSource = commitRange
+      ? {
+          ...(source.headRepository ??
+            normalizeGitHubRepositoryReference(metadata?.head?.repo) ??
+            pullRequest),
+          ref: commitRange.head,
+        }
+      : getPullRequestHeadImageSource(pullRequest, metadata || {});
+    const base = commitRange?.base ?? metadata?.base?.sha;
     const [oldImage, newImage] = await Promise.all([
-      metadata.base?.sha
-        ? readGitHubImageFile(
-            repoRoot,
-            pullRequest,
-            metadata.base.sha,
-            file.previous_filename || file.filename,
-          )
+      base && file.status !== 'added'
+        ? readGitHubImageFile(repoRoot, pullRequest, base, file.previous_filename || file.filename)
         : undefined,
-      readGitHubImageFile(repoRoot, headImageSource, headImageSource.ref, file.filename),
+      file.status !== 'removed'
+        ? readGitHubImageFile(repoRoot, headImageSource, headImageSource.ref, file.filename)
+        : undefined,
     ]);
 
     if (!oldImage && !newImage) {
@@ -1057,15 +1146,51 @@ const hasPendingPullRequestReview = async (repoRoot, pullRequest) => {
   return Array.isArray(pages) && pages.flat().some((review) => review?.state === 'PENDING');
 };
 
+/**
+ * Incremental old-side coordinates refer to the stack parent, whereas GitHub
+ * attaches LEFT comments to the whole PR's merge base. Never post those raw
+ * numbers to a different revision. RIGHT coordinates are safe at the same head.
+ *
+ * @param {ReadonlyArray<PullRequestReviewComment>} comments
+ * @param {Extract<ReviewSource, {type: 'pull-request'}>} source
+ * @param {PullRequestReference} pullRequest
+ * @param {GitHubPullRequestMetadata} metadata
+ */
+const validateStackedReviewComments = (comments, source, pullRequest, metadata) => {
+  const range = source.commitRange ?? parseStackedPullRequestRange(metadata.body, pullRequest);
+  if (!range || comments.length === 0) {
+    return range;
+  }
+  if (range.head !== metadata.head?.sha) {
+    throw new Error(
+      'The PR head has changed since this stacked diff was generated. Refresh the review and update its incremental link before submitting inline comments. Your comment draft is still here.',
+    );
+  }
+  if (
+    comments.some((comment) => comment.side === 'deletions' || comment.startSide === 'deletions')
+  ) {
+    throw new Error(
+      "GitHub uses different old-side line numbers for the full PR. Submit this stacked diff's comment on the new side, include it in a general review, or comment on GitHub. Your comment draft is still here.",
+    );
+  }
+  return range;
+};
+
 /** @param {RepositoryHost} host @param {string} launchPath @param {SubmitPullRequestCommentRequest} request */
 const submitPullRequestComment = async (host, launchPath, request) => {
   const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const pullRequest = parseGitHubPullRequestUrl(request.source.url);
   const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
   await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
+  const commitRange = validateStackedReviewComments(
+    [request.comment],
+    request.source,
+    pullRequest,
+    metadata,
+  );
   const payload = {
     ...normalizePullRequestComment(request.comment),
-    commit_id: metadata.head?.sha,
+    commit_id: commitRange?.head ?? metadata.head?.sha,
   };
 
   const rawComment = await ghApi(
@@ -1102,6 +1227,12 @@ const submitPullRequestReview = async (host, launchPath, request) => {
   const pullRequest = parseGitHubPullRequestUrl(request.source.url);
   const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
   await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
+  const commitRange = validateStackedReviewComments(
+    request.comments,
+    request.source,
+    pullRequest,
+    metadata,
+  );
 
   await ghApi(
     repoRoot,
@@ -1112,7 +1243,10 @@ const submitPullRequestReview = async (host, launchPath, request) => {
       '--input',
       '-',
     ],
-    createPullRequestReviewPayload(request),
+    {
+      ...createPullRequestReviewPayload(request),
+      ...(commitRange && request.comments.length > 0 ? { commit_id: commitRange.head } : {}),
+    },
   );
 };
 

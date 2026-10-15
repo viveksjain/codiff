@@ -16,6 +16,10 @@ choose.
 For GitHub pull requests, use the GitHub API (`gh pr diff` and `gh api`) for patches
 and additional file context. PR commits and blobs may be absent from the local clone.
 Do not clone, fetch PR refs, or run local Git object reads that could trigger a lazy fetch.
+For stacked PRs, Codiff uses the commit range in the description's incremental review link
+(`.../pull/<current-pr>/files/<base>..<head>`). Use that same range with
+`gh api repos/<owner>/<repo>/compare/<base>...<head>` and the diff media type; verify
+`merge_base_commit.sha` equals `<base>`. `gh pr diff` includes the rest of the stack.
 
 For an SSH repository, run Codiff on the laptop with a target such as
 `codiff --walkthrough devbox:~/src/app`. Generated walkthroughs use the selected

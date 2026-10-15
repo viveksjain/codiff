@@ -124,9 +124,15 @@ const createResponses = () => ({
   baseCommits: [
     { commit: { author: { date: '2026-10-13T12:00:00Z' }, message: 'Base' }, sha: base },
   ],
-  comments: [[]],
+  comments: [[]] as Record<string, unknown>[][],
   commits: [[{ commit: { author: { date: '2026-10-13T12:00:00Z' }, message: 'PR' }, sha: head }]],
-  comparison: { merge_base_commit: { sha: mergeBase } },
+  comparison: {
+    base_commit: { sha: mergeBase },
+    merge_base_commit: { sha: mergeBase },
+    commits: [{ commit: { author: { date: '2026-10-13T12:00:00Z' }, message: 'PR' }, sha: head }],
+    files: [{ filename: 'file.txt', patch: '@@ -2 +2 @@\n-before\n+after', status: 'modified' }],
+  },
+  comparisonDiff: patch,
   contents: {
     [`repos/contributor/widgets/contents/file.txt?ref=${mergeBase}`]: 'unchanged\nbefore\nmore\n',
     [newEndpoint]: 'unchanged\nafter\nmore\n',
@@ -138,6 +144,7 @@ const createResponses = () => ({
   ] as { filename: string; patch?: string; previous_filename?: string; status: string }[][],
   metadata: {
     base: { ref: 'main', sha: base },
+    body: '',
     head: { repo: { full_name: 'contributor/widgets' }, sha: head },
     title: 'Review',
   },
@@ -181,19 +188,21 @@ const responses = require('./responses.json');
 const args = process.argv.slice(2);
 const endpoint = args.find(arg => arg.startsWith('repos/')) || 'graphql';
 appendFileSync(__dirname + '/requests.jsonl', JSON.stringify(endpoint) + '\\n');
-const operation = args.includes('Accept: application/vnd.github.v3.diff') ? 'diff' : endpoint;
+const operation = args.includes('Accept: application/vnd.github.v3.diff')
+  ? endpoint.includes('/compare/') ? 'comparisonDiff' : 'diff'
+  : endpoint;
 if (responses.failures[operation]) {
   process.stderr.write(responses.failures[operation]);
   process.exit(1);
 }
 let response;
 if (args.includes('graphql')) response = responses.threads;
-else if (args.includes('Accept: application/vnd.github.v3.diff')) response = responses.diff;
+else if (args.includes('Accept: application/vnd.github.v3.diff')) response = responses[operation];
 else if (endpoint.includes('/contents/')) {
   response = responses.contents[endpoint];
   if (response == null) { process.stderr.write('HTTP 404: Not Found'); process.exit(1); }
 }
-else if (endpoint.includes('/compare/')) response = responses.comparison;
+else if (endpoint.includes('/compare/')) response = args.includes('--slurp') ? [responses.comparison] : responses.comparison;
 else if (endpoint.includes('/files?')) response = responses.files;
 else if (endpoint.includes('/comments?')) response = responses.comments;
 else if (endpoint.endsWith('/comments')) response = responses.submittedComment;
@@ -261,6 +270,271 @@ test('opens a PR through the full repository loader without local Git objects or
     );
   });
 });
+
+test('opens only the stack entry’s files and preserves its exact range for refresh and walkthroughs', async () => {
+  await withPullRequest(async ({ host, requests, responses, root, saveResponses, source }) => {
+    responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+    responses.files[0].push({ filename: 'parent-only.txt', status: 'added' });
+    responses.diff = patch.replace('-before\n+after', '-stack-base\n+after');
+    await saveResponses();
+    const state = await readRepositoryState(host, root, source);
+    expect(state.files.map((file) => file.path)).toEqual(['file.txt']);
+    expect(state.files[0].sections[0].patch).toBe(patch);
+    expect(state.source).toMatchObject({
+      baseSha: mergeBase,
+      headSha: head,
+      commitRange: { base: mergeBase, head },
+    });
+    expect((await readRepositoryState(host, root, state.source)).files).toEqual(state.files);
+    expect((await readWalkthroughRepositoryState(host, root, source)).files).toEqual(state.files);
+    expect((await requests()).some((endpoint) => endpoint.includes('/pulls/42/files'))).toBe(false);
+    expect((await requests()).some((endpoint) => endpoint.includes('/contents/'))).toBe(false);
+  });
+});
+
+test('fails clearly when the selected stack range cannot be loaded instead of showing the whole stack', async () => {
+  await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
+    responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+    responses.failures[`repos/acme/widgets/compare/${mergeBase}...${head}?per_page=100`] =
+      'HTTP 404: Not Found';
+    await saveResponses();
+    await expect(readRepositoryState(host, root, source)).rejects.toThrow(/stack.*range.*404/is);
+  });
+});
+
+test('expands a stacked snapshot at the linked commits after the PR and description change', async () => {
+  await withPullRequest(async ({ host, requests, responses, root, saveResponses, source }) => {
+    const stackBase = 'd'.repeat(40);
+    const stackHead = 'e'.repeat(40);
+    responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${stackBase}..${stackHead})`;
+    responses.comparison.merge_base_commit.sha = stackBase;
+    responses.contents[`repos/acme/widgets/contents/file.txt?ref=${stackBase}`] = 'stack-before\n';
+    responses.contents[`repos/contributor/widgets/contents/file.txt?ref=${stackHead}`] =
+      'stack-after\n';
+    await saveResponses();
+    const state = await readPullRequestState(host, root, source);
+    responses.metadata.body = '';
+    responses.metadata.head.sha = 'f'.repeat(40);
+    responses.comparison.merge_base_commit.sha = mergeBase;
+    responses.files = [[{ filename: 'parent-only.txt', status: 'added' }]];
+    responses.failures['repos/acme/widgets/pulls/42'] = 'HTTP 503: Service Unavailable';
+    await saveResponses();
+    const section = await readDiffSectionContent(
+      host,
+      root,
+      createSectionContentRequest(state.files[0], state.files[0].sections[0], state.source, false),
+    );
+    expect(section.oldFile?.contents).toBe('stack-before\n');
+    expect(section.newFile?.contents).toBe('stack-after\n');
+    expect(section.patch).toBe(patch);
+    expect((await requests()).filter((endpoint) => endpoint.includes('/contents/')).sort()).toEqual(
+      [
+        `repos/acme/widgets/contents/file.txt?ref=${stackBase}`,
+        `repos/contributor/widgets/contents/file.txt?ref=${stackHead}`,
+      ],
+    );
+  });
+});
+
+test('loads stacked context and images from the range when no displayed snapshot is supplied', async () => {
+  await withPullRequest(async ({ host, requests, responses, root, saveResponses, source }) => {
+    const stackBase = 'd'.repeat(40);
+    responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${stackBase}..${head})`;
+    responses.comparison.merge_base_commit.sha = stackBase;
+    responses.comparison.files.push({ filename: 'image.png', patch: '', status: 'modified' });
+    responses.files = [[{ filename: 'parent-only.txt', status: 'added' }]];
+    responses.contents[`repos/acme/widgets/contents/file.txt?ref=${stackBase}`] = 'stack-before\n';
+    responses.contents[`repos/acme/widgets/contents/image.png?ref=${stackBase}`] =
+      'stack-old-image';
+    responses.contents[`repos/contributor/widgets/contents/image.png?ref=${head}`] =
+      'stack-new-image';
+    await saveResponses();
+    const section = await readDiffSectionContent(host, root, {
+      kind: 'pull-request',
+      path: 'file.txt',
+      source,
+    });
+    expect(section.oldFile?.contents).toBe('stack-before\n');
+    expect(section.newFile?.contents).toBe('unchanged\nafter\nmore\n');
+    const image = await readDiffImageContent(host, root, {
+      kind: 'pull-request',
+      path: 'image.png',
+      source,
+    });
+    expect(image).toMatchObject({ status: 'ready' });
+    if (image.status === 'ready') {
+      expect(image.oldImage?.dataUrl).toContain(Buffer.from('stack-old-image').toString('base64'));
+      expect(image.newImage?.dataUrl).toContain(Buffer.from('stack-new-image').toString('base64'));
+    }
+    expect((await requests()).some((endpoint) => endpoint.includes('/pulls/42/files'))).toBe(false);
+  });
+});
+
+test('retains the stacked image snapshot after the PR advances', async () => {
+  await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
+    responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+    responses.comparison.files = [{ filename: 'image.png', patch: '', status: 'modified' }];
+    responses.contents[`repos/acme/widgets/contents/image.png?ref=${mergeBase}`] =
+      'stack-old-image';
+    responses.contents[`repos/contributor/widgets/contents/image.png?ref=${head}`] =
+      'stack-new-image';
+    await saveResponses();
+    const state = await readPullRequestState(host, root, source);
+    responses.metadata.body = '';
+    responses.metadata.head.sha = 'd'.repeat(40);
+    responses.metadata.head.repo.full_name = 'other/widgets';
+    responses.failures['repos/acme/widgets/pulls/42'] = 'HTTP 503: Service Unavailable';
+    await saveResponses();
+    const image = await readDiffImageContent(host, root, {
+      kind: 'pull-request',
+      path: 'image.png',
+      source: state.source,
+    });
+    expect(image).toMatchObject({ status: 'ready' });
+    if (image.status === 'ready') {
+      expect(image.newImage?.dataUrl).toContain(Buffer.from('stack-new-image').toString('base64'));
+    }
+  });
+});
+
+test('lists only incremental commits as PR history and starts base history at the stack parent', async () => {
+  await withPullRequest(async ({ host, requests, responses, root, saveResponses, source }) => {
+    responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+    responses.commits[0].unshift({
+      commit: { author: { date: '2026-10-13T11:00:00Z' }, message: 'Parent stack change' },
+      sha: mergeBase,
+    });
+    responses.baseCommits[0].sha = mergeBase;
+    await saveResponses();
+    const history = await listPullRequestHistory(host, root, source, 10);
+    expect(history.entries.map(({ ref, scope }) => ({ ref, scope }))).toEqual([
+      { ref: head, scope: 'pull-request' },
+      { ref: mergeBase, scope: 'base' },
+    ]);
+    expect((await requests()).some((endpoint) => endpoint.includes('/pulls/42/commits'))).toBe(
+      false,
+    );
+    expect(
+      (await requests()).some((endpoint) => endpoint.includes(`/commits?sha=${mergeBase}`)),
+    ).toBe(true);
+  });
+});
+
+test.each(['comment', 'review'])(
+  'does not submit an incremental old-side %s using whole-PR line coordinates',
+  async (action) => {
+    await withPullRequest(async ({ host, requests, responses, root, saveResponses, source }) => {
+      responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+      await saveResponses();
+      const comment = {
+        body: 'Old line',
+        filePath: 'file.txt',
+        lineNumber: 2,
+        side: 'deletions' as const,
+      };
+      await expect(
+        action === 'comment'
+          ? submitPullRequestComment(host, root, { source, comment })
+          : submitPullRequestReview(host, root, { source, comments: [comment], event: 'COMMENT' }),
+      ).rejects.toThrow(/old.side.*GitHub|GitHub.*old.side/i);
+      expect(
+        (await requests()).filter((endpoint) => /\/(comments|reviews)$/.test(endpoint)),
+      ).toEqual([]);
+      const newSideComment = { ...comment, side: 'additions' as const };
+      if (action === 'comment') {
+        await submitPullRequestComment(host, root, { source, comment: newSideComment });
+      } else {
+        await submitPullRequestReview(host, root, {
+          source,
+          comments: [newSideComment],
+          event: 'COMMENT',
+        });
+      }
+      expect(
+        (await requests()).filter((endpoint) => /\/(comments|reviews)$/.test(endpoint)),
+      ).toHaveLength(1);
+    });
+  },
+);
+
+test.each(['comment', 'review'])(
+  'rejects a stacked inline %s after its head advances while allowing general reviews',
+  async (action) => {
+    await withPullRequest(async ({ host, requests, responses, root, saveResponses, source }) => {
+      responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+      await saveResponses();
+      const state = await readPullRequestState(host, root, source);
+      responses.metadata.head.sha = 'd'.repeat(40);
+      await saveResponses();
+      const comment = {
+        body: 'New line',
+        filePath: 'file.txt',
+        lineNumber: 2,
+        side: 'additions' as const,
+      };
+      await expect(
+        action === 'comment'
+          ? submitPullRequestComment(host, root, { source: state.source, comment })
+          : submitPullRequestReview(host, root, {
+              source: state.source,
+              comments: [comment],
+              event: 'COMMENT',
+            }),
+      ).rejects.toThrow(/head.*changed|changed.*head/i);
+      expect(
+        (await requests()).filter((endpoint) => /\/(comments|reviews)$/.test(endpoint)),
+      ).toEqual([]);
+      await expect(
+        submitPullRequestReview(host, root, {
+          source: state.source,
+          comments: [],
+          body: 'General feedback',
+          event: 'COMMENT',
+        }),
+      ).resolves.toBeUndefined();
+    });
+  },
+);
+
+test('keeps current new-side GitHub comments but omits comments on a different incremental base', async () => {
+  await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
+    responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+    const comment = { body: 'Feedback', path: 'file.txt', line: 2 };
+    responses.comments = [
+      [
+        { ...comment, id: 1, side: 'LEFT' },
+        { ...comment, id: 2, side: 'RIGHT' },
+        { ...comment, id: 3, side: 'RIGHT', start_line: 1, start_side: 'LEFT' },
+      ],
+    ];
+    await saveResponses();
+    const state = await readPullRequestState(host, root, source);
+    expect(state.reviewComments?.map((comment) => comment.id)).toEqual(['github:2']);
+    responses.metadata.head.sha = 'd'.repeat(40);
+    await saveResponses();
+    expect((await readPullRequestState(host, root, source)).reviewComments).toEqual([]);
+  });
+});
+
+test.each(['diverged', 'truncated'])(
+  'rejects a %s comparison rather than showing an inexact stacked diff',
+  async (failure) => {
+    await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
+      responses.metadata.body = `[Files changed](https://github.com/acme/widgets/pull/42/files/${mergeBase}..${head})`;
+      if (failure === 'diverged') responses.comparison.merge_base_commit.sha = base;
+      else
+        responses.comparison.files = Array.from({ length: 300 }, (_, index) => ({
+          filename: `file-${index}.txt`,
+          status: 'modified',
+          patch: '',
+        }));
+      await saveResponses();
+      await expect(readRepositoryState(host, root, source)).rejects.toThrow(
+        failure === 'diverged' ? /ancestor/ : /complete file list/,
+      );
+    });
+  },
+);
 
 test.each([
   ['metadata', 'repos/acme/widgets/pulls/42'],
