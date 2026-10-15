@@ -96,7 +96,10 @@ const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
 export const getRepositoryLoadError = (error: unknown): RepositoryLoadError => {
-  const message = getErrorMessage(error);
+  const message = getErrorMessage(error).replace(
+    /^Error invoking remote method 'codiff:getRepositoryState': (?:Error: )?/,
+    '',
+  );
   return /not a git repository/i.test(message)
     ? {
         kind: 'not-a-repository',

@@ -60,7 +60,7 @@ const {
   readRepositoryChangeSignature,
   readWorkingTreeState,
 } = require('./git-state/working-tree.cjs');
-const { annotateGeneratedFiles } = require('./generated-files.cjs');
+const { annotateGeneratedFiles, applyGeneratedAttributeStates } = require('./generated-files.cjs');
 
 /**
  * @typedef {import('./host/repository-host.cjs').RepositoryHost} RepositoryHost
@@ -88,7 +88,13 @@ const readRepositoryState = async (
       source.type === 'branch-diff';
     const [branch, annotatedState] = await Promise.all([
       gitOrEmpty(host, state.root, ['symbolic-ref', '--short', 'HEAD']),
-      comparisonState ? state : annotateGeneratedFiles(host, state),
+      comparisonState
+        ? state
+        : source.type === 'pull-request' && !isGitLabReviewSource(source)
+          ? // GitHub PRs load entirely through the API. Attribute lookups at the
+            // PR head can trigger an implicit fetch in partial clones and hang.
+            applyGeneratedAttributeStates(state, new Map())
+          : annotateGeneratedFiles(host, state),
     ]);
     return { ...annotatedState, branch: branch.trim() || null };
   };

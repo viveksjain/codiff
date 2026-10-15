@@ -68,6 +68,7 @@ const newEndpoint = `repos/contributor/widgets/contents/file.txt?ref=${head}`;
 const patch =
   'diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -2 +2 @@\n-before\n+after\n';
 const createResponses = () => ({
+  failures: {} as Record<string, string>,
   commit: {
     sha: head,
     parents: [{ sha: mergeBase }],
@@ -134,6 +135,11 @@ const responses = require('./responses.json');
 const args = process.argv.slice(2);
 const endpoint = args.find(arg => arg.startsWith('repos/')) || 'graphql';
 appendFileSync(__dirname + '/requests.jsonl', JSON.stringify(endpoint) + '\\n');
+const operation = args.includes('Accept: application/vnd.github.v3.diff') ? 'diff' : endpoint;
+if (responses.failures[operation]) {
+  process.stderr.write(responses.failures[operation]);
+  process.exit(1);
+}
 let response;
 if (args.includes('graphql')) response = responses.threads;
 else if (args.includes('Accept: application/vnd.github.v3.diff')) response = responses.diff;
@@ -182,19 +188,59 @@ process.stdout.write(typeof response === 'string' ? response : JSON.stringify(re
   });
 };
 
-test('opens a PR using patches without Git fetches or eager file contents', async () => {
+test('opens a PR through the full repository loader without local Git objects or eager file contents', async () => {
   await withPullRequest(async ({ gitRequests, host, requests, root, source }) => {
-    const state = await readPullRequestState(host, root, source);
+    const state = await readRepositoryState(host, root, source);
     expect(state.source).toMatchObject({ baseSha: base, headSha: head, title: 'Review' });
     const section = state.files[0].sections[0];
     expect(section.patch).toBe(patch);
     expect(section.oldFile).toBeUndefined();
     expect(section.newFile).toBeUndefined();
     expect(section.summary?.canLoad).toBe(true);
-    expect(gitRequests.map((args) => args[2])).toEqual(['rev-parse', 'remote', 'config']);
+    expect(gitRequests.map((args) => args[2])).toEqual([
+      'rev-parse',
+      'remote',
+      'config',
+      'symbolic-ref',
+    ]);
     expect((await requests()).some((endpoint) => /\/contents\/|\/compare\//.test(endpoint))).toBe(
       false,
     );
+  });
+});
+
+test.each([
+  ['metadata', 'repos/acme/widgets/pulls/42'],
+  ['changed files', 'repos/acme/widgets/pulls/42/files?per_page=100'],
+  ['diff', 'diff'],
+  ['review comments', 'repos/acme/widgets/pulls/42/comments?per_page=100'],
+])(
+  'identifies the PR and failed %s request while preserving the GitHub error',
+  async (operation, endpoint) => {
+    await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
+      responses.failures[endpoint] =
+        'HTTP 403: Resource protected by organization SAML enforcement.';
+      await saveResponses();
+      const error = await readRepositoryState(host, root, source).catch((error: Error) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('acme/widgets#42');
+      expect((error as Error).message).toContain(operation);
+      expect((error as Error).message).toContain(responses.failures[endpoint]);
+      expect((error as Error).message).toContain(
+        'gh pr view https://github.com/acme/widgets/pull/42',
+      );
+    });
+  },
+);
+
+test('keeps generated path detection for PRs without reading local attributes', async () => {
+  await withPullRequest(async ({ gitRequests, host, responses, root, saveResponses, source }) => {
+    responses.files[0][0].filename = 'pnpm-lock.yaml';
+    responses.diff = patch.replaceAll('file.txt', 'pnpm-lock.yaml');
+    await saveResponses();
+    const state = await readRepositoryState(host, root, source);
+    expect(state.files[0]).toMatchObject({ generated: true, path: 'pnpm-lock.yaml' });
+    expect(gitRequests.some((args) => ['check-attr', 'read-tree'].includes(args[2]))).toBe(false);
   });
 });
 

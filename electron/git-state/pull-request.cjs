@@ -805,11 +805,23 @@ const readPullRequestState = async (host, launchPath, source) => {
   const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
   const pullRequest = parseGitHubPullRequestUrl(source.url);
 
+  /** @template T @param {string} operation @param {Promise<T>} request @returns {Promise<T>} */
+  const withContext = async (operation, request) => {
+    try {
+      return await request;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Unable to load PR ${pullRequest.owner}/${pullRequest.repo}#${pullRequest.number}: failed to read ${operation}.\n\n${detail}\n\nCheck GitHub access with: gh pr view ${pullRequest.url}`,
+        { cause: error },
+      );
+    }
+  };
   const [metadata, apiFiles, diff, reviewComments] = await Promise.all([
-    readPullRequestMetadata(repoRoot, pullRequest),
-    readPullRequestFiles(repoRoot, pullRequest),
-    readPullRequestDiff(repoRoot, pullRequest),
-    readPullRequestComments(repoRoot, pullRequest),
+    withContext('metadata', readPullRequestMetadata(repoRoot, pullRequest)),
+    withContext('changed files', readPullRequestFiles(repoRoot, pullRequest)),
+    withContext('diff', readPullRequestDiff(repoRoot, pullRequest)),
+    withContext('review comments', readPullRequestComments(repoRoot, pullRequest)),
   ]);
   await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const diffByPath = splitPullRequestDiff(diff);

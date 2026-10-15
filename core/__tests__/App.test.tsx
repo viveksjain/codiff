@@ -619,6 +619,19 @@ test('repository load errors hide raw git output for non-repositories', () => {
   });
 });
 
+test('repository load errors remove Electron transport details and keep the underlying error', () => {
+  expect(
+    getRepositoryLoadError(
+      new Error(
+        "Error invoking remote method 'codiff:getRepositoryState': Error: Unable to load PR acme/widgets#42: HTTP 403",
+      ),
+    ),
+  ).toEqual({
+    kind: 'generic',
+    message: 'Unable to load PR acme/widgets#42: HTTP 403',
+  });
+});
+
 test('review comment markdown includes file and patch context', () => {
   const file = {
     fingerprint: 'comment-export',
