@@ -1,6 +1,6 @@
 {
   "name": "@nkzw/codiff-core",
-  "version": "1.16.2",
+  "version": "2.0.0",
   "description": "A fast diff viewer.",
   "license": "MIT",
   "author": {
