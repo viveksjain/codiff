@@ -147,6 +147,7 @@ describe.skipIf(!findSshd())('remote agent execution', () => {
       sshConfigPath: sshd.sshConfigPath,
       controlDirectory: sshd.controlDirectory,
     });
+    await connection.ensureMaster();
     const host = createSshHost({
       alias: sshd.alias,
       connection,
@@ -157,7 +158,7 @@ describe.skipIf(!findSshd())('remote agent execution', () => {
     const realTimeout = AbortSignal.timeout;
     const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => realTimeout(750));
     try {
-      await expect(host.getEnvironment()).rejects.toThrow();
+      await expect(host.getEnvironment()).rejects.toMatchObject({ name: 'AbortError' });
       const pid = (await transportHost.readFile(pidFile)).toString();
       try {
         await vi.waitFor(async () => {

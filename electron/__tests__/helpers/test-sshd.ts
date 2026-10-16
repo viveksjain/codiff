@@ -2,7 +2,7 @@ import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { createConnection, createServer } from 'node:net';
+import { createServer } from 'node:net';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -36,19 +36,10 @@ const getFreePort = () =>
     });
   });
 
-const canConnect = (port: number) =>
-  new Promise<boolean>((resolve) => {
-    const socket = createConnection({ host: '127.0.0.1', port });
-    socket.once('connect', () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once('error', () => resolve(false));
-  });
-
 type ServerState = { failure: Error | null; log: string };
 
-// Resolves once sshd reports that it is listening and accepts a connection.
+// Resolves once this sshd reports that it is listening. A TCP readiness probe
+// would leave delayed pre-auth log entries that tests could mistake for clients.
 // Rejects as soon as sshd exits or fails to spawn, so a port that is already
 // bound by someone else cannot be mistaken for a working server.
 const waitForServer = async (port: number, state: ServerState, timeoutMs = 5000) => {
@@ -57,7 +48,7 @@ const waitForServer = async (port: number, state: ServerState, timeoutMs = 5000)
     if (state.failure) {
       throw state.failure;
     }
-    if (state.log.includes('Server listening') && (await canConnect(port))) {
+    if (state.log.includes('Server listening')) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
