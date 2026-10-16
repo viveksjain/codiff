@@ -1,7 +1,7 @@
 // @ts-check
 
 const { getFingerprint, validateRepositoryPath } = require('./common.cjs');
-const { git } = require('./github-git.cjs');
+const { resolveGitHubReviewRoot } = require('./github-git.cjs');
 const { createEmptyFileContent } = require('./git-files.cjs');
 const {
   createGitHubSection,
@@ -91,7 +91,7 @@ const createMetadata = (commit, files) => {
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {CommitSource} source @returns {Promise<RepositoryState>} */
 const readGitHubCommitState = async (host, launchPath, source) => {
-  const root = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const root = await resolveGitHubReviewRoot(host, launchPath);
   const repository = getRepository(source);
   const [commit, diff] = await Promise.all([
     readCommit(root, source),
@@ -140,7 +140,7 @@ const readGitHubCommitSectionContent = async (
   requestedPath,
   snapshotFile,
 ) => {
-  const root = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const root = await resolveGitHubReviewRoot(host, launchPath);
   const path = validateRepositoryPath(requestedPath);
   const repository = getRepository(source);
   const commit =
@@ -176,7 +176,7 @@ const readGitHubCommitSectionContent = async (
 /** @param {RepositoryHost} host @param {string} launchPath @param {CommitSource} source @param {string} requestedPath @returns {Promise<import('../../core/types.ts').DiffImageContentResult>} */
 const readGitHubCommitImageContent = async (host, launchPath, source, requestedPath) => {
   try {
-    const root = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+    const root = await resolveGitHubReviewRoot(host, launchPath);
     const path = validateRepositoryPath(requestedPath);
     const repository = getRepository(source);
     const commit = await readCommit(root, source);

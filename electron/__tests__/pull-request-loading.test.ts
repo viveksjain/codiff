@@ -167,13 +167,23 @@ const withPullRequest = async (
     saveResponses: () => Promise<void>;
     source: Extract<ReviewSource, { type: 'pull-request' }>;
   }) => Promise<void>,
+  repository: 'matching' | 'none' | 'unrelated' | 'git-unavailable' = 'matching',
 ) => {
   await using directory = await createTemporaryDirectory('codiff-pr-loading-');
   const root = directory.path;
   const git = (...args: string[]) =>
     execFileAsync('git', ['-C', root, ...args], { env: getGitTestEnvironmentForSubprocess() });
-  await git('init', '-b', 'main');
-  await git('remote', 'add', 'origin', 'git@github.com:acme/widgets.git');
+  if (repository !== 'none') {
+    await git('init', '-b', 'main');
+    await git(
+      'remote',
+      'add',
+      'origin',
+      repository === 'unrelated'
+        ? 'git@github.com:other/project.git'
+        : 'git@github.com:acme/widgets.git',
+    );
+  }
   // None of the PR's commits or files exist locally.
   const responses = createResponses();
   const saveResponses = () => writeFile(join(root, 'responses.json'), JSON.stringify(responses));
@@ -230,6 +240,9 @@ process.stdout.write(typeof response === 'string' ? response : JSON.stringify(re
           return Promise.reject(new Error('PR Git data unavailable.'));
         }
         expect(options?.env?.GIT_NO_LAZY_FETCH).toBe('1');
+        if (repository === 'git-unavailable') {
+          return Promise.reject(Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }));
+        }
       }
       return local.exec(command, args, options);
     },
@@ -259,17 +272,41 @@ test('opens a PR through the full repository loader without local Git objects or
     expect(section.oldFile).toBeUndefined();
     expect(section.newFile).toBeUndefined();
     expect(section.summary?.canLoad).toBe(true);
-    expect(gitRequests.map((args) => args[2])).toEqual([
-      'rev-parse',
-      'remote',
-      'config',
-      'symbolic-ref',
-    ]);
+    expect(gitRequests.map((args) => args[2])).toEqual(['rev-parse', 'symbolic-ref']);
     expect((await requests()).some((endpoint) => /\/contents\/|\/compare\//.test(endpoint))).toBe(
       false,
     );
   });
 });
+
+test.each(['none', 'unrelated', 'git-unavailable'] as const)(
+  'opens and expands a PR when the local repository is %s',
+  async (repository) => {
+    await withPullRequest(async ({ host, root, source }) => {
+      const state = await readRepositoryState(host, root, source);
+      expect(state.source).toMatchObject({
+        baseSha: base,
+        headSha: head,
+        title: 'Review',
+        url: 'https://github.com/acme/widgets/pull/42',
+      });
+      expect(state.files.map((file) => file.path)).toEqual(['file.txt']);
+      expect(state.files[0].sections[0].patch).toBe(patch);
+      const section = await readDiffSectionContent(
+        host,
+        state.root,
+        createSectionContentRequest(
+          state.files[0],
+          state.files[0].sections[0],
+          state.source,
+          false,
+        ),
+      );
+      expect(section.oldFile?.contents).toBe('unchanged\nbefore\nmore\n');
+      expect(section.newFile?.contents).toBe('unchanged\nafter\nmore\n');
+    }, repository);
+  },
+);
 
 test('opens only the stack entry’s files and preserves its exact range for refresh and walkthroughs', async () => {
   await withPullRequest(async ({ host, requests, responses, root, saveResponses, source }) => {
@@ -571,68 +608,73 @@ test('keeps generated path detection for PRs without reading local attributes', 
   });
 });
 
-test('secondary PR actions use API data without local objects or Git fallback', async () => {
-  await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
-    const state = await readRepositoryState(host, root, source);
-    const refresh = await readRepositoryState(host, root, state.source);
-    expect(refresh.files[0].sections[0].patch).toBe(patch);
-    const walkthrough = await readWalkthroughRepositoryState(host, root, source);
-    expect(walkthrough.files[0].sections[0].patch).toBe(patch);
-    const history = await readRepositoryHistory(host, root, 10, source);
-    expect(history.entries).toHaveLength(2);
-    for (const entry of history.entries) {
-      const commit = await readRepositoryState(host, root, entry.source!);
-      expect(commit.files).toHaveLength(1);
-    }
-    const comment = {
-      body: 'Review comment',
-      filePath: 'file.txt',
-      lineNumber: 2,
-      side: 'additions' as const,
-    };
-    await expect(submitPullRequestComment(host, root, { comment, source })).resolves.toMatchObject({
-      body: 'Review comment',
-    });
-    await submitPullRequestReview(host, root, { comments: [comment], event: 'COMMENT', source });
+test.each(['matching', 'none', 'unrelated', 'git-unavailable'] as const)(
+  'secondary PR actions use API data when the local repository is %s',
+  async (repository) => {
+    await withPullRequest(async ({ host, responses, root, saveResponses, source }) => {
+      const state = await readRepositoryState(host, root, source);
+      const refresh = await readRepositoryState(host, root, state.source);
+      expect(refresh.files[0].sections[0].patch).toBe(patch);
+      const walkthrough = await readWalkthroughRepositoryState(host, root, source);
+      expect(walkthrough.files[0].sections[0].patch).toBe(patch);
+      const history = await readRepositoryHistory(host, root, 10, source);
+      expect(history.entries).toHaveLength(2);
+      for (const entry of history.entries) {
+        const commit = await readRepositoryState(host, root, entry.source!);
+        expect(commit.files).toHaveLength(1);
+      }
+      const comment = {
+        body: 'Review comment',
+        filePath: 'file.txt',
+        lineNumber: 2,
+        side: 'additions' as const,
+      };
+      await expect(
+        submitPullRequestComment(host, root, { comment, source }),
+      ).resolves.toMatchObject({
+        body: 'Review comment',
+      });
+      await submitPullRequestReview(host, root, { comments: [comment], event: 'COMMENT', source });
 
-    responses.files[0][0] = { filename: 'image.png', status: 'modified' };
-    responses.commit.files[0].filename = 'image.png';
-    responses.contents[`repos/acme/widgets/contents/image.png?ref=${base}`] = 'old-image';
-    responses.contents[`repos/acme/widgets/contents/image.png?ref=${mergeBase}`] = 'old-image';
-    responses.contents[`repos/contributor/widgets/contents/image.png?ref=${mergeBase}`] =
-      'old-image';
-    responses.contents[`repos/contributor/widgets/contents/image.png?ref=${head}`] = 'new-image';
-    await saveResponses();
-    expect(
-      await readDiffImageContent(host, root, { kind: 'pull-request', path: 'image.png', source }),
-    ).toMatchObject({
-      status: 'ready',
-      oldImage: { mimeType: 'image/png' },
-      newImage: { mimeType: 'image/png' },
-    });
-    expect(
-      await readDiffImageContent(host, root, {
-        kind: 'commit',
-        path: 'image.png',
-        source: history.entries[0].source,
-      }),
-    ).toMatchObject({
-      status: 'ready',
-      oldImage: { mimeType: 'image/png' },
-      newImage: { mimeType: 'image/png' },
-    });
+      responses.files[0][0] = { filename: 'image.png', status: 'modified' };
+      responses.commit.files[0].filename = 'image.png';
+      responses.contents[`repos/acme/widgets/contents/image.png?ref=${base}`] = 'old-image';
+      responses.contents[`repos/acme/widgets/contents/image.png?ref=${mergeBase}`] = 'old-image';
+      responses.contents[`repos/contributor/widgets/contents/image.png?ref=${mergeBase}`] =
+        'old-image';
+      responses.contents[`repos/contributor/widgets/contents/image.png?ref=${head}`] = 'new-image';
+      await saveResponses();
+      expect(
+        await readDiffImageContent(host, root, { kind: 'pull-request', path: 'image.png', source }),
+      ).toMatchObject({
+        status: 'ready',
+        oldImage: { mimeType: 'image/png' },
+        newImage: { mimeType: 'image/png' },
+      });
+      expect(
+        await readDiffImageContent(host, root, {
+          kind: 'commit',
+          path: 'image.png',
+          source: history.entries[0].source,
+        }),
+      ).toMatchObject({
+        status: 'ready',
+        oldImage: { mimeType: 'image/png' },
+        newImage: { mimeType: 'image/png' },
+      });
 
-    responses.failures['repos/acme/widgets/pulls/42'] = 'HTTP 503: Service Unavailable';
-    await saveResponses();
-    await expect(readRepositoryHistory(host, root, 10, source)).rejects.toThrow('HTTP 503');
-    expect(
-      await readDiffImageContent(host, root, { kind: 'pull-request', path: 'image.png', source }),
-    ).toMatchObject({ status: 'unavailable', reason: expect.stringContaining('HTTP 503') });
-    await expect(
-      submitPullRequestReview(host, root, { comments: [], event: 'APPROVE', source }),
-    ).rejects.toThrow('HTTP 503');
-  });
-});
+      responses.failures['repos/acme/widgets/pulls/42'] = 'HTTP 503: Service Unavailable';
+      await saveResponses();
+      await expect(readRepositoryHistory(host, root, 10, source)).rejects.toThrow('HTTP 503');
+      expect(
+        await readDiffImageContent(host, root, { kind: 'pull-request', path: 'image.png', source }),
+      ).toMatchObject({ status: 'unavailable', reason: expect.stringContaining('HTTP 503') });
+      await expect(
+        submitPullRequestReview(host, root, { comments: [], event: 'APPROVE', source }),
+      ).rejects.toThrow('HTTP 503');
+    }, repository);
+  },
+);
 
 test('direct generated-file annotation never reads GitHub PR or history objects', async () => {
   const { annotateGeneratedFiles } = require('../generated-files.cjs');
@@ -647,7 +689,7 @@ test('direct generated-file annotation never reads GitHub PR or history objects'
         (await annotateGeneratedFiles(host, { ...state, source: reviewSource })).files[0].generated,
       ).toBe(true);
     }
-    expect(gitRequests.map((args) => args[2])).toEqual(['rev-parse', 'remote', 'config']);
+    expect(gitRequests.map((args) => args[2])).toEqual(['rev-parse']);
   });
 });
 
@@ -658,7 +700,7 @@ test('loads PR history from GitHub with no local commits or fetches', async () =
       { scope: 'pull-request', subject: 'PR' },
       { scope: 'base', subject: 'Base' },
     ]);
-    expect(gitRequests.map((args) => args[2])).toEqual(['rev-parse', 'remote', 'config']);
+    expect(gitRequests.map((args) => args[2])).toEqual(['rev-parse']);
     expect((await requests()).some((endpoint) => /\/contents\/|\/compare\//.test(endpoint))).toBe(
       false,
     );
@@ -741,36 +783,39 @@ test('expands the displayed patch when GitHub omits the per-file patch', async (
   });
 });
 
-test('opens PR history commits and expands their contents through GitHub without local objects', async () => {
-  await withPullRequest(async ({ gitRequests, host, requests, root, source }) => {
-    const history = await listPullRequestHistory(host, root, source, 10);
-    expect(history.entries[0].source).toMatchObject({
-      type: 'commit',
-      ref: head,
-      github: { owner: 'contributor', repo: 'widgets' },
-    });
-    expect(history.entries[1].source).toMatchObject({
-      type: 'commit',
-      ref: base,
-      github: { owner: 'acme', repo: 'widgets' },
-    });
-    const state = await readRepositoryState(host, root, history.entries[0].source!);
-    expect(state.commitMetadata?.subject).toBe('PR');
-    expect(state.files[0].sections[0].newFile).toBeUndefined();
-    expect((await requests()).some((endpoint) => endpoint.includes('/contents/'))).toBe(false);
-    const section = await readDiffSectionContent(host, root, {
-      kind: 'commit',
-      path: 'file.txt',
-      source: state.source,
-      file: { patch: state.files[0].sections[0].patch, status: 'modified' },
-    });
-    expect(section.oldFile?.contents).toBe('unchanged\nbefore\nmore\n');
-    expect(section.newFile?.contents).toBe('unchanged\nafter\nmore\n');
-    expect(
-      gitRequests.some((args) => ['fetch', 'cat-file', 'ls-tree', 'show'].includes(args[2])),
-    ).toBe(false);
-  });
-});
+test.each(['matching', 'none', 'unrelated', 'git-unavailable'] as const)(
+  'opens and expands PR history commits when the local repository is %s',
+  async (repository) => {
+    await withPullRequest(async ({ gitRequests, host, requests, root, source }) => {
+      const history = await listPullRequestHistory(host, root, source, 10);
+      expect(history.entries[0].source).toMatchObject({
+        type: 'commit',
+        ref: head,
+        github: { owner: 'contributor', repo: 'widgets' },
+      });
+      expect(history.entries[1].source).toMatchObject({
+        type: 'commit',
+        ref: base,
+        github: { owner: 'acme', repo: 'widgets' },
+      });
+      const state = await readRepositoryState(host, root, history.entries[0].source!);
+      expect(state.commitMetadata?.subject).toBe('PR');
+      expect(state.files[0].sections[0].newFile).toBeUndefined();
+      expect((await requests()).some((endpoint) => endpoint.includes('/contents/'))).toBe(false);
+      const section = await readDiffSectionContent(host, root, {
+        kind: 'commit',
+        path: 'file.txt',
+        source: state.source,
+        file: { patch: state.files[0].sections[0].patch, status: 'modified' },
+      });
+      expect(section.oldFile?.contents).toBe('unchanged\nbefore\nmore\n');
+      expect(section.newFile?.contents).toBe('unchanged\nafter\nmore\n');
+      expect(
+        gitRequests.some((args) => ['fetch', 'cat-file', 'ls-tree', 'show'].includes(args[2])),
+      ).toBe(false);
+    }, repository);
+  },
+);
 
 test.each(['added', 'removed'])(
   'loads %s files without requesting the absent side',
@@ -817,7 +862,7 @@ test('rejects missing contents and unlisted paths while preserving the displayed
   });
 });
 
-test('expands a validated snapshot after an aliased remote head advances', async () => {
+test('opens and expands a PR without probing its local SSH remote', async () => {
   await withPullRequest(async ({ host, root, source }) => {
     await execFileAsync(
       'git',
@@ -839,7 +884,7 @@ test('expands a validated snapshot after an aliased remote head advances', async
       },
     };
     const state = await readPullRequestState(aliasHost, root, source);
-    expect(probes).toBe(1);
+    expect(probes).toBe(0);
     remoteHead = 'd'.repeat(40);
     const file = state.files[0];
     const section = await readDiffSectionContent(
@@ -849,6 +894,6 @@ test('expands a validated snapshot after an aliased remote head advances', async
     );
     expect(section.oldFile?.contents).toBe('unchanged\nbefore\nmore\n');
     expect(section.newFile?.contents).toBe('unchanged\nafter\nmore\n');
-    expect(probes).toBe(1);
+    expect(probes).toBe(0);
   });
 });

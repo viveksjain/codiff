@@ -17,7 +17,8 @@ to the working tree (`git diff`) and say so. Anchor every `hunkId` against which
 choose.
 
 For GitHub pull requests, use the GitHub API (`gh pr diff` and `gh api`) for patches
-and additional file context. PR commits and blobs may be absent from the local clone.
+and additional file context. A local checkout or matching remote is not required; derive the
+repository owner and name from the PR URL. PR commits and blobs may be absent from the local clone.
 Do not clone, fetch PR refs, or run local Git object reads that could trigger a lazy fetch.
 For stacked PRs, Codiff uses the commit range in the description's incremental review link
 (`.../pull/<current-pr>/files/<base>..<head>`). Use that same range with

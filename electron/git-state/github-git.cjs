@@ -81,4 +81,13 @@ const gitOrEmpty = async (host, root, args) => {
   }
 };
 
-module.exports = { git, gitOrEmpty, isGitHubSource, withNoLazyFetch };
+/**
+ * GitHub reviews use API data and can open outside a checkout. Keep the local
+ * root when available; otherwise the launch directory is just the CLI's cwd.
+ * @param {RepositoryHost} host
+ * @param {string} launchPath
+ */
+const resolveGitHubReviewRoot = async (host, launchPath) =>
+  (await gitOrEmpty(host, launchPath, ['rev-parse', '--show-toplevel'])).trim() || launchPath;
+
+module.exports = { git, gitOrEmpty, isGitHubSource, resolveGitHubReviewRoot, withNoLazyFetch };

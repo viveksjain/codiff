@@ -17,7 +17,7 @@ const {
   summarizeContent,
   validateRepositoryPath,
 } = require('./common.cjs');
-const { git, gitOrEmpty } = require('./github-git.cjs');
+const { resolveGitHubReviewRoot } = require('./github-git.cjs');
 const { createEmptyFileContent } = require('./git-files.cjs');
 const { parseStackedPullRequestRange } = require('./stacked-pull-request.cjs');
 const { parseReviewUrl } = require('../review-source.cjs');
@@ -34,10 +34,8 @@ const { parseReviewUrl } = require('../review-source.cjs');
  * @typedef {import('../../core/types.ts').SubmitPullRequestCommentRequest} SubmitPullRequestCommentRequest
  * @typedef {import('../../core/types.ts').SubmitPullRequestReviewRequest} SubmitPullRequestReviewRequest
  * @typedef {{owner: string; repo: string}} GitHubRepositoryReference
- * @typedef {{name: string; url: string}} LocalGitRemote
  * @typedef {{full_name?: string; name?: string; owner?: {login?: string}}} GitHubRepositoryMetadata
  * @typedef {{number: number; owner: string; repo: string; url: string}} PullRequestReference
- * @typedef {{direction: 'fetch' | 'push'; name: string; owner: string; repo: string}} GitHubRemote
  * @typedef {{filename: string; patch?: string; previous_filename?: string; status: string}} GitHubPullRequestFile
  * @typedef {{base?: {ref?: string; repo?: GitHubRepositoryMetadata | null; sha?: string}; body?: string | null; head?: {ref?: string; repo?: GitHubRepositoryMetadata | null; sha?: string}; title?: string; user?: {avatar_url?: string; html_url?: string; login?: string}}} GitHubPullRequestMetadata
  * @typedef {{author?: {avatar_url?: string}; commit?: {author?: {date?: string; email?: string; name?: string}; message?: string}; parents?: ReadonlyArray<{sha?: string}>; sha?: string}} GitHubCommit
@@ -108,153 +106,6 @@ const parseGitHubPullRequestUrl = (value) => {
     repo: parsed.repo,
     url: parsed.url,
   };
-};
-
-/** @param {string} value @returns {GitHubRepositoryReference | null} */
-const parseGitHubRemoteUrl = (value) => {
-  const trimmed = value.trim();
-  const sshMatch = trimmed.match(/^(?:git|org-\d+)@github\.com:([^/]+)\/(.+?)(?:\.git)?$/i);
-  if (sshMatch) {
-    return {
-      owner: sshMatch[1],
-      repo: sshMatch[2].replace(/\.git$/i, ''),
-    };
-  }
-
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname.toLowerCase() !== 'github.com') {
-      return null;
-    }
-
-    const match = url.pathname.match(/^\/([^/]+)\/(.+?)(?:\.git)?$/);
-    return match
-      ? {
-          owner: match[1],
-          repo: match[2].replace(/\.git$/i, ''),
-        }
-      : null;
-  } catch {
-    return null;
-  }
-};
-
-/** @param {string} value @returns {GitHubRepositoryReference | null} */
-const parseRemoteRepositoryPath = (value) => {
-  const trimmed = value.trim();
-  const sshMatch = trimmed.match(/^(?:[^@\s/:]+@)?[^/\s:]+:([^/]+)\/(.+?)(?:\.git)?$/);
-  if (sshMatch) {
-    return {
-      owner: sshMatch[1],
-      repo: sshMatch[2].replace(/\.git$/i, ''),
-    };
-  }
-
-  try {
-    const url = new URL(trimmed);
-    if (!['git:', 'http:', 'https:', 'ssh:'].includes(url.protocol)) {
-      return null;
-    }
-
-    const match = url.pathname.match(/^\/([^/]+)\/(.+?)(?:\.git)?\/?$/);
-    return match
-      ? {
-          owner: match[1],
-          repo: match[2].replace(/\.git$/i, '').replace(/\/$/, ''),
-        }
-      : null;
-  } catch {
-    return null;
-  }
-};
-
-/** @param {RepositoryHost} host @param {string} repoRoot @returns {Promise<Array<LocalGitRemote>>} */
-const readLocalGitRemotes = async (host, repoRoot) => {
-  const names = (await gitOrEmpty(host, repoRoot, ['remote']))
-    .split('\n')
-    .map((name) => name.trim())
-    .filter(Boolean);
-  const remotes = await Promise.all(
-    names.map(async (name) => {
-      // Read the configured URL instead of `git remote -v`, which applies
-      // `insteadOf` rewrites and can hide the original github.com host.
-      const url = (await gitOrEmpty(host, repoRoot, ['config', '--get', `remote.${name}.url`]))
-        .split('\n')[0]
-        .trim();
-      return url ? { name, url } : null;
-    }),
-  );
-  return remotes.filter((remote) => remote != null);
-};
-
-/** @param {LocalGitRemote} remote */
-const getRemotePriority = (remote) => (remote.name === 'origin' ? 0 : 1);
-
-/**
- * Let Git resolve SSH aliases, credential helpers, and URL rewrites, then make
- * sure the candidate remote exposes this exact GitHub pull request head.
- *
- * @param {RepositoryHost} host
- * @param {string} repoRoot
- * @param {LocalGitRemote} remote
- * @param {PullRequestReference} pullRequest
- * @param {string} expectedHeadSha
- */
-const remoteHasPullRequestHead = async (host, repoRoot, remote, pullRequest, expectedHeadSha) => {
-  const headRef = `refs/pull/${pullRequest.number}/head`;
-  const output = await gitOrEmpty(host, repoRoot, ['ls-remote', '--refs', remote.name, headRef]);
-  return output.split('\n').some((line) => {
-    const [sha, ref] = line.trim().split(/\s+/);
-    return ref === headRef && sha?.toLowerCase() === expectedHeadSha.toLowerCase();
-  });
-};
-
-/** @param {RepositoryHost} host @param {string} repoRoot @param {PullRequestReference} pullRequest @param {string | undefined} expectedHeadSha @returns {Promise<GitHubRemote>} */
-const selectPullRequestRemote = async (host, repoRoot, pullRequest, expectedHeadSha) => {
-  const remotes = (await readLocalGitRemotes(host, repoRoot)).sort(
-    (left, right) => getRemotePriority(left) - getRemotePriority(right),
-  );
-  const remote = remotes
-    .map((remote) => ({ remote, repository: parseGitHubRemoteUrl(remote.url) }))
-    .filter(
-      ({ repository }) =>
-        repository?.owner.toLowerCase() === pullRequest.owner.toLowerCase() &&
-        repository.repo.toLowerCase() === pullRequest.repo.toLowerCase(),
-    )[0]?.remote;
-
-  if (remote) {
-    return {
-      direction: 'fetch',
-      name: remote.name,
-      owner: pullRequest.owner,
-      repo: pullRequest.repo,
-    };
-  }
-
-  if (expectedHeadSha) {
-    const candidates = remotes.filter(({ url }) => {
-      const repository = parseRemoteRepositoryPath(url);
-      return (
-        repository?.owner.toLowerCase() === pullRequest.owner.toLowerCase() &&
-        repository.repo.toLowerCase() === pullRequest.repo.toLowerCase()
-      );
-    });
-
-    for (const candidate of candidates) {
-      if (await remoteHasPullRequestHead(host, repoRoot, candidate, pullRequest, expectedHeadSha)) {
-        return {
-          direction: 'fetch',
-          name: candidate.name,
-          owner: pullRequest.owner,
-          repo: pullRequest.repo,
-        };
-      }
-    }
-  }
-
-  throw new Error(
-    `Pull request ${pullRequest.owner}/${pullRequest.repo} does not match a GitHub remote in this repository.`,
-  );
 };
 
 /**
@@ -650,12 +501,11 @@ const normalizeGitHubPullRequestCommit = (commit) => normalizeGitHubCommit(commi
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @param {number} [limit] */
 const listPullRequestHistory = async (host, launchPath, source, limit = 200) => {
-  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const repoRoot = await resolveGitHubReviewRoot(host, launchPath);
   const pullRequest = parseGitHubPullRequestUrl(source.url);
   const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
   const commitRange =
     source.commitRange ?? parseStackedPullRequestRange(metadata.body, pullRequest);
-  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const base = commitRange?.base ?? metadata.base?.sha;
   const [commits, baseCommits] = await Promise.all([
     commitRange
@@ -850,7 +700,7 @@ const createPullRequestSection = (pullRequest, file, patch, oldFile, newFile) =>
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {Extract<ReviewSource, {type: 'pull-request'}>} source @returns {Promise<RepositoryState>} */
 const readPullRequestState = async (host, launchPath, source) => {
-  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const repoRoot = await resolveGitHubReviewRoot(host, launchPath);
   const pullRequest = parseGitHubPullRequestUrl(source.url);
 
   /** @template T @param {string} operation @param {Promise<T>} request @returns {Promise<T>} */
@@ -890,7 +740,6 @@ const readPullRequestState = async (host, launchPath, source) => {
     }),
     withContext('review comments', readPullRequestComments(repoRoot, pullRequest)),
   ]);
-  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const diffByPath = splitPullRequestDiff(diff);
   const reviewFiles = [...apiFiles].map((file) => {
     const patch = diffByPath.get(file.filename) || createPatchFromPullRequestFile(file);
@@ -971,7 +820,7 @@ const readPullRequestSectionContent = async (
   requestedPath,
   snapshotFile,
 ) => {
-  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const repoRoot = await resolveGitHubReviewRoot(host, launchPath);
   const path = validateRepositoryPath(requestedPath);
   const pullRequest = parseGitHubPullRequestUrl(source.url);
   const metadata =
@@ -993,11 +842,6 @@ const readPullRequestSectionContent = async (
   const head = commitRange?.head ?? source.headSha ?? metadata?.head?.sha;
   if (!base || !head) {
     throw new Error('Codiff could not resolve the pull request commits from GitHub.');
-  }
-  // A displayed snapshot was validated when it opened. Rechecking an opaque
-  // remote's live PR head would reject that snapshot after a subsequent push.
-  if (!snapshotFile || !source.baseSha || !source.headSha) {
-    await selectPullRequestRemote(host, repoRoot, pullRequest, metadata?.head?.sha ?? head);
   }
   const file = files.find((candidate) => candidate.filename === path);
   if (!file) {
@@ -1045,7 +889,7 @@ const readPullRequestSectionContent = async (
  */
 const readPullRequestImageContent = async (host, launchPath, source, requestedPath) => {
   try {
-    const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+    const repoRoot = await resolveGitHubReviewRoot(host, launchPath);
     const path = validateRepositoryPath(requestedPath);
     const pullRequest = parseGitHubPullRequestUrl(source.url);
 
@@ -1058,9 +902,6 @@ const readPullRequestImageContent = async (host, launchPath, source, requestedPa
     const files = commitRange
       ? (await readStackedComparison(repoRoot, pullRequest, commitRange)).files
       : await readPullRequestFiles(repoRoot, pullRequest);
-    if (metadata) {
-      await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
-    }
     const file = files.find((candidate) => candidate.filename === path);
     if (!file) {
       throw new Error('File is not part of this pull request.');
@@ -1178,10 +1019,9 @@ const validateStackedReviewComments = (comments, source, pullRequest, metadata) 
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {SubmitPullRequestCommentRequest} request */
 const submitPullRequestComment = async (host, launchPath, request) => {
-  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const repoRoot = await resolveGitHubReviewRoot(host, launchPath);
   const pullRequest = parseGitHubPullRequestUrl(request.source.url);
   const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
-  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const commitRange = validateStackedReviewComments(
     [request.comment],
     request.source,
@@ -1223,10 +1063,9 @@ const submitPullRequestComment = async (host, launchPath, request) => {
 
 /** @param {RepositoryHost} host @param {string} launchPath @param {SubmitPullRequestReviewRequest} request */
 const submitPullRequestReview = async (host, launchPath, request) => {
-  const repoRoot = (await git(host, launchPath, ['rev-parse', '--show-toplevel'])).trim();
+  const repoRoot = await resolveGitHubReviewRoot(host, launchPath);
   const pullRequest = parseGitHubPullRequestUrl(request.source.url);
   const metadata = await readPullRequestMetadata(repoRoot, pullRequest);
-  await selectPullRequestRemote(host, repoRoot, pullRequest, metadata.head?.sha);
   const commitRange = validateStackedReviewComments(
     request.comments,
     request.source,
@@ -1291,7 +1130,6 @@ module.exports = {
   readGitHubImageFile,
   readGitHubTextFile,
   readPullRequestState,
-  selectPullRequestRemote,
   selectUnresolvedReviewComments,
   splitPullRequestDiff,
   submitPullRequestComment,

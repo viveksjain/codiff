@@ -68,7 +68,9 @@ Diffs, expanded context, images, walkthroughs, and PR history use the same range
 GitHub's API, without cloning or fetching commits. Old-side inline GitHub comments require
 the full PR's line numbers; use a new-side comment, a general review, or GitHub for those.
 
-Full GitHub and GitLab review URLs are also supported. GitLab hosts and nested project paths are
+Full GitHub and GitLab review URLs are also supported. GitHub PR URLs work from any directory,
+without a local checkout or matching remote, using your authenticated `gh` CLI.
+GitLab hosts and nested project paths are
 derived from the URL or local Git remote and authenticated through `glab`; Codiff does not require
 instance-specific configuration.
 
