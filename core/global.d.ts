@@ -70,8 +70,9 @@ declare global {
         kind: CodiffMarkdownDocument['kind'];
         path: string;
       }) => Promise<CodiffMarkdownDocument>;
+      /** Generate or load a walkthrough for this snapshot without refreshing the repository. */
       getNarrativeWalkthrough: (
-        source?: ReviewSource,
+        snapshot: RepositoryState,
         options?: NarrativeWalkthroughRequestOptions,
       ) => Promise<NarrativeWalkthroughResult>;
       getPlanReview: () => Promise<PlanReview | null>;

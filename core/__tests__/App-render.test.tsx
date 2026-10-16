@@ -170,6 +170,7 @@ test.each(['empty', 'failure'] as const)(
 
 test('discovery completion keeps a walkthrough opened from the tracked snapshot', async () => {
   const tracked = createChangedFile('tracked.ts');
+  const trackedSnapshot = { ...repositoryState, files: [tracked], untrackedLoading: true };
   const completion = Promise.withResolvers<RepositoryState>();
   const walkthrough = createNarrativeWalkthroughFixture([
     { added: 1, path: 'tracked.ts', status: 'modified' },
@@ -177,7 +178,7 @@ test('discovery completion keeps a walkthrough opened from the tracked snapshot'
   window.codiff = createCodiffMock({
     getNarrativeWalkthrough: vi.fn(async () => ({ status: 'ready' as const, walkthrough })),
     getRepositoryState: vi.fn(async (_source, onTracked) => {
-      onTracked?.({ ...repositoryState, files: [tracked], untrackedLoading: true });
+      onTracked?.(trackedSnapshot);
       return completion.promise;
     }),
   });
@@ -189,6 +190,8 @@ test('discovery completion keeps a walkthrough opened from the tracked snapshot'
       .click(),
   );
   await waitFor(() => expect(view.container.textContent).toContain(walkthrough.focus));
+  expect(window.codiff.getNarrativeWalkthrough).toHaveBeenCalledWith(trackedSnapshot, undefined);
+  expect(window.codiff.getRepositoryState).toHaveBeenCalledTimes(1);
   await act(async () => completion.resolve({ ...repositoryState, files: [tracked] }));
   expect(view.container.textContent).toContain(walkthrough.focus);
   expect(window.codiff.getNarrativeWalkthrough).toHaveBeenCalledTimes(1);
@@ -213,9 +216,9 @@ test.each([true, false])(
     let workingReads = 0;
     const openFile = vi.fn(async () => {});
     window.codiff = createCodiffMock({
-      getNarrativeWalkthrough: vi.fn(async (source) => ({
+      getNarrativeWalkthrough: vi.fn(async (snapshot) => ({
         status: 'ready' as const,
-        walkthrough: source?.type === 'commit' ? commitWalkthrough : walkthrough,
+        walkthrough: snapshot.source.type === 'commit' ? commitWalkthrough : walkthrough,
       })),
       getRepositoryHistory: vi.fn(async () => ({
         entries: [
@@ -1501,7 +1504,7 @@ test('reload forces a new generated walkthrough when local files changed', async
   await using app = await renderReact(<App />);
 
   await waitFor(() => {
-    expect(getNarrativeWalkthrough).toHaveBeenCalledWith(refreshedState.source, {
+    expect(getNarrativeWalkthrough).toHaveBeenCalledWith(refreshedState, {
       force: true,
     });
     expect(app.container.querySelector('.wt-stop-block')).not.toBeNull();
@@ -3718,10 +3721,10 @@ test('refreshing changed files automatically regenerates the walkthrough', async
     expect(container.textContent).not.toContain('Regenerate walkthrough');
     expect(container.textContent).not.toContain('Changed after the walkthrough was generated.');
   });
-  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(repositoryState.source, {
-    force: true,
-    previousWalkthrough: initialWalkthrough,
-  });
+  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(
+    { ...repositoryState, files: [addedFile, appFile] },
+    { force: true, previousWalkthrough: initialWalkthrough },
+  );
   await act(async () => {
     onRepositoryChanged?.({ root: '/repo' });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -3736,10 +3739,10 @@ test('refreshing changed files automatically regenerates the walkthrough', async
     expect(container.textContent).toContain('added.ts');
     expect(container.textContent).toContain('later.ts');
   });
-  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(repositoryState.source, {
-    force: true,
-    previousWalkthrough: addedWalkthrough,
-  });
+  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(
+    { ...repositoryState, files: [addedFile, appFile, laterFile] },
+    { force: true, previousWalkthrough: addedWalkthrough },
+  );
 });
 
 test('drops automatic walkthrough regeneration when the same source refreshes again', async () => {
@@ -3993,10 +3996,10 @@ test('committing and then editing again clears and regenerates the walkthrough',
     expect(container.textContent).not.toContain('Initial walkthrough.');
     expect(container.querySelector('.wt-stop-block')).toBeNull();
   });
-  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(repositoryState.source, {
-    force: true,
-    previousWalkthrough: undefined,
-  });
+  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(
+    { ...repositoryState, files: [nextFile] },
+    { force: true, previousWalkthrough: undefined },
+  );
   await act(async () => {
     resolveNextWalkthrough?.({ status: 'ready', walkthrough: nextWalkthrough });
     await new Promise((resolve) => setTimeout(resolve, 0));

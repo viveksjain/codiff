@@ -100,6 +100,7 @@ const renderWalkthroughController = async ({
 };
 
 test('walkthrough controller lazily generates, refreshes, and transitions modes', async () => {
+  const getRepositoryState = vi.fn();
   const getNarrativeWalkthrough = vi.fn(async () => ({
     status: 'ready' as const,
     walkthrough,
@@ -107,6 +108,7 @@ test('walkthrough controller lazily generates, refreshes, and transitions modes'
   await using view = await renderWalkthroughController({
     codiff: {
       getNarrativeWalkthrough,
+      getRepositoryState,
       onWalkthroughProgress: vi.fn(() => () => {}),
     },
   });
@@ -120,7 +122,8 @@ test('walkthrough controller lazily generates, refreshes, and transitions modes'
     expect(getController().narrativeWalkthrough).toEqual(walkthrough);
     expect(getController().walkthroughLoading).toBe(false);
   });
-  expect(getNarrativeWalkthrough).toHaveBeenCalledWith(walkthrough.source, undefined);
+  expect(getNarrativeWalkthrough).toHaveBeenCalledWith(stateRef.current, undefined);
+  expect(getRepositoryState).not.toHaveBeenCalled();
   expect(getController().sidebarMode).toBe('walkthrough');
   expect(getController().walkthroughProgress.responseLabelIndex).toBe(0);
   const refreshedState = {
@@ -135,10 +138,11 @@ test('walkthrough controller lazily generates, refreshes, and transitions modes'
   await waitFor(() => {
     expect(getNarrativeWalkthrough).toHaveBeenCalledTimes(2);
   });
-  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(walkthrough.source, {
+  expect(getNarrativeWalkthrough).toHaveBeenLastCalledWith(refreshedState, {
     force: true,
     previousWalkthrough: walkthrough,
   });
+  expect(getRepositoryState).not.toHaveBeenCalled();
   await act(async () => {
     getController().openCommitView();
   });

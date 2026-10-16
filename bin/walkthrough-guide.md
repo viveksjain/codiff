@@ -5,6 +5,9 @@ through a change, with ordered chapters, stops, and deterministic hunk ids from 
 diff. The diff content itself is not embedded. Codiff computes the diff from the repository,
 resolves hunk ids on load, and renders the real current diff.
 
+In the app, walkthrough generation uses the loaded diff snapshot without rereading Git.
+Refresh the repository view first to include newer changes.
+
 Write the JSON document to a **temporary file outside the repository** and pass it to
 Codiff with `--walkthrough-file`.
 

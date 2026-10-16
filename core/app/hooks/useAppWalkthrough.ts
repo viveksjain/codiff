@@ -141,22 +141,22 @@ export function useAppWalkthrough({
   );
 
   const loadNarrativeWalkthrough = useCallback(
-    (source: RepositoryState['source'], options?: NarrativeWalkthroughRequestOptions) => {
+    (snapshot: RepositoryState, options?: NarrativeWalkthroughRequestOptions) => {
       if (!repositoryConnected) {
         return;
       }
       const request = walkthroughRequestRef.current + 1;
       walkthroughRequestRef.current = request;
-      const sourceKey = getSourceKey(source);
+      const sourceKey = getSourceKey(snapshot.source);
       const stateGeneration = stateGenerationRef.current;
       const isCurrentState = () =>
         walkthroughRequestRef.current === request &&
         stateGenerationRef.current === stateGeneration &&
-        getSourceKey(stateRef.current?.source ?? source) === sourceKey;
+        getSourceKey(stateRef.current?.source ?? snapshot.source) === sourceKey;
       startWalkthroughLoading();
       setWalkthroughError(null);
       window.codiff
-        .getNarrativeWalkthrough(source, options)
+        .getNarrativeWalkthrough(snapshot, options)
         .then((result) => {
           if (!isCurrentState()) {
             return;
@@ -209,7 +209,7 @@ export function useAppWalkthrough({
         return;
       }
 
-      loadNarrativeWalkthrough(nextState.source, {
+      loadNarrativeWalkthrough(nextState, {
         force: true,
         previousWalkthrough: previousWalkthrough ?? undefined,
       });
@@ -245,7 +245,7 @@ export function useAppWalkthrough({
         return;
       }
 
-      loadNarrativeWalkthrough(state.source);
+      loadNarrativeWalkthrough(state);
     },
     [
       loadNarrativeWalkthrough,

@@ -830,8 +830,8 @@ export default function App() {
       const shouldFetchNarrative = shouldLoadNarrative || walkthroughFilePath != null;
       const narrativeResult = shouldFetchNarrative
         ? reloadFilesChanged && walkthroughFilePath == null
-          ? await window.codiff.getNarrativeWalkthrough(orderedState.source, { force: true })
-          : await window.codiff.getNarrativeWalkthrough(orderedState.source)
+          ? await window.codiff.getNarrativeWalkthrough(orderedState, { force: true })
+          : await window.codiff.getNarrativeWalkthrough(orderedState)
         : null;
       if (canceled || sourceRequestRef.current !== request) {
         return;

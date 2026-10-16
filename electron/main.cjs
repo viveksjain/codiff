@@ -1928,7 +1928,7 @@ ipcMain.handle('codiff:installTerminalHelper', async (event) => {
   return getTerminalHelperStatus();
 });
 
-ipcMain.handle('codiff:getNarrativeWalkthrough', async (event, source, options) => {
+ipcMain.handle('codiff:getNarrativeWalkthrough', async (event, state, options) => {
   assertConnectedWindow(event.sender.id);
   const launchOptions = windowLaunchOptions.get(event.sender.id);
   const progressGeneration = (walkthroughProgressGenerations.get(event.sender.id) || 0) + 1;
@@ -1940,11 +1940,9 @@ ipcMain.handle('codiff:getNarrativeWalkthrough', async (event, source, options) 
 
   try {
     const { host, repositoryPath } = windowRepositories.get(event.sender.id);
-    const state = await readRepositoryStateWithConfig(
-      host,
-      repositoryPath,
-      source || launchOptions?.source,
-    );
+    if (!state || state.root !== repositoryPath || (state.hostId ?? 'local') !== host.id) {
+      throw new Error('Walkthrough snapshot does not match the connected repository.');
+    }
     const agent = resolveWindowAgent(event.sender.id);
     const walkthroughFile = launchOptions?.walkthroughFile;
     if (walkthroughFile) {
