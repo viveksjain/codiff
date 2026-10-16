@@ -15,7 +15,7 @@ const {
 } = require('./agent-shared.cjs');
 
 const CODEX_TIMEOUT_MS = 90_000;
-const DEFAULT_OPENAI_MODEL = 'gpt-5.6-terra';
+const DEFAULT_OPENAI_MODEL = 'gpt-6.1-sol';
 const FALLBACK_OPENAI_MODEL = 'gpt-5.5';
 const CODEX_REASONING_EFFORT = 'low';
 const CODEX_MACOS_BLOCKED_MESSAGE =
@@ -56,7 +56,7 @@ const CODEX_NOT_FOUND_MESSAGE =
 const OPENAI_MODELS = Object.freeze([
   {
     id: DEFAULT_OPENAI_MODEL,
-    label: 'Default: GPT-5.6 Terra',
+    label: 'Default: GPT-6.1 Sol',
   },
   {
     id: 'gpt-5.6-sol',
@@ -74,6 +74,7 @@ const OPENAI_MODELS = Object.freeze([
 const OPENAI_MODEL_REASONING_EFFORTS = new Map([
   [DEFAULT_OPENAI_MODEL, CODEX_REASONING_EFFORT],
   [FALLBACK_OPENAI_MODEL, CODEX_REASONING_EFFORT],
+  ['gpt-5.6-terra', CODEX_REASONING_EFFORT],
   ['gpt-5.6-sol', 'medium'],
   ['gpt-5.6-luna', 'medium'],
   ['gpt-6-astra', CODEX_REASONING_EFFORT],

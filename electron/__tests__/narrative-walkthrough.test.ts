@@ -471,21 +471,21 @@ test('uses GPT-5.5 for large walkthroughs only with automatic effort on the defa
     source: { type: 'working-tree' },
   });
   const codexAgent = {
-    defaultModel: 'gpt-5.6-terra',
+    defaultModel: 'gpt-6.1-sol',
     fallbackModel: 'gpt-5.5',
     id: 'codex',
     normalizeModel: (model: unknown) => String(model),
   };
 
-  expect(resolveNarrativeWalkthroughModel(createState(99), codexAgent, 'gpt-5.6-terra')).toBe(
-    'gpt-5.6-terra',
+  expect(resolveNarrativeWalkthroughModel(createState(99), codexAgent, 'gpt-6.1-sol')).toBe(
+    'gpt-6.1-sol',
   );
-  expect(resolveNarrativeWalkthroughModel(createState(100), codexAgent, 'gpt-5.6-terra')).toBe(
+  expect(resolveNarrativeWalkthroughModel(createState(100), codexAgent, 'gpt-6.1-sol')).toBe(
     'gpt-5.5',
   );
-  expect(
-    resolveNarrativeWalkthroughModel(createState(100), codexAgent, 'gpt-5.6-terra', 'max'),
-  ).toBe('gpt-5.6-terra');
+  expect(resolveNarrativeWalkthroughModel(createState(100), codexAgent, 'gpt-6.1-sol', 'max')).toBe(
+    'gpt-6.1-sol',
+  );
   expect(resolveNarrativeWalkthroughModel(createState(100), codexAgent, 'gpt-5.6-sol')).toBe(
     'gpt-5.6-sol',
   );

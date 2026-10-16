@@ -247,7 +247,11 @@ const generateAndShareWalkthrough = async (
   },
 ) => {
   const config = readConfig();
-  const agent = getAgentForHost(host, agentOverride || config.settings.agentBackend);
+  const agent = getAgentForHost(
+    host,
+    agentOverride || config.settings.agentBackend,
+    config.settings,
+  );
   const [state, uploader] = await readGeneratedShareState(host, repositoryPath, source, config);
   const sessionIds = {
     claudeSessionId,

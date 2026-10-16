@@ -4,6 +4,7 @@ const codex = require('./codex.cjs');
 const claude = require('./claude.cjs');
 const opencode = require('./opencode.cjs');
 const pi = require('./pi.cjs');
+const { createBashCommandTransport } = require('./agent-command.cjs');
 const { readCodexSessionContext } = require('./codex-session-context.cjs');
 const { readClaudeSessionContext } = require('./claude-session-context.cjs');
 const { readOpenCodeSessionContext } = require('./opencode-session-context.cjs');
@@ -186,9 +187,21 @@ const normalizeAgentBackend = (value) =>
 /** @param {unknown} backendId @returns {Agent} */
 const getAgent = (backendId) => AGENT_FACTORIES[normalizeAgentBackend(backendId)]();
 
-/** @param {import('./host/repository-host.cjs').RepositoryHost} host @param {unknown} backendId @returns {Agent} */
-const getAgentForHost = (host, backendId) => {
+/**
+ * @param {import('./host/repository-host.cjs').RepositoryHost} host
+ * @param {unknown} backendId
+ * @param {Partial<import('../core/config/types.ts').CodiffSettings>} [settings]
+ * @returns {Agent}
+ */
+const getAgentForHost = (host, backendId, settings = {}) => {
   const agent = getAgent(backendId);
+  const configuredCommand = (
+    agent.id === 'codex'
+      ? settings.codexCommand
+      : agent.id === 'claude'
+        ? settings.claudeCommand
+        : ''
+  )?.trim();
   const readers = {
     codex: readCodexSessionContext,
     claude: readClaudeSessionContext,
@@ -201,13 +214,23 @@ const getAgentForHost = (host, backendId) => {
   };
   return {
     ...agent,
-    isAvailable:
-      host.id === 'local' ? agent.isAvailable : async () => Boolean(await resolveCommand()),
+    isAvailable: configuredCommand
+      ? async () => Boolean(await host.resolveCommand('bash'))
+      : host.id === 'local'
+        ? agent.isAvailable
+        : async () => Boolean(await resolveCommand()),
     readSessionContext: (sessionId) => readers[agent.id](host, sessionId),
     run:
-      host.id === 'local'
+      host.id === 'local' && !configuredCommand
         ? agent.run
         : async (root, prompt, schema, outputName, timeoutMessage, options) => {
+            if (configuredCommand) {
+              return agent.run(root, prompt, schema, outputName, timeoutMessage, {
+                ...options,
+                repositoryHost: host,
+                commandTransport: await createBashCommandTransport(host, configuredCommand, root),
+              });
+            }
             const command = await resolveCommand();
             if (!command)
               throw Object.assign(new Error(`${agent.cliName} isn't installed on ${host.label}.`), {

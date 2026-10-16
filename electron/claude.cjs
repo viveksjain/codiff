@@ -13,7 +13,7 @@ const {
 
 // Claude Code can be slower to first token than Codex, so allow a longer budget.
 const CLAUDE_TIMEOUT_MS = 90_000;
-const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-5-5';
 const FALLBACK_CLAUDE_MODEL = 'claude-haiku-4-5';
 const CLAUDE_NOT_FOUND_CODE = 'CLAUDE_NOT_FOUND';
 const CLAUDE_NOT_FOUND_MESSAGE =
@@ -46,7 +46,7 @@ const CLAUDE_MODELS = Object.freeze([
   },
   {
     id: DEFAULT_CLAUDE_MODEL,
-    label: 'Balanced: Claude Sonnet 4.6',
+    label: 'Balanced: Claude Sonnet 5.5',
   },
   {
     id: FALLBACK_CLAUDE_MODEL,

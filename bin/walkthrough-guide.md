@@ -28,6 +28,9 @@ For stacked PRs, Codiff uses the commit range in the description's incremental r
 For an SSH repository, run Codiff on the laptop with a target such as
 `codiff --walkthrough devbox:~/src/app`. Generated walkthroughs use the selected
 agent CLI, credentials and linked-session transcripts on that remote host.
+`settings.codexCommand` and `settings.claudeCommand` in `~/.codiff/codiff.jsonc`
+can select Bash wrappers such as `isaac codex`; Codiff appends its CLI arguments
+and runs the command in the repository directory on the repository host.
 The selected agent must be installed there; Codiff reports a missing remote CLI
 without switching agents or running it locally. `--walkthrough-context` and `--walkthrough-file`
 still name local files on the laptop. To open an authored document against a remote

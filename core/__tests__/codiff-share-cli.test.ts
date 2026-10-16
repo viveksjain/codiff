@@ -338,9 +338,14 @@ test('headless walkthrough share resolves GitHub PR branch targets', async () =>
   expect(await readFile(ghArgsPath, 'utf8')).toContain('owner:merged-branch\n');
 });
 
-test.each(['', 'high', 'ultra'])(
-  'codiff --share uses configured effort %j, falls back to HEAD for a clean working tree, and prints only its URL',
-  async (reasoningEffort) => {
+test.each([
+  ['', false],
+  ['high', false],
+  ['ultra', false],
+  ['high', true],
+] as const)(
+  'codiff --share uses effort %j and command override %j, falls back to HEAD for a clean working tree, and prints only its URL',
+  async (reasoningEffort, useConfiguredCommand) => {
     await using directory = await createTemporaryDirectory('codiff-generate-share-');
     const repositoryPath = join(directory.path, 'repo');
     const fakeCodexPath = join(directory.path, 'codex');
@@ -352,6 +357,9 @@ test.each(['', 'high', 'ultra'])(
       JSON.stringify({
         settings: {
           agentBackend: 'codex',
+          codexCommand: useConfiguredCommand
+            ? `exec '${fakeCodexPath.replaceAll("'", String.raw`'\''`)}'`
+            : '',
           openAIModel: 'gpt-6.1-sol',
           openAIReasoningEffort: reasoningEffort,
         },
@@ -462,7 +470,7 @@ exit 1
         env: {
           ...process.env,
           CODEX_ARGS_FILE: codexArgsPath,
-          CODIFF_CODEX_PATH: fakeCodexPath,
+          CODIFF_CODEX_PATH: useConfiguredCommand ? '/codiff-missing-default-codex' : fakeCodexPath,
           CODIFF_SHARE_SERVER_URL: origin,
           HOME: homePath,
         },
@@ -472,13 +480,9 @@ exit 1
     const body = uploadedBody as unknown as UploadedBody;
     const codexArgs = (await readFile(codexArgsPath, 'utf8')).trimEnd().split('\n');
     expect(codexArgs[codexArgs.indexOf('-m') + 1]).toBe('gpt-6.1-sol');
-    if (reasoningEffort) {
-      expect(codexArgs[codexArgs.indexOf('-c') + 1]).toBe(
-        `model_reasoning_effort="${reasoningEffort}"`,
-      );
-    } else {
-      expect(codexArgs).not.toContain('-c');
-    }
+    expect(codexArgs[codexArgs.indexOf('-c') + 1]).toBe(
+      `model_reasoning_effort="${reasoningEffort || 'low'}"`,
+    );
     expect(stderr).toBe('');
     expect(stdout).toBe(`${origin}/w/generated-walkthrough\n`);
     expect(body.snapshot.repository).toMatchObject({

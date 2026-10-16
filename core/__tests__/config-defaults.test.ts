@@ -58,6 +58,23 @@ test('electron and renderer defaults match', () => {
   expect(createElectronDefaultConfig()).toEqual(createDefaultConfig());
 });
 
+test('agent command configuration preserves Bash syntax and rejects non-string values', () => {
+  expect(
+    readElectronConfig({
+      settings: {
+        claudeCommand: 'TOKEN="$CUSTOM_TOKEN" isaac claude',
+        codexCommand: '  isaac codex --profile "work profile"  ',
+      },
+    }).settings,
+  ).toMatchObject({
+    claudeCommand: 'TOKEN="$CUSTOM_TOKEN" isaac claude',
+    codexCommand: 'isaac codex --profile "work profile"',
+  });
+  expect(
+    readElectronConfig({ settings: { claudeCommand: null, codexCommand: 42 } }).settings,
+  ).toMatchObject({ claudeCommand: '', codexCommand: '' });
+});
+
 test('electron config normalizes code font settings', () => {
   expect(readElectronConfig({}).settings.codeFontFamily).toBe('');
   expect(readElectronConfig({}).settings.codeFontSize).toBe(13);
@@ -105,10 +122,19 @@ test('old configurations retain automatic reasoning and custom values survive sa
   mkdirSync(configDirectory);
   writeFileSync(
     join(configDirectory, 'codiff.jsonc'),
-    JSON.stringify({ settings: { openAIModel: 'gpt-6.1-sol', openAIReasoningEffort: ' high ' } }),
+    JSON.stringify({
+      settings: {
+        claudeCommand: 'source ~/.work-env && isaac claude',
+        codexCommand: 'isaac codex',
+        openAIModel: 'gpt-6.1-sol',
+        openAIReasoningEffort: ' high ',
+      },
+    }),
   );
   const config = readConfig();
   expect(config.settings).toMatchObject({
+    claudeCommand: 'source ~/.work-env && isaac claude',
+    codexCommand: 'isaac codex',
     openAIModel: 'gpt-6.1-sol',
     openAIReasoningEffort: 'high',
   });
@@ -119,6 +145,8 @@ test('old configurations retain automatic reasoning and custom values survive sa
   try {
     writeConfig({ ...config, settings: { ...config.settings, openAIReasoningEffort: 'ultra' } });
     expect(readConfig().settings).toMatchObject({
+      claudeCommand: 'source ~/.work-env && isaac claude',
+      codexCommand: 'isaac codex',
       openAIModel: 'gpt-6.1-sol',
       openAIReasoningEffort: 'ultra',
     });

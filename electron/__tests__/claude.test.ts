@@ -98,6 +98,7 @@ process.stdin.on('end', () => {
   ).resolves.toBe('{"version":1}');
 
   const args = (await readFile(argsPath, 'utf8')).trim().split('\n');
+  expect(args[args.indexOf('--model') + 1]).toBe('claude-sonnet-5-5');
   expect(args).toContain('-p');
   expect(args).toContain('json');
   expect(args).not.toContain('stream-json');

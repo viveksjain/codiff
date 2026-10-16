@@ -30,6 +30,7 @@ const {
 const { attachExternalLinkHandling } = require('./external-links.cjs');
 const { normalizeOpenAIModel } = require('./codex.cjs');
 const { readCodexModels } = require('./codex-models.cjs');
+const { createBashCommandTransport } = require('./agent-command.cjs');
 const { normalizeClaudeModel } = require('./claude.cjs');
 const { normalizeOpenCodeModel, renderOpenCodeCommand } = require('./opencode.cjs');
 const { createWalkthroughCommit } = require('./walkthrough-commit.cjs');
@@ -181,7 +182,8 @@ let config = createDefaultConfig();
 let codexModels;
 /** @type {Promise<void> | undefined} */
 let codexModelDiscovery;
-const codexModelDiscoveryAbort = new AbortController();
+let codexModelDiscoveryAbort = new AbortController();
+let codexModelDiscoveryCommand = '';
 
 /**
  * @type {Map<string, ReturnType<typeof createSkillInstaller>>}
@@ -261,6 +263,7 @@ const resolveWindowAgent = (webContentsId) => {
     override === 'codex' || override === 'claude' || override === 'opencode' || override === 'pi'
       ? override
       : config.settings.agentBackend,
+    config.settings,
   );
 };
 
@@ -684,15 +687,29 @@ const buildModelSubmenu = () => {
 };
 
 const loadCodexModels = () => {
-  codexModelDiscovery ??= readCodexModels({ signal: codexModelDiscoveryAbort.signal })
+  const command = config.settings.codexCommand;
+  if (command !== codexModelDiscoveryCommand) {
+    codexModelDiscoveryAbort.abort();
+    codexModelDiscoveryAbort = new AbortController();
+    codexModelDiscoveryCommand = command;
+    codexModelDiscovery = undefined;
+    codexModels = undefined;
+    Menu.setApplicationMenu(buildApplicationMenu());
+  }
+  const { signal } = codexModelDiscoveryAbort;
+  codexModelDiscovery ??= (async () =>
+    readCodexModels({
+      signal,
+      commandTransport: command ? await createBashCommandTransport(localHost, command) : undefined,
+    }))()
     .then((models) => {
-      if (models.length && !codexModelDiscoveryAbort.signal.aborted) {
+      if (models.length && !signal.aborted) {
         codexModels = models;
         Menu.setApplicationMenu(buildApplicationMenu());
       }
     })
     .catch(() => {
-      codexModelDiscovery = undefined;
+      if (!signal.aborted) codexModelDiscovery = undefined;
     });
   return codexModelDiscovery;
 };

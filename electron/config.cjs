@@ -285,12 +285,16 @@ const mergeConfig = (raw) => {
         typeof rawSettings.checkForUpdates === 'boolean'
           ? rawSettings.checkForUpdates
           : defaults.settings.checkForUpdates,
+      claudeCommand:
+        typeof rawSettings.claudeCommand === 'string' ? rawSettings.claudeCommand.trim() : '',
       claudeModel:
         typeof rawSettings.claudeModel === 'string'
           ? rawSettings.claudeModel
           : defaults.settings.claudeModel,
       codeFontFamily: normalizeCodeFontFamily(rawSettings.codeFontFamily),
       codeFontSize: normalizeCodeFontSize(rawSettings.codeFontSize),
+      codexCommand:
+        typeof rawSettings.codexCommand === 'string' ? rawSettings.codexCommand.trim() : '',
       copyCommentsOnClose:
         typeof rawSettings.copyCommentsOnClose === 'boolean'
           ? rawSettings.copyCommentsOnClose

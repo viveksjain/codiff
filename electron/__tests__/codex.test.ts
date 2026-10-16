@@ -166,6 +166,7 @@ test('runs Codex walkthroughs as fresh ephemeral repository-scoped calls', async
   ).resolves.toBe('{"version":1}');
 
   expect(calls[0].args).toContain('--ephemeral');
+  expect(getArgumentValue(calls[0].args, '-m')).toBe('gpt-6.1-sol');
   expect(calls[0].args).toContain('--json');
   expect(calls[0].args).toContain('--cd');
   expect(calls[0].args).toContain('/repo');
@@ -174,7 +175,7 @@ test('runs Codex walkthroughs as fresh ephemeral repository-scoped calls', async
 });
 
 test.each(['high', 'ultra'])(
-  'passes a custom Codex model with explicit %s effort to exec',
+  'passes the default Codex model with explicit %s effort to exec',
   async (effort) => {
     const { calls, transport } = createCommandTransport((commandProcess) => {
       commandProcess.stdin.on('finish', () => void completeCodexExec(commandProcess));
@@ -224,7 +225,7 @@ test('keeps an explicit effort override when an unavailable model falls back', a
   ).resolves.toBe('{"version":1}');
   expect(attempts).toEqual([
     'gpt-6.1-sol|model_reasoning_effort="high"',
-    'gpt-5.6-terra|model_reasoning_effort="high"',
+    'gpt-5.5|model_reasoning_effort="high"',
   ]);
 });
 
@@ -256,8 +257,8 @@ test('reports the unavailable selected model and a fallback effort error togethe
       const model = getArgumentValue(process.args, '-m') || '';
       attempts.push(model);
       process.stderr(
-        model === 'gpt-5.6-terra'
-          ? 'You do not have access to model gpt-5.6-terra.'
+        model === 'gpt-6.1-sol'
+          ? 'You do not have access to model gpt-6.1-sol.'
           : 'Model gpt-5.5 does not support reasoning effort ultra.',
       );
       process.close(1);
@@ -266,13 +267,13 @@ test('reports the unavailable selected model and a fallback effort error togethe
   await expect(
     runCodex('/repo', 'prompt', {}, undefined, undefined, {
       commandTransport: transport,
-      model: 'gpt-5.6-terra',
+      model: 'gpt-6.1-sol',
       reasoningEffort: 'ultra',
     }),
   ).rejects.toThrow(
-    'Codex model gpt-5.6-terra was unavailable: You do not have access to model gpt-5.6-terra. Fallback model gpt-5.5 failed: Model gpt-5.5 does not support reasoning effort ultra.',
+    'Codex model gpt-6.1-sol was unavailable: You do not have access to model gpt-6.1-sol. Fallback model gpt-5.5 failed: Model gpt-5.5 does not support reasoning effort ultra.',
   );
-  expect(attempts).toEqual(['gpt-5.6-terra', 'gpt-5.5']);
+  expect(attempts).toEqual(['gpt-6.1-sol', 'gpt-5.5']);
 });
 
 test('retries unavailable GPT-5.6 models with model-specific reasoning', async () => {
@@ -304,7 +305,7 @@ test('retries unavailable GPT-5.6 models with model-specific reasoning', async (
 
   expect(attempts).toEqual([
     'gpt-5.6-sol|model_reasoning_effort="medium"',
-    'gpt-5.6-terra|model_reasoning_effort="low"',
+    'gpt-6.1-sol|model_reasoning_effort="low"',
     'gpt-5.5|model_reasoning_effort="low"',
   ]);
   expect(fallbacks).toEqual([['gpt-5.5', 'gpt-5.6-sol']]);
@@ -314,7 +315,7 @@ test.each([
   'You do not have access to model gpt-6-sol.',
   'HTTP 403 Forbidden',
   'HTTP 404 Not Found',
-])('retries unavailable GPT-6 models with Terra before GPT-5.5: %s', async (message) => {
+])('retries unavailable GPT-6 models with GPT-6.1 Sol before GPT-5.5: %s', async (message) => {
   const attempts: Array<string> = [];
   const { transport } = createCommandTransport((commandProcess) => {
     commandProcess.stdin.on('finish', () => {
@@ -336,7 +337,7 @@ test.each([
     }),
   ).resolves.toBe('{"version":1}');
 
-  expect(attempts).toEqual(['gpt-6-sol', 'gpt-5.6-terra']);
+  expect(attempts).toEqual(['gpt-6-sol', 'gpt-6.1-sol']);
 });
 
 test('streams Codex app-server reasoning and message deltas as semantic progress', async () => {

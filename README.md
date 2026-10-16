@@ -194,14 +194,16 @@ counts; when it is `false`, Codiff hides those changes from the working-tree rev
   "$schema": "https://raw.githubusercontent.com/nkzw-tech/codiff/main/core/config/codiff-config.schema.json",
   "settings": {
     "agentBackend": "codex",
-    "claudeModel": "claude-sonnet-4-6",
+    "claudeCommand": "",
+    "claudeModel": "claude-sonnet-5-5",
     "codeFontFamily": "",
     "codeFontSize": 13,
+    "codexCommand": "",
     "copyCommentsOnClose": false,
     "diffStyle": "split",
     "editorCommand": "",
     "lastRepositoryPath": "",
-    "openAIModel": "gpt-5.6-terra",
+    "openAIModel": "gpt-6.1-sol",
     "openAIReasoningEffort": "",
     "opencodeModel": "opencode-default",
     "sidebarPosition": "left",
@@ -279,12 +281,33 @@ An explicit effort also applies to a fallback model; clear it to use that model'
 Walkthrough caches distinguish explicit reasoning efforts, so a new generation request with a
 different effort does not reuse the previous effort's result.
 
-Codex walkthroughs still default to GPT-5.6 Terra with low reasoning. GPT-5.6 Sol and Luna use
+Codex walkthroughs default to GPT-6.1 Sol with low reasoning. GPT-5.6 Sol and Luna use
 medium reasoning unless you override it. If a selected model is unavailable, Codiff retries with
-Terra when applicable and then GPT-5.5, persisting the first model that succeeds unless you changed
+GPT-6.1 Sol when applicable and then GPT-5.5, persisting the first model that succeeds unless you changed
 the selection during the run. Walkthroughs with at least 100 reviewable hunks use GPT-5.5 with low
-reasoning when Terra is the configured default and no explicit effort is configured. An explicit
+reasoning when GPT-6.1 Sol is the configured default and no explicit effort is configured. An explicit
 effort keeps the selected model for these large walkthroughs.
+
+Claude defaults to Claude Sonnet 5.5 (`claude-sonnet-5-5`).
+
+Set `settings.codexCommand` or `settings.claudeCommand` in `~/.codiff/codiff.jsonc` to
+invoke a wrapper or another Bash command:
+
+```jsonc
+{
+  "settings": {
+    "codexCommand": "isaac codex",
+    "claudeCommand": "isaac claude",
+  },
+}
+```
+
+Codiff runs the command through Bash and appends its CLI arguments, preserving their
+quoting. Commands can include environment assignments or setup such as
+`source ~/.work-env && isaac codex`. They run in the repository directory on the
+repository host, including SSH hosts. Bash must be available there. The Codex command
+also handles local model discovery. These settings take precedence over
+`CODIFF_CODEX_PATH` and `CODIFF_CLAUDE_PATH`; leave them empty to use automatic discovery.
 
 Install the backend you want and verify it is available before using `codiff -w`:
 
