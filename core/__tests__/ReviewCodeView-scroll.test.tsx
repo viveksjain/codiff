@@ -1871,8 +1871,6 @@ test('pointer-driven comment blurs preserve each newly focused editor across rep
   }
   await act(async () => textarea.focus());
   await setInputValue(textarea, 'Keep this draft.');
-  const lineElement = document.createElement('span');
-
   const moveFocusedCommentToLine = async (lineNumber: number, expectedCommentId: string) => {
     const focusedEditor = document.activeElement;
     const activeDraftBeforeBlur = getState().activeReviewCommentDraftRef.current;
@@ -1886,18 +1884,12 @@ test('pointer-driven comment blurs preserve each newly focused editor across rep
     expect(getState().activeReviewCommentDraftRef.current).toEqual(activeDraftBeforeBlur);
     expect(onUpdateComment).toHaveBeenCalledTimes(updateCountBeforeBlur);
 
-    const { item, onLineClick } = getReviewCodeViewHandlers();
+    const { item, onGutterUtilityClick, onLineSelectionEnd } = getReviewCodeViewHandlers();
     await act(async () => {
       dispatchTestPointerEvent('pointerup');
-      onLineClick(
-        {
-          annotationSide: 'additions',
-          event: nonInteractivePointerEvent,
-          lineElement,
-          lineNumber,
-        },
-        { item },
-      );
+      const range = { end: lineNumber, side: 'additions' as const, start: lineNumber };
+      onGutterUtilityClick(range, { item });
+      onLineSelectionEnd(range, { item });
     });
     expect(onUpdateComment).toHaveBeenCalledTimes(updateCountBeforeBlur);
 
@@ -2978,7 +2970,7 @@ test('pointer selection cancels pending modifier highlights and resumes after re
   }
 });
 
-test('line content clicks only ignore text selected on the clicked line', async () => {
+test('line content clicks preserve native text selection; the gutter creates comments', async () => {
   const onCreateComment = vi.fn();
   const file = createChangedFileWithPatch(
     'src/click.ts',
@@ -3024,13 +3016,7 @@ test('line content clicks only ignore text selected on the clicked line', async 
       { item },
     );
   });
-  expect(onCreateComment).toHaveBeenCalledTimes(1);
-  expect(onCreateComment).toHaveBeenLastCalledWith({
-    filePath: 'src/click.ts',
-    lineNumber: 1,
-    sectionId: 'src/click.ts:unstaged',
-    side: 'additions',
-  });
+  expect(onCreateComment).not.toHaveBeenCalled();
 
   const getComposedRanges = vi.fn(() => [
     {
@@ -3063,8 +3049,7 @@ test('line content clicks only ignore text selected on the clicked line', async 
         { item },
       );
     });
-    expect(getComposedRanges).toHaveBeenCalledWith({ shadowRoots: [shadowRoot] });
-    expect(onCreateComment).toHaveBeenCalledTimes(1);
+    expect(onCreateComment).not.toHaveBeenCalled();
 
     await act(async () => {
       onLineClick(
@@ -3077,20 +3062,14 @@ test('line content clicks only ignore text selected on the clicked line', async 
         { item },
       );
     });
-    expect(onCreateComment).toHaveBeenCalledTimes(2);
-    expect(onCreateComment).toHaveBeenLastCalledWith({
-      filePath: 'src/click.ts',
-      lineNumber: 2,
-      sectionId: 'src/click.ts:unstaged',
-      side: 'additions',
-    });
+    expect(onCreateComment).not.toHaveBeenCalled();
   }
 
   await act(async () => {
     onLineSelectionEnd(range, { item });
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  expect(onCreateComment).toHaveBeenCalledTimes(3);
+  expect(onCreateComment).toHaveBeenCalledTimes(1);
   expect(onCreateComment).toHaveBeenLastCalledWith({
     filePath: 'src/click.ts',
     lineNumber: 1,
@@ -3104,7 +3083,7 @@ test('line content clicks only ignore text selected on the clicked line', async 
     onLineSelectionEnd(range, { item });
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  expect(onCreateComment).toHaveBeenCalledTimes(4);
+  expect(onCreateComment).toHaveBeenCalledTimes(2);
 });
 
 test('viewed state and collapse synchronize when switching between tree and walkthrough', async () => {

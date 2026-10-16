@@ -146,6 +146,10 @@ export const codeViewUnsafeCSS = `
     pointer-events: none;
   }
 
+  [data-line] {
+    cursor: text;
+  }
+
   :host(.codiff-loadable-summary-item) [data-file] [data-line],
   :host(.codiff-loadable-summary-item) [data-file] [data-column-number] {
     cursor: pointer;

@@ -101,7 +101,6 @@ import {
   getCommentKey,
   getReviewCommentLineLabel,
   getReviewCommentsDigest,
-  hasActiveTextSelection,
   isFileReviewComment,
   isInteractiveReviewEvent,
   isLineReviewComment,
@@ -3730,25 +3729,7 @@ export function ReviewCodeView({
 
           if (shouldLoadDiffSectionContents(meta.section)) {
             onLoadSection(meta.file, meta.section);
-            return;
           }
-
-          if (hasActiveTextSelection(lineElement)) {
-            return;
-          }
-
-          const side = 'annotationSide' in line ? line.annotationSide : null;
-          if (!side) {
-            return;
-          }
-
-          cancelPendingEmptyCommentDeletes();
-          onCreateComment({
-            filePath: meta.file.path,
-            lineNumber: line.lineNumber,
-            sectionId: meta.section.id,
-            side,
-          });
         },
         onLineSelectionEnd: (range, context) => {
           if (isReadOnly || context.item.edit) {
@@ -3818,7 +3799,6 @@ export function ReviewCodeView({
       }) satisfies CodeViewOptions<ReviewAnnotationMetadata, undefined>,
     [
       bottomInset,
-      cancelPendingEmptyCommentDeletes,
       createCommentForRange,
       diffStyle,
       expandUnchanged,
@@ -3827,7 +3807,6 @@ export function ReviewCodeView({
       itemMetrics,
       loadDiffFiles,
       loadingSectionIds,
-      onCreateComment,
       onFindDefinitions,
       onLoadSection,
       selectedHeaderItemIds,
