@@ -85,7 +85,6 @@ import {
   getMarkdownPreviewContents,
   getSectionForFileDiff,
   getVisibleDiffSections,
-  isMarkdownFilePath,
   loadSectionContents,
   shouldLoadDiffSectionContents,
 } from '../../lib/diff.ts';
@@ -175,6 +174,9 @@ const isEditableWorkingTreeSection = (
   file.status !== 'deleted' &&
   file.sections.at(-1)?.id === section.id &&
   (section.kind === 'staged' || section.kind === 'unstaged');
+
+const shouldPreviewMarkdownByDefault = (file: ChangedFile) =>
+  file.status === 'added' || file.status === 'untracked';
 
 function CopyFilePathButton({ path }: { path: string }) {
   const [copied, markCopied] = useCopiedState(1600);
@@ -2780,23 +2782,13 @@ export function ReviewCodeView({
   );
   const ignoreNextLineSelectionEndRef = useRef(false);
   const navigatedSelectionRef = useRef<CodeViewLineSelection | null>(null);
-  const initialMarkdownFiles =
-    files.length > 0
-      ? files
-      : (blocks?.map((block) => block.file).filter((file): file is ChangedFile => file != null) ??
-        []);
-  const initialEditableMarkdownSections = !isReadOnly
-    ? initialMarkdownFiles.flatMap((file) => {
-        const section = file.sections.at(-1);
-        return section &&
-          isMarkdownFilePath(file.path) &&
-          isEditableWorkingTreeSection(source.type, file, section)
-          ? [section.id]
-          : [];
-      })
-    : [];
-  const [markdownPreviewSections, setMarkdownPreviewSections] = useState<ReadonlySet<string>>(
-    () => new Set([...initialMarkdownPreviewSectionIds, ...initialEditableMarkdownSections]),
+  const [markdownPreviewOverrides, setMarkdownPreviewOverrides] = useState<
+    ReadonlyMap<string, boolean>
+  >(() => new Map(Array.from(initialMarkdownPreviewSectionIds, (id) => [id, true])));
+  const isMarkdownPreviewEnabled = useCallback(
+    (file: ChangedFile, section: DiffSection) =>
+      markdownPreviewOverrides.get(section.id) ?? shouldPreviewMarkdownByDefault(file),
+    [markdownPreviewOverrides],
   );
   // Remeasure only after the preview's actual content height changes. Mounting
   // a loading placeholder must not invalidate a recycled document's layout.
@@ -3008,7 +3000,7 @@ export function ReviewCodeView({
           canRenderMarkdown &&
           !isReadOnly &&
           isEditableWorkingTreeSection(source.type, file, section);
-        const isMarkdownPreview = canRenderMarkdown && markdownPreviewSections.has(section.id);
+        const isMarkdownPreview = canRenderMarkdown && isMarkdownPreviewEnabled(file, section);
         const isSelected = block.fileSelected ?? block.selected ?? selectedPath === file.path;
         const reviewVersionPrefix = `${itemVersionByKey[reviewKey] ?? 0}:${block.id}:${
           reviewIdentity.fingerprint
@@ -3220,7 +3212,7 @@ export function ReviewCodeView({
     allowMarkdownEditing,
     itemVersionByKey,
     markdownPreviewLayoutPassBySection,
-    markdownPreviewSections,
+    isMarkdownPreviewEnabled,
     onLoadImageContent,
     reviewBlocks,
     selectedPath,
@@ -3543,11 +3535,7 @@ export function ReviewCodeView({
         onToggleCollapsed(meta.file, true, meta.reviewIdentity.key);
       }
       if (meta.isMarkdownPreview) {
-        setMarkdownPreviewSections((current) => {
-          const next = new Set(current);
-          next.delete(meta.section.id);
-          return next;
-        });
+        setMarkdownPreviewOverrides((current) => new Map(current).set(meta.section.id, false));
       }
       onCreateComment({
         anchor: 'file',
@@ -3910,7 +3898,7 @@ export function ReviewCodeView({
     async (file: ChangedFile, section: DiffSection) => {
       clearCommentLineHighlight();
       if (
-        markdownPreviewSections.has(section.id) &&
+        isMarkdownPreviewEnabled(file, section) &&
         isEditableWorkingTreeSection(source.type, file, section)
       ) {
         if (refreshingMarkdownSectionsRef.current.has(section.id)) {
@@ -3929,17 +3917,14 @@ export function ReviewCodeView({
           refreshingMarkdownSectionsRef.current.delete(section.id);
         }
       }
-      setMarkdownPreviewSections((current) => {
-        const next = new Set(current);
-        if (next.has(section.id)) {
-          next.delete(section.id);
-        } else {
-          next.add(section.id);
-        }
-        return next;
-      });
+      setMarkdownPreviewOverrides((current) =>
+        new Map(current).set(
+          section.id,
+          !(current.get(section.id) ?? shouldPreviewMarkdownByDefault(file)),
+        ),
+      );
     },
-    [clearCommentLineHighlight, markdownPreviewSections, onRefreshMarkdown, source.type],
+    [clearCommentLineHighlight, isMarkdownPreviewEnabled, onRefreshMarkdown, source.type],
   );
 
   const workerPoolOptions = useMemo(

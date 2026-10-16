@@ -46,15 +46,9 @@ import { createDefaultConfig } from './config/defaults.ts';
 import { matchesShortcut } from './config/keymap.ts';
 import { getAgentLabel } from './lib/app-constants.ts';
 import type { CodeViewInstance, ReviewComment, ReviewScrollTarget } from './lib/app-types.ts';
-import {
-  fileHasVisibleDiff,
-  getDiffLineCount,
-  getTotalDiffLineCount,
-  isMarkdownFilePath,
-} from './lib/diff.ts';
+import { fileHasVisibleDiff, getDiffLineCount, getTotalDiffLineCount } from './lib/diff.ts';
 import { abbreviateHomePath, fuzzyMatches, sortFiles } from './lib/files.ts';
 import { isNativeInputTarget } from './lib/keyboard.ts';
-import { isGeneratedWalkthroughFile } from './lib/narrative-walkthrough-diff.js';
 import {
   getPendingPullRequestReviewComments,
   getReviewCommentsFromState,
@@ -443,22 +437,6 @@ export function ReviewSurface({
     selectedPath && visibleFiles.some((file) => file.path === selectedPath)
       ? selectedPath
       : (visibleFiles[0]?.path ?? null);
-  const initialMarkdownPreviewSectionIds = useMemo(() => {
-    const nonGeneratedFiles = snapshot.files.filter((file) => !isGeneratedWalkthroughFile(file));
-    if (
-      nonGeneratedFiles.length === 0 ||
-      !nonGeneratedFiles.every((file) => isMarkdownFilePath(file.path))
-    ) {
-      return emptyPaths;
-    }
-
-    return new Set(
-      snapshot.files
-        .filter((file) => isMarkdownFilePath(file.path))
-        .flatMap((file) => file.sections.map((section) => section.id)),
-    );
-  }, [snapshot.files]);
-
   useDocumentAppearance({
     codeFontFamily: snapshot.preferences.codeFontFamily,
     codeFontSize: snapshot.preferences.codeFontSize,
@@ -936,7 +914,6 @@ export function ReviewSurface({
     focusCommentRequest,
     gitIdentity,
     hunkNavigation: null,
-    initialMarkdownPreviewSectionIds,
     isReadOnly: !canComment,
     itemVersionByKey,
     keymap,

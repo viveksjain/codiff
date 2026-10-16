@@ -199,6 +199,76 @@ const createCombinedFile = (contents: string, fingerprint: string) => {
   } satisfies ChangedFile;
 };
 
+const createAddedMarkdownFile = (): ChangedFile => {
+  const file = createChangedFile('plan.md', {
+    patch:
+      'diff --git a/plan.md b/plan.md\nnew file mode 100644\n--- /dev/null\n+++ b/plan.md\n@@ -0,0 +1 @@\n+# New document\n',
+    status: 'added',
+  });
+  return {
+    ...file,
+    sections: file.sections.map((section) => ({
+      ...section,
+      loadState: 'ready',
+      newFile: { contents: '# New document\n', name: file.path },
+    })),
+  };
+};
+
+test.each(['modified', 'renamed'] as const)(
+  '%s Markdown opens as a diff and can still be previewed',
+  async (status) => {
+    const file = { ...createLoadedMarkdownFile('# Edited\n', 'markdown-default'), status };
+    await using view = await renderReact(<ReviewCodeViewHarness files={[file]} />);
+    expect(view.container.querySelector('.codiff-markdown-preview')).toBeNull();
+    const toggle = view.container.querySelector<HTMLButtonElement>('.codiff-markdown-button');
+    expect(toggle?.textContent).toBe('View as Markdown');
+    await act(async () => toggle?.click());
+    expect(view.container.querySelector('.codiff-markdown-preview')).not.toBeNull();
+    expect(toggle?.textContent).toBe('View as Diff');
+  },
+);
+
+test.each([
+  { kind: 'unstaged', source: { type: 'working-tree' }, status: 'added' },
+  { kind: 'unstaged', source: { type: 'working-tree' }, status: 'untracked' },
+  { kind: 'commit', source: { ref: 'abcdef0', type: 'commit' }, status: 'added' },
+  {
+    kind: 'pull-request',
+    source: { type: 'pull-request', url: 'https://github.com/example/repo/pull/1' },
+    status: 'added',
+  },
+] as const)(
+  'new Markdown previews by default for $status/$kind',
+  async ({ kind, source, status }) => {
+    const addedFile = createAddedMarkdownFile();
+    const file = {
+      ...addedFile,
+      sections: addedFile.sections.map((section) => ({ ...section, kind })),
+      status,
+    };
+    await using view = await renderReact(<ReviewCodeViewHarness files={[file]} source={source} />);
+    expect(view.container.querySelector('.codiff-markdown-preview')).not.toBeNull();
+    const toggle = view.container.querySelector<HTMLButtonElement>('.codiff-markdown-button');
+    expect(toggle?.textContent).toBe('View as Diff');
+    await act(async () => toggle?.click());
+    expect(view.container.querySelector('.codiff-markdown-preview')).toBeNull();
+    await view.rerender(<ReviewCodeViewHarness files={[{ ...file }]} source={source} />);
+    expect(view.container.querySelector('.codiff-markdown-preview')).toBeNull();
+  },
+);
+
+test('new Markdown discovered after mounting uses its default preview', async () => {
+  const firstFile = createChangedFile('src/app.ts');
+  await using view = await renderReact(<ReviewCodeViewHarness files={[firstFile]} />);
+  await view.rerender(
+    <ReviewCodeViewHarness
+      files={[firstFile, { ...createAddedMarkdownFile(), status: 'untracked' }]}
+    />,
+  );
+  expect(view.container.querySelector('.codiff-markdown-preview')).not.toBeNull();
+});
+
 test('generated files are collapsed by default and can be explicitly expanded per review', async () => {
   const file = createChangedFile('src/__generated__/api.ts');
   const reviewKey = 'walkthrough:generated-api';
@@ -268,6 +338,7 @@ test('switching edited Markdown back to a diff flushes and refreshes it first', 
     return (
       <ReviewCodeViewHarness
         files={[file]}
+        initialMarkdownPreviewSectionIds={new Set(['plan.md:unstaged'])}
         onRefreshMarkdown={async () => {
           order.push('refresh');
           setFile(refreshedFile);
@@ -331,6 +402,7 @@ test('combined branch Markdown edits only the final working-tree section', async
     return (
       <ReviewCodeViewHarness
         files={[file]}
+        initialMarkdownPreviewSectionIds={new Set(['plan.md:unstaged'])}
         onRefreshMarkdown={async () => {
           order.push('refresh');
           setFile(refreshedFile);
@@ -1373,7 +1445,12 @@ test('hunk navigation skips pull request description source context', async () =
 test('markdown preview files survive layout updates in the real virtualized renderer', async () => {
   await preloadHighlighter({ langs: ['text'], themes: ['github-dark'] });
   const file = createLoadedMarkdownFile('# Readme\n', 'markdown-layout');
-  await using app = await renderReact(<ReviewCodeViewHarness files={[file]} />);
+  await using app = await renderReact(
+    <ReviewCodeViewHarness
+      files={[file]}
+      initialMarkdownPreviewSectionIds={new Set(['plan.md:unstaged'])}
+    />,
+  );
   const root = document.createElement('div');
   root.className = 'code-view';
   document.body.append(root);
@@ -1530,7 +1607,12 @@ test('Markdown previews reserve their last measured height while a recycled edit
   const file = createLoadedMarkdownFile('# Document\n', 'markdown-loading');
   const itemId = 'diff:plan.md:unstaged';
   markdownEditorMock.heightByAriaLabel.set('Edit plan.md', 5000);
-  await using app = await renderReact(<ReviewCodeViewHarness files={[file]} />);
+  await using app = await renderReact(
+    <ReviewCodeViewHarness
+      files={[file]}
+      initialMarkdownPreviewSectionIds={new Set(['plan.md:unstaged'])}
+    />,
+  );
   const rerender = () => app.rerender(<ReviewCodeViewHarness files={[file]} />);
   const remountLoadingEditor = async () => {
     codeViewMock.hiddenAnnotationItemIds.add(itemId);
