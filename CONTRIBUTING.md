@@ -1,5 +1,9 @@
 # Contributing to Codiff
 
+These instructions apply to [viveksjain/codiff](https://github.com/viveksjain/codiff), a fork of
+[nkzw-tech/codiff](https://github.com/nkzw-tech/codiff). Open fork-specific issues and pull requests
+in this repository. See the [README](README.md) for the fork's behavior and installation options.
+
 ## AI Assistance Notice
 
 > [!IMPORTANT]
@@ -29,7 +33,7 @@ for inspiring this policy.
 
 ## Requirements
 
-Codiff uses Node.js 24, pnpm 11, and
+Codiff uses Node.js 24, pnpm 12 (pinned in `package.json`), and
 [Vite+](https://viteplus.dev/). Install Vite+ before working in the repository.
 
 You will also need Git. The native application requires a platform supported by
@@ -41,7 +45,7 @@ From the repository root:
 
 ```bash
 vp install
-vp run build
+vpr build
 ```
 
 The first build creates the package output consumed by the desktop application
@@ -69,6 +73,23 @@ vp run electron
 
 Changes to `core/`, Electron code, or CLI behavior should include focused tests
 under the corresponding `__tests__` directory.
+
+### Repository Hosts and SSH Tests
+
+Repository operations receive a `RepositoryHost`: `LocalHost` for this machine or `SshHost`
+for a remote machine. Use that host for filesystem and process operations on the repository;
+paths belong to the host and may not exist locally. The
+[boundary test](electron/__tests__/repository-host-boundary.test.ts) enforces this separation.
+Agent CLIs and session transcripts also belong to the repository host; PR/MR provider CLIs run locally.
+
+SSH tests start a disposable `sshd` on loopback with temporary keys and configuration. Install
+OpenSSH client/server tools to run them. On Linux, `sshd` may also require `/run/sshd` to exist;
+the [test workflow](.github/workflows/test.yml) sets it up and installs zsh and fish for shell coverage.
+Run the repository suites through SSH with the command in the
+[SSH validation guide](docs/superpowers/ssh-remote-validation.md#automated-verification).
+
+When changing walkthrough behavior, also review `bin/walkthrough-guide.md`, which is exposed
+to authoring agents by `codiff --walkthrough-guide`.
 
 ## Public Web Service
 
@@ -219,7 +240,7 @@ Before opening a pull request, run:
 ```bash
 vp check --fix
 vp test
-vp run build
+vpr build
 ```
 
 Changes to public authentication, sharing, storage, quotas, or comments should
@@ -232,7 +253,7 @@ vp run test:integration
 This builds the Worker and exercises the public sharing flow against local D1
 and R2 bindings.
 
-`vp run build` builds Core, the sharing service, the public website, and the
+`vpr build` builds Core, the sharing service, the public website, and the
 desktop renderer in dependency order. If an `@nkzw/codiff-core` or
 `@nkzw/codiff-service` module cannot be resolved, rebuild from the repository
 root.
@@ -245,3 +266,5 @@ vp test path/to/file.test.ts
 
 For UI changes, test the affected desktop or web workflow and include
 screenshots in the pull request when they help reviewers verify the result.
+
+For native packaging and fork releases, see [Distribution](docs/distribution.md).

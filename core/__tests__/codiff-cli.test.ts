@@ -992,6 +992,7 @@ test('parseArguments defaults help and version to false', () => {
 
 test('formatHelpText includes version and all flags', () => {
   const text = formatHelpText('1.2.3');
+  expect(text).not.toContain('codiff update');
   expect(text).toContain('codiff v1.2.3');
   expect(text).toContain('Usage:');
   expect(text).toContain('--help');

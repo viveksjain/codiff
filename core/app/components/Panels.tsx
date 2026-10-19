@@ -25,7 +25,6 @@ import type { RepositoryLoadError, ReviewComment } from '../../lib/app-types.ts'
 import { buildReviewCommentsMarkdown } from '../../lib/review-comments.ts';
 import type {
   ChangedFile,
-  CodiffUpdateStatus,
   PullRequestMergeOptions,
   PullRequestMergeState,
   PullRequestReviewEvent,
@@ -105,82 +104,6 @@ export function RepositoryChangeBanner({
           <X aria-hidden className="diff-search-icon" size={15} weight="bold" />
         </button>
       )}
-    </div>
-  );
-}
-
-export type { CodiffUpdateStatus as UpdateStatus } from '../../types.ts';
-
-export function UpdatePill({
-  onApply,
-  onDismiss,
-  status,
-}: {
-  onApply: () => void;
-  onDismiss?: () => void;
-  status: CodiffUpdateStatus;
-}) {
-  const { currentVersion, message, phase, strategy, version } = status;
-
-  if (phase === 'idle') {
-    return null;
-  }
-
-  const actionable = phase === 'available' || phase === 'error';
-  const applyEffect =
-    strategy === 'squirrel'
-      ? 'Downloads the update and restarts the app.'
-      : strategy === 'download'
-        ? 'Downloads and opens the update. Quit Codiff to finish installing.'
-        : strategy === 'manual'
-          ? 'Opens the download page for the new version.'
-          : 'Downloads the update.';
-  const title =
-    phase === 'available'
-      ? `Update Codiff${version ? ` v${currentVersion} -> v${version}` : ''}. ${applyEffect}`
-      : phase === 'updating'
-        ? version
-          ? `Updating to Codiff ${version}…`
-          : 'Updating Codiff…'
-        : phase === 'installerReady'
-          ? 'The installer was downloaded and opened. Quit Codiff to finish updating.'
-          : `${message ?? 'Something went wrong while updating.'} Click to try again.`;
-
-  return (
-    <div aria-live="polite" className="update-pill-anchor">
-      <Button
-        className={`update-pill ${phase === 'installerReady' ? 'installer-ready' : phase}`}
-        disabled={!actionable}
-        onClick={onApply}
-        title={title}
-        type="button"
-      >
-        {phase === 'updating' ? (
-          <CircleNotch aria-hidden className="update-pill-spinner" size={14} weight="bold" />
-        ) : phase === 'error' ? (
-          <WarningOctagon aria-hidden size={14} weight="bold" />
-        ) : null}
-        <span>
-          {phase === 'available'
-            ? 'Update'
-            : phase === 'updating'
-              ? 'Updating…'
-              : phase === 'installerReady'
-                ? 'Quit to finish update'
-                : 'Update failed. Try again'}
-        </span>
-      </Button>
-      {actionable && onDismiss ? (
-        <button
-          aria-label="Dismiss update"
-          className="update-pill-dismiss"
-          onClick={onDismiss}
-          title="Dismiss"
-          type="button"
-        >
-          <X aria-hidden size={13} weight="bold" />
-        </button>
-      ) : null}
     </div>
   );
 }

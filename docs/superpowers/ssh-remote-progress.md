@@ -1,7 +1,9 @@
 # SSH remote repositories: overall progress
 
-All five implementation phases are complete locally as of October 11, 2026. Work stays on the
-current branch and has not been pushed. External release validation remains in the
+All five implementation phases were completed locally on October 11, 2026 and are included in
+this fork's `v2.0.0` release. The results below record that implementation checkpoint; subsequent
+connection, launch and test-readiness fixes are in the Git history. External release validation
+has not been recorded here and remains in the
 [release checklist](ssh-remote-validation.md#external-release-checklist).
 
 | Phase               | Local result                                                                                                                                                                               | Commit / plan                                                                                      |
@@ -12,7 +14,7 @@ current branch and has not been pushed. External release validation remains in t
 | 4: walkthroughs     | Remote login environment, host-bound agents and session readers, remote temp/output cleanup and remote walkthrough sharing complete.                                                       | `b86f693`; [Phase 4 plan](plans/2026-10-10-ssh-remote-phase-4-walkthroughs.md)                     |
 | 5: completion       | Incremental OpenCode progress/UTF-8 decoding, identical-path host isolation tests, menu order, fish completion and Git process-budget fixes, optimized status benchmark and docs complete. | `58c84bf`, `1633d2b`, `c1e81f0`; [Phase 5 plan](plans/2026-10-11-ssh-remote-phase-5-completion.md) |
 
-## Final validation
+## Implementation checkpoint validation (October 11, 2026)
 
 - Full root suite: 131 suites passed; 1,393 tests passed and one skipped.
 - Repository operations over genuine SSH: all nine suites and 164 tests passed.
@@ -27,7 +29,8 @@ measures LocalHost 78.58 ms and SshHost 159.29 ms (2.027×) after optimization, 
 SSH before optimization. See the
 [benchmark method and results](ssh-remote-validation.md#reproduce-the-performance-benchmark).
 
-The TypeScript gate uses the Phase 4 completion baseline of 278 existing errors and checks each
-file for increases. A successful gate does not mean the whole repository is TypeScript-clean.
+The implementation's TypeScript gate used the Phase 4 completion baseline of 278 existing errors
+and checked each file for increases. Passing that gate did not establish that the whole repository
+was TypeScript-clean.
 Ignored per-phase `.superpowers/sdd/.../progress.md` ledgers retain detailed local test evidence
 and handoff history. This tracked document is the canonical overall progress record.

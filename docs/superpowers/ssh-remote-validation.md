@@ -1,7 +1,8 @@
 # SSH remote repository validation
 
 Local implementation is complete. This record distinguishes automated localhost coverage from
-checks that require external machines, credentials, or CI. No commits have been pushed for this work.
+checks that require external machines, credentials, or CI. The implementation is included in this
+fork's `v2.0.0` release; the benchmark and test counts below describe the October 11, 2026 checkpoint.
 
 ## Reproduce the performance benchmark
 
@@ -35,11 +36,29 @@ empty files, symlinks, missing paths, directories, FIFOs and changing file sizes
 
 ## Automated verification
 
-Final results are recorded in [overall progress](ssh-remote-progress.md). Run the root suite with
-`vp test`, the repository suites with `CODIFF_TEST_HOST=ssh`, and the sharing integration package
-with `vp run --filter '@nkzw/codiff-integration-tests' test`. The integration suite uses local
-Miniflare and mocked GitHub requests. Run `vp check --fix` followed by `vpr build` after code changes.
-TypeScript has a pre-existing baseline of 278 errors; completion requires no increase per file.
+Checkpoint results are recorded in [overall progress](ssh-remote-progress.md). Run the root suite
+with `vp test` and the repository suites over SSH with:
+
+```bash
+CODIFF_TEST_HOST=ssh vp test \
+  core/__tests__/git-state.test.ts \
+  core/__tests__/git-files.test.ts \
+  electron/__tests__/repository-watcher.test.ts \
+  electron/__tests__/definition-search.test.ts \
+  electron/__tests__/walkthrough-commit.test.ts \
+  electron/__tests__/repository-file.test.ts \
+  electron/__tests__/window-identity.test.ts \
+  electron/__tests__/review-source.test.ts \
+  electron/__tests__/git-identity.test.ts
+```
+
+This matches the SSH suite selection in [CI](../../.github/workflows/test.yml). The fixture needs
+OpenSSH client/server tools and uses disposable loopback connections rather than an existing host.
+
+Run `vpr test:integration` to build and test sharing with local Miniflare and mocked GitHub requests.
+Run `vp check --fix` followed by `vpr build` after code changes. The implementation checkpoint had
+278 TypeScript errors and used a per-file no-increase gate; that historical count is not a fresh
+validation result for the current branch.
 
 Automated SSH fixtures cover real system SSH, master reuse and cleanup, a two-hop ProxyJump,
 binary/path escaping, GNU/BSD stat parsing, disconnect/reconnect, channel limits, abort/timeout
@@ -49,7 +68,7 @@ a real fish login shell connection below.
 
 ## External release checklist
 
-These checks remain unchecked and must be performed before release:
+These checks have no recorded results here. Verify them against the commits being released:
 
 - [ ] Linux CI against these exact commits, including the localhost sshd suites and benchmark.
 - [ ] A remote whose login shell is fish: open, stage, commit and run a walkthrough.
@@ -59,6 +78,7 @@ These checks remain unchecked and must be performed before release:
 - [ ] Laptop sleep/network interruption followed by Reconnect and a successful write action.
 - [ ] Real Claude and Codex remote walkthroughs with authenticated provider accounts.
 
-The user's no-push instruction prevents running CI on these local commits. The manual checks
-need the corresponding remote setups and provider credentials. They are release gates rather
-than unfinished local implementation tasks.
+The [test workflow](../../.github/workflows/test.yml) now includes the repository suites over SSH
+on Linux. Record a passing run for the release commits before checking off Linux validation.
+The manual checks need the corresponding remote setups and provider credentials; publishing
+a release does not establish that these checks passed.

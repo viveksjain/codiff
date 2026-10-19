@@ -108,9 +108,6 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
     allowPositionals: true,
     args,
     options: {
-      'apply-update': {
-        type: 'boolean',
-      },
       commit: {
         type: 'string',
       },
@@ -322,7 +319,6 @@ const parseCommandLineArguments = (commandLine = process.argv) => {
   return {
     launchOptions: {
       ...(remoteTarget && sourceCandidate ? { remoteSourceCandidate: sourceCandidate } : {}),
-      ...(values['apply-update'] === true ? { applyUpdate: true } : {}),
       ...(agentBackend ? { agentBackend } : {}),
       ...(claudeSessionId ? { claudeSessionId } : {}),
       ...(codexSessionId ? { codexSessionId } : {}),

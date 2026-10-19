@@ -18,7 +18,6 @@ const { getCommandLineLaunchOptions, getCommandLineRepositoryPath, getInitialRep
       commandLine: ReadonlyArray<string>,
       fallbackPath?: string,
     ) => {
-      applyUpdate?: boolean;
       codexSessionId?: string;
       planFile?: string;
       planResultFile?: string;
@@ -72,9 +71,8 @@ const defaultLaunchOptions = {
   walkthrough: false,
 };
 
-test('parses the apply-update launch flag', () => {
-  expect(getCommandLineLaunchOptions(['codiff', '--apply-update']).applyUpdate).toBe(true);
-  expect(getCommandLineLaunchOptions(['codiff', '/repo']).applyUpdate).toBeUndefined();
+test('ignores the retired apply-update launch flag', () => {
+  expect(getCommandLineLaunchOptions(['codiff', '--apply-update'])).toEqual(defaultLaunchOptions);
 });
 
 test('parses the OpenCode agent override', () => {

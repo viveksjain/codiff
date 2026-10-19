@@ -6,7 +6,6 @@ import type {
   CodiffLaunchOptions,
   CodiffMarkdownDocument,
   CodiffPreferences,
-  CodiffUpdateStatus,
   DefinitionSearchRequest,
   DefinitionSearchResult,
   DiffImageContentRequest,
@@ -49,14 +48,12 @@ declare module '*.css';
 declare global {
   interface Window {
     codiff: {
-      applyUpdate: () => Promise<CodiffUpdateStatus>;
       askReviewAssistant: (request: ReviewAssistantRequest) => Promise<ReviewAssistantResult>;
       completePlan: (review: PlanReview, status: PlanHandoffStatus) => Promise<void>;
       createWalkthroughCommit: (
         request: WalkthroughCommitRequest,
       ) => Promise<WalkthroughCommitResult>;
       decreaseCodeFontSize: () => Promise<void>;
-      dismissUpdate: () => Promise<CodiffUpdateStatus>;
       findDefinitions: (request: DefinitionSearchRequest) => Promise<DefinitionSearchResult>;
       getAgentSkillStatus: () => Promise<AgentSkillStatus>;
       getConfig: () => Promise<CodiffConfig>;
@@ -85,7 +82,6 @@ declare global {
         onTrackedState?: (state: RepositoryState) => void,
       ) => Promise<RepositoryState>;
       getTerminalHelperStatus: () => Promise<TerminalHelperStatus>;
-      getUpdateStatus: () => Promise<CodiffUpdateStatus>;
       increaseCodeFontSize: () => Promise<void>;
       installAgentSkill: () => Promise<AgentSkillStatus>;
       installTerminalHelper: () => Promise<TerminalHelperStatus>;
@@ -108,13 +104,11 @@ declare global {
       onRefreshRequest: (callback: () => void) => () => void;
       onRepositoryChanged: (callback: (change: { root: string }) => void) => () => void;
       onRepositoryHostChanged: (callback: (info: RepositoryHostInfo) => void) => () => void;
-      onUpdateStatusChanged: (callback: (status: CodiffUpdateStatus) => void) => () => void;
       onWalkthroughCommitOutput: (callback: (chunk: string) => void) => () => void;
       onWalkthroughProgress: (callback: (progress: WalkthroughProgressEvent) => void) => () => void;
       onWindowFullScreenChanged: (callback: (isFullScreen: boolean) => void) => () => void;
       openConfigFile: () => Promise<void>;
       openFile: (path: string, lineNumber?: number) => Promise<void>;
-      openReleasePage: () => Promise<void>;
       openRemoteRepository: (target: string) => Promise<void>;
       openRepositoryFolder: () => Promise<void>;
       reconnectRepositoryHost: () => Promise<RepositoryHostInfo>;

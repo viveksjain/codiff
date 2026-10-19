@@ -408,10 +408,6 @@ const createCommitMetadataFixture = (body: string): CommitMetadata => ({
 });
 
 const createCodiffMock = (overrides: Partial<Window['codiff']> = {}): Window['codiff'] => ({
-  applyUpdate: vi.fn(async () => ({
-    currentVersion: '1.9.2',
-    phase: 'idle' as const,
-  })),
   askReviewAssistant: vi.fn(async () => ({
     reason: 'Unavailable in tests.',
     status: 'unavailable' as const,
@@ -422,10 +418,6 @@ const createCodiffMock = (overrides: Partial<Window['codiff']> = {}): Window['co
     status: 'committed' as const,
   })),
   decreaseCodeFontSize: vi.fn(async () => {}),
-  dismissUpdate: vi.fn(async () => ({
-    currentVersion: '1.9.2',
-    phase: 'idle' as const,
-  })),
   findDefinitions: vi.fn(async (request) => ({
     candidates: [],
     identifier: request.identifier,
@@ -513,10 +505,6 @@ const createCodiffMock = (overrides: Partial<Window['codiff']> = {}): Window['co
     installed: true,
     path: '/usr/local/bin/codiff',
   })),
-  getUpdateStatus: vi.fn(async () => ({
-    currentVersion: '1.9.2',
-    phase: 'idle' as const,
-  })),
   increaseCodeFontSize: vi.fn(async () => {}),
   installAgentSkill: vi.fn(async () => ({
     installed: true,
@@ -540,13 +528,11 @@ const createCodiffMock = (overrides: Partial<Window['codiff']> = {}): Window['co
   onRefreshRequest: vi.fn(() => () => {}),
   onRepositoryChanged: vi.fn(() => () => {}),
   onRepositoryHostChanged: vi.fn(() => () => {}),
-  onUpdateStatusChanged: vi.fn(() => () => {}),
   onWalkthroughCommitOutput: vi.fn(() => () => {}),
   onWalkthroughProgress: vi.fn(() => () => {}),
   onWindowFullScreenChanged: vi.fn(() => () => {}),
   openConfigFile: vi.fn(async () => {}),
   openFile: vi.fn(async () => {}),
-  openReleasePage: vi.fn(async () => {}),
   openRemoteRepository: vi.fn(async () => {}),
   openRepositoryFolder: vi.fn(async () => {}),
   reconnectRepositoryHost: vi.fn(async () => ({

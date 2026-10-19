@@ -58,6 +58,16 @@ test('electron and renderer defaults match', () => {
   expect(createElectronDefaultConfig()).toEqual(createDefaultConfig());
 });
 
+test.each([true, false])('ignores the retired update setting (%s) in existing configs', (value) => {
+  const config = readElectronConfig({
+    settings: { checkForUpdates: value, theme: 'dark' },
+  });
+
+  expect(config.settings).not.toHaveProperty('checkForUpdates');
+  expect(config.settings.theme).toBe('dark');
+  expect(createDefaultConfig().settings).not.toHaveProperty('checkForUpdates');
+});
+
 test('agent command configuration preserves Bash syntax and rejects non-string values', () => {
   expect(
     readElectronConfig({

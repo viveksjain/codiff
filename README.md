@@ -2,27 +2,32 @@
 
 Codiff is a beautiful, minimal, local diff viewer for reviewing Git changes and committing them.
 
+This is [Vivek Jain's fork](https://github.com/viveksjain/codiff) of
+[nkzw-tech/codiff](https://github.com/nkzw-tech/codiff), originally created by Christoph Nakazawa.
+The documentation below describes this fork's `main` branch.
+
 <img width="48%" src="https://github.com/user-attachments/assets/9801587d-5879-461a-b375-9fbfa3c5f25d" />
 <img width="48%" src="https://github.com/user-attachments/assets/8b92902b-1112-4553-ba59-74e84a61ca7d" />
 
 ## Why Codiff
 
-- **Fast Local Reviews:** Review and commit changes in any Git repository.
-- **LLM Walkthroughs:** Run `codiff -w` to generate an optimized commit walkthrough.
+- **Fast Reviews:** Review changes in very large repositories. Shows tracked changes, while untracked files are still being discovered.
+- **LLM Walkthroughs:** Run `codiff -w` to generate a walkthrough of the changes. Configure Codex or Claude command wrappers for local and remote agents.
+- **Remote SSH Support:** Review, stage, discard, commit, and run walkthroughs on a remote host using your existing SSH setup.
+- **GitHub Reviews:** Open a PR URL from any directory. Patches, context, images, and history come from GitHub's API, including incremental ranges for stacked PRs.
 - **Inline Review Comments:** Comment directly on GitHub pull requests and GitLab merge requests, or copy review comments as Markdown for follow-ups.
 - **Lightweight Definition Navigation:** Mod/Ctrl-click an identifier to find likely local definitions without starting a language server.
 
 ## Download
 
-Install with Homebrew:
-
-```bash
-brew install --cask nkzw-tech/tap/codiff
-```
-
-Download the latest Codiff app from [GitHub Releases](https://github.com/nkzw-tech/codiff/releases).
+Download this fork from [viveksjain/codiff Releases](https://github.com/viveksjain/codiff/releases).
+The `v2.0.0` release provides an Apple Silicon macOS ZIP. For other platforms or the latest
+changes, [build from source](#development).
 
 After installing the app, run `Codiff > Install Terminal Helper` to make the `codiff` command available in your shell.
+
+This branch has no built-in update checker or installer. Install new fork releases manually,
+or pull and rebuild a source checkout to update.
 
 ## Command Line
 
@@ -34,6 +39,12 @@ Run it from any Git repository, or pass a path:
 
 ```bash
 codiff /path/to/repository
+```
+
+Open a remote repository over SSH ([more details below](#remote-repositories-over-ssh)):
+
+```bash
+codiff 'devbox:~/src/app'
 ```
 
 Like `git diff <ref>`, pass a branch or commit to review the working tree against it, as one
@@ -68,10 +79,17 @@ Diffs, expanded context, images, walkthroughs, and PR history use the same range
 GitHub's API, without cloning or fetching commits. Old-side inline GitHub comments require
 the full PR's line numbers; use a new-side comment, a general review, or GitHub for those.
 
-Full GitHub and GitLab review URLs are also supported. GitHub PR URLs work from any directory,
-without a local checkout or matching remote, using your authenticated `gh` CLI.
-GitLab hosts and nested project paths are
-derived from the URL or local Git remote and authenticated through `glab`; Codiff does not require
+Full GitHub and GitLab review URLs are also supported:
+
+```bash
+codiff https://github.com/owner/repo/pull/75
+```
+
+GitHub PR URLs work from any directory, without a local checkout or matching remote, using
+your authenticated `gh` CLI. Run `gh auth login` first. Codiff reads PR data through GitHub's
+API without fetching Git objects into your clone. Numeric and branch-based PR lookup still
+use the current repository's remotes. GitLab hosts and nested project paths are derived from
+the URL or local Git remote and authenticated through `glab`; Codiff does not require
 instance-specific configuration.
 
 Start with an LLM-generated narrative walkthrough. When generating a walkthrough without an
@@ -113,6 +131,12 @@ codiff --completions zsh > ~/.zsh/completions/_codiff
 ```
 
 Launching Codiff in multiple repositories opens a separate native window for each repository.
+
+## Markdown Reviews
+
+Changes to existing Markdown files open as diffs, including in shared walkthroughs and reviews
+containing only Markdown files. Added and untracked Markdown files open as rendered Markdown.
+Use **View as Markdown** or **View as Diff** in a file's header to switch views.
 
 ## Remote Repositories over SSH
 
@@ -156,9 +180,6 @@ If the connection drops, Codiff keeps the loaded review visible, disables write 
 **Reconnect**. For a `ProxyJump` failure whose app diagnostic is unclear, run `ssh devbox` in a
 terminal to see the underlying SSH diagnostic.
 
-See [SSH implementation progress](docs/superpowers/ssh-remote-progress.md) and
-[validation and release checks](docs/superpowers/ssh-remote-validation.md).
-
 ## Command Bar
 
 Open the command bar with <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> on macOS, or
@@ -191,7 +212,7 @@ counts; when it is `false`, Codiff hides those changes from the working-tree rev
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/nkzw-tech/codiff/main/core/config/codiff-config.schema.json",
+  "$schema": "https://raw.githubusercontent.com/viveksjain/codiff/main/core/config/codiff-config.schema.json",
   "settings": {
     "agentBackend": "codex",
     "claudeCommand": "",
@@ -263,6 +284,9 @@ application menu:
 - `opencode` — the [OpenCode](https://opencode.ai/) CLI, configured with
   `settings.opencodeModel`.
 - `pi` — the Pi CLI, using its configured default model.
+
+Generating a walkthrough in the app uses its loaded diff snapshot. Refresh the repository view
+first if you want to include newer changes.
 
 The Codex `Model` and `Reasoning Effort` menus load the installed CLI's model catalog in the
 background. They offer its visible models and supported reasoning efforts, including new models
@@ -365,9 +389,13 @@ shim while the walkthrough sees the original conversation context without a loss
 
 ## Development
 
+Clone this fork and build all workspace packages before launching the app:
+
 ```bash
+git clone https://github.com/viveksjain/codiff.git
+cd codiff
 vp install
-vp build
+vpr build
 vpr codiff
 ```
 
@@ -385,9 +413,9 @@ repository, run `vpr example:definition-navigation`. See the
 Useful checks:
 
 ```bash
-vp check
+vp check --fix
 vp test
-vp build
+vpr build
 ```
 
 Run `vpr test:integration` to build and test the public sharing service in the local
